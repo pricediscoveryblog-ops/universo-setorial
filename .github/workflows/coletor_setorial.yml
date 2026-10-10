@@ -1,0 +1,70 @@
+name: coletor-setorial
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "universo (todas as empresas) ou grupos (grupos.yaml)"
+        required: true
+        default: "universo"
+        type: choice
+        options: [universo, grupos]
+      grupo:
+        description: "Só no modo grupos: nome do grupo (vazio = todos)"
+        required: false
+        default: ""
+  schedule:
+    # dia 20 de cada mês, 09:00 BRT (12:00 UTC): pega DFPs, ITRs e reapresentações do mês
+    - cron: "0 12 20 * *"
+
+permissions:
+  contents: write
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache dos ZIPs da CVM
+        uses: actions/cache@v4
+        with:
+          path: cache_cvm
+          key: cvm-docs-${{ github.run_id }}
+          restore-keys: |
+            cvm-docs-
+            cvm-dfp-
+
+      - run: pip install -r requirements.txt
+
+      - name: Garantir .gitignore do cache CVM
+        run: grep -qx "cache_cvm/" .gitignore 2>/dev/null || echo "cache_cvm/" >> .gitignore
+
+      - name: Coletar
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          MODO="${{ github.event.inputs.modo }}"
+          if [ -z "$MODO" ]; then MODO="universo"; fi
+          if [ "$MODO" = "universo" ]; then
+            python coletor_setorial.py universo
+          elif [ -n "${{ github.event.inputs.grupo }}" ]; then
+            python coletor_setorial.py coletar --grupo "${{ github.event.inputs.grupo }}"
+          else
+            python coletor_setorial.py coletar
+          fi
+
+      - name: Commit das saídas
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/ cache_b3/ .gitignore
+          git diff --cached --quiet || git commit -m "coletor setorial: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
