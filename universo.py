@@ -1,0 +1,295 @@
+"""
+universo.py — Price Discovery
+Coleta TODAS as empresas com classificação setorial na B3 (exceto setor financeiro) e gera:
+  - anual      : DFP; versão reapresentada (DFP seguinte) quando existir
+  - trimestral : fluxos (DRE/DFC) por diferença dos acumulados (2T = 6M − 3M, 3T = 9M − 6M,
+                 4T = anual − 9M); balanço = posição na data (não acumula)
+  - ltm        : soma dos últimos 4 trimestres consecutivos (fluxos) + balanço do último trimestre
+
+Saídas em saidas/universo/: base.csv.gz, cobertura.csv, auditoria.csv.gz, metadados.json
+"""
+import gc
+import json
+import re
+import zipfile
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import requests
+
+import coletor_setorial as cs
+
+URL_DOC_DIR = {"DFP": f"{cs.BASE}/DOC/DFP/DADOS/", "ITR": f"{cs.BASE}/DOC/ITR/DADOS/"}
+SAIDA = cs.SAIDAS / "universo"
+
+FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "da", "ebitda",
+          "pagamento_arrendamento", "pag_arrend_juros", "pag_arrend_principal", "ebitda_pre_ifrs16",
+          "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
+          "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
+          "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
+          "fcl_pos_arrend"]
+ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
+            "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
+            "divida_bruta_ex_arrend"]
+# fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
+CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento"]
+
+
+# --------------------------------------------------------------- utilidades
+def anos_disponiveis(doc: str) -> list[int]:
+    padrao = rf"{doc.lower()}_cia_aberta_(\d{{4}})\.zip"
+    if not cs.OFFLINE:
+        try:
+            html = requests.get(URL_DOC_DIR[doc], timeout=60).text
+            anos = sorted({int(a) for a in re.findall(padrao, html)})
+            if anos:
+                return anos
+        except requests.RequestException as e:
+            print(f"  ! não listei o diretório {doc} ({e}); usando cache")
+    return sorted({int(m.group(1)) for p in cs.CACHE.glob(f"{doc.lower()}_cia_aberta_*.zip")
+                   if (m := re.search(r"(\d{4})", p.name))})
+
+
+def ler_doc(doc: str, ano: int, cnpjs: set[str], forcar: bool) -> pd.DataFrame:
+    nome_zip = f"{doc.lower()}_cia_aberta_{ano}.zip"
+    try:
+        p = cs.baixar(URL_DOC_DIR[doc] + nome_zip, cs.CACHE / nome_zip, forcar=forcar)
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"  ! {doc} {ano} indisponível: {e}")
+        return pd.DataFrame()
+    partes, com_con = [], set()
+    with zipfile.ZipFile(p) as z:
+        nomes = set(z.namelist())
+        # consolidado primeiro; individual só para quem não tem consolidado (economiza memória)
+        for base in ("con", "ind"):
+            alvo = cnpjs if base == "con" else cnpjs - com_con
+            if not alvo:
+                continue
+            for demo in cs.DEMOS:
+                nome = f"{doc.lower()}_cia_aberta_{demo}_{base}_{ano}.csv"
+                if nome not in nomes:
+                    continue
+                df = pd.read_csv(z.open(nome), sep=";", encoding="latin-1", dtype=str,
+                                 usecols=lambda c: c in cs.COLS)
+                df = df[df["CNPJ_CIA"].map(cs.so_digitos).isin(alvo)]
+                if df.empty:
+                    continue
+                if base == "con" and demo == "DRE":
+                    com_con |= set(df["CNPJ_CIA"].map(cs.so_digitos))
+                df["DEMO"], df["BASE"], df["ARQ_ANO"] = demo, base, ano
+                partes.append(df)
+    return pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
+
+
+def _fim_exercicio(dt_ini: pd.Timestamp) -> pd.Timestamp:
+    return dt_ini + pd.DateOffset(years=1) - pd.Timedelta(days=1)
+
+
+def _trimestre(dt_ini: pd.Timestamp, dt_fim: pd.Timestamp) -> int:
+    meses = (dt_fim.year - dt_ini.year) * 12 + dt_fim.month - dt_ini.month + 1
+    return int(min(4, max(1, round(meses / 3))))
+
+
+# ---------------------------------------------------------- snapshots (YTD)
+def snapshots(df: pd.DataFrame, doc: str, aud: list) -> list[dict]:
+    """Um registro por (empresa, documento, data): métricas acumuladas no exercício até a data."""
+    out = []
+    if doc == "ITR":  # no ITR o 'penúltimo' é comparativo; usamos só o período corrente
+        df = df[df["ORDEM"] == "ultimo"]
+    for (cnpj, _dt_ref, ordem), g in df.groupby(["CNPJ_NUM", "DT_REFER", "ORDEM"], sort=False):
+        base = "con" if ((g["BASE"] == "con") & (g["DEMO"] == "DRE")).any() else "ind"
+        g = g[g["BASE"] == base]
+        fluxo = g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD"])
+        if not fluxo.any() or g.loc[fluxo, "DT_INI"].isna().all():
+            continue
+        dt_ini = g.loc[fluxo, "DT_INI"].min()           # início do exercício (acumulado no ano)
+        g = g[~fluxo | (g["DT_INI"] == dt_ini)]          # descarta a coluna "trimestre isolado" da DRE
+        g = g.drop_duplicates(["DEMO", "CD_CONTA", "DT_INI", "DT_FIM"])
+        dt_fim = g.loc[g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD"]), "DT_FIM"].max()
+        if pd.isna(dt_fim):
+            continue
+        tipo = "reapresentado" if ordem == "penultimo" else "original"
+        ctx = {"cnpj": cnpj, "doc": doc, "tipo": tipo, "dt_ini": dt_ini, "dt_fim": dt_fim,
+               "arq_ano": int(g["ARQ_ANO"].iloc[0])}
+        a_tmp = []
+        m = cs.calcular(g, a_tmp, ctx)
+        exerc = _fim_exercicio(dt_ini)
+        out.append({"cnpj": cnpj, "doc": doc, "tipo": tipo, "dt_ini": dt_ini, "dt_fim": dt_fim,
+                    "exercicio": exerc.year, "trimestre": 4 if doc == "DFP" else _trimestre(dt_ini, dt_fim),
+                    "base": "consolidado" if base == "con" else "individual",
+                    "denominacao": g["DENOM_CIA"].iloc[0], "arq_ano": ctx["arq_ano"], "m": m, "aud": a_tmp})
+    return out
+
+
+# ------------------------------------------------------- montagem dos períodos
+def _linha(s: dict, tipo: str, m: dict, periodo: str, fonte: str, notas: list) -> dict:
+    extra = [m.get("notas", "")] + notas
+    return {"cnpj": s["cnpj"], "tipo": tipo, "exercicio": s["exercicio"], "trimestre": s["trimestre"],
+            "periodo": periodo, "dt_ini": s["dt_ini"].date(), "dt_fim": s["dt_fim"].date(),
+            "fonte": fonte, "base": s["base"], "regime_contabil": m.get("regime_contabil"),
+            **{k: m.get(k) for k in FLUXOS + ESTOQUES + DERIVADAS},
+            "notas": "; ".join(x for x in extra if x)}
+
+
+DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta", "margem_ebitda",
+             "margem_ebitda_pre_ifrs16", "margem_liquida", "capex_org_receita", "capex_org_da",
+             "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16", "roe_pl_final"]
+
+
+def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
+    """Retorna (linhas, auditoria, info) para uma empresa."""
+    linhas, aud = [], []
+    dfp = [s for s in snaps if s["doc"] == "DFP"]
+    itr = [s for s in snaps if s["doc"] == "ITR"]
+
+    # ---- anual: reapresentado (penúltimo da DFP seguinte) > original
+    anual = {}
+    for s in dfp:
+        atual = anual.get(s["exercicio"])
+        if atual is None or (s["tipo"] == "reapresentado" and atual["tipo"] == "original") or \
+                (s["tipo"] == atual["tipo"] and s["arq_ano"] > atual["arq_ano"]):
+            anual[s["exercicio"]] = s
+    anos = sorted(anual)[-n_anos:]
+    for ex in anos:
+        s = anual[ex]
+        m = cs.derivadas(dict(s["m"]), anual=True)
+        linhas.append(_linha(s, "anual", m, str(ex), f"DFP {s['arq_ano']} ({s['tipo']})", []))
+        aud += [{**a, "periodo": str(ex), "tipo_linha": "anual"} for a in s["aud"]]
+    ano_min = anos[0] if anos else 9999
+
+    # ---- trimestral: acumulados do ano (ITR 1-3 + DFP original como 4)
+    ytd = {}
+    for s in itr + [s for s in dfp if s["tipo"] == "original"]:
+        if s["exercicio"] < ano_min:
+            continue
+        chave = (s["exercicio"], s["trimestre"])
+        if chave not in ytd or s["arq_ano"] >= ytd[chave]["arq_ano"]:
+            ytd[chave] = s
+    trimestres = []
+    for (ex, k) in sorted(ytd):
+        s = ytd[(ex, k)]
+        m, notas = dict(s["m"]), []
+        if k > 1:
+            ant = ytd.get((ex, k - 1))
+            if ant is None:
+                for f in FLUXOS:
+                    m[f] = np.nan
+                notas.append(f"acumulado do {k - 1}T ausente: fluxos do trimestre indisponíveis")
+            else:
+                for f in FLUXOS:
+                    a, b = m.get(f), ant["m"].get(f)
+                    m[f] = a - b if pd.notna(a) and pd.notna(b) else np.nan
+        neg = [f for f in CHECAR_NEG if pd.notna(m.get(f)) and m[f] < -1e-6]
+        if neg:
+            notas.append("trimestre implausível (negativo): " + ", ".join(neg) +
+                         " — provável mudança de conta entre acumulados")
+        m = cs.derivadas(m, anual=False)
+        periodo = f"{k}T{str(ex)[2:]}"
+        fonte = f"{s['doc']} {s['arq_ano']}" + ("" if k == 1 else " (dif. de acumulados)")
+        row = _linha(s, "trimestral", m, periodo, fonte, notas)
+        linhas.append(row)
+        trimestres.append((s, m, row))
+        if s["doc"] == "ITR":
+            aud += [{**a, "periodo": f"acum. {periodo}", "tipo_linha": "trimestral (acumulado)"} for a in s["aud"]]
+
+    # ---- LTM: 4 trimestres consecutivos
+    for i in range(3, len(trimestres)):
+        janela = trimestres[i - 3:i + 1]
+        datas = [t[0]["dt_fim"] for t in janela]
+        if any(not (80 <= (datas[j + 1] - datas[j]).days <= 100) for j in range(3)):
+            continue
+        s, m_ult, _ = janela[-1]
+        m = dict(m_ult)
+        for f in FLUXOS:
+            vals = [t[1].get(f) for t in janela]
+            m[f] = float(np.sum(vals)) if all(pd.notna(v) for v in vals) else np.nan
+        m = cs.derivadas(m, anual=True)
+        problemas = [t[2]["periodo"] for t in janela if "implausível" in t[2]["notas"] or "ausente" in t[2]["notas"]]
+        notas = [f"LTM inclui trimestres com alerta: {', '.join(problemas)}"] if problemas else []
+        linhas.append(_linha(s, "ltm", m, f"LTM {s['trimestre']}T{str(s['exercicio'])[2:]}",
+                             "soma 4 trimestres", notas))
+
+    info = {"anos_anuais": len(anos), "inicio_anual": anos[0] if anos else None,
+            "fim_anual": anos[-1] if anos else None, "trimestres": len(trimestres),
+            "ultimo_trimestre": trimestres[-1][2]["periodo"] if trimestres else None,
+            "mes_fim_exercicio": sorted({s["dt_fim"].month for s in dfp}) if dfp else []}
+    return linhas, aud, info
+
+
+# --------------------------------------------------------------------- rodar
+def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
+    cs.CACHE.mkdir(parents=True, exist_ok=True)
+    b3 = cs.carregar_b3(atualizar_b3)
+    cad = cs.carregar_cadastro()
+    univ = b3[(b3["hasQuotation"] == "S") & (b3.get("na_lista_atual", "S") != "N") & (b3["cnpj"] != "")]
+    univ = univ[univ["segmento"].map(cs.norm).str.len() > 0]
+    univ = univ[univ["segmento"].map(cs.norm) != cs.B3_NAO_CLASSIF]
+    univ = univ.drop_duplicates("cnpj")
+    financ = univ["setor"].map(cs.norm).str.contains("financeiro")
+    excluidas = univ[financ]
+    univ = univ[~financ]
+    if limite:
+        univ = univ.head(limite)
+    cnpjs = set(univ["cnpj"])
+    print(f"Universo: {len(univ)} empresas ({len(excluidas)} do setor financeiro fora da v1)")
+
+    snaps: dict[str, list] = {c: [] for c in cnpjs}
+    for doc in ("DFP", "ITR"):
+        anos = anos_disponiveis(doc)
+        if not anos:
+            print(f"  ! nenhum arquivo {doc} disponível")
+            continue
+        alvo = [a for a in anos if a >= max(anos) - n_anos]
+        for ano in alvo:
+            print(f"  {doc} {ano}...", flush=True)
+            bruto = ler_doc(doc, ano, cnpjs, forcar=(ano >= max(anos) - 1 and not cs.OFFLINE))
+            if bruto.empty:
+                continue
+            for s in snapshots(cs.preparar(bruto), doc, []):
+                snaps[s["cnpj"]].append(s)
+            del bruto
+            gc.collect()
+
+    linhas, aud, cob = [], [], []
+    ident = univ.set_index("cnpj")
+    for cnpj in sorted(cnpjs):
+        r = ident.loc[cnpj]
+        meta = {"empresa": r["tradingName"], "ticker": r["ticker_principal"], "setor": r["setor"],
+                "subsetor": r["subsetor"], "segmento": r["segmento"]}
+        if not snaps[cnpj]:
+            cob.append({"cnpj": cnpj, **meta, "anos_anuais": 0, "trimestres": 0,
+                        "motivo": "nenhuma DFP/ITR estruturada encontrada"})
+            continue
+        l, a, info = montar_empresa(snaps[cnpj], n_anos)
+        linhas += [{**meta, **x} for x in l]
+        aud += [{"cnpj": cnpj, "empresa": meta["empresa"], **x} for x in a]
+        cad_e = cad[cad["CNPJ_NUM"] == cnpj]
+        motivo = "janela completa" if info["anos_anuais"] >= n_anos else "série mais curta"
+        if info["anos_anuais"] < n_anos and "DT_REG" in cad_e and len(cad_e):
+            dt_reg = pd.to_datetime(cad_e["DT_REG"], errors="coerce").min()
+            if pd.notna(dt_reg) and info["inicio_anual"] and dt_reg.year >= info["inicio_anual"] - 1:
+                motivo = f"registro na CVM em {dt_reg.date()}"
+        obs = "" if info["mes_fim_exercicio"] in ([], [12]) else \
+            f"exercício social termina no mês {info['mes_fim_exercicio']}"
+        cob.append({"cnpj": cnpj, **meta, **{k: v for k, v in info.items() if k != "mes_fim_exercicio"},
+                    "motivo": motivo, "observacao": obs})
+    for _, r in excluidas.iterrows():
+        cob.append({"cnpj": r["cnpj"], "empresa": r["tradingName"], "ticker": r["ticker_principal"],
+                    "setor": r["setor"], "subsetor": r["subsetor"], "segmento": r["segmento"],
+                    "anos_anuais": 0, "trimestres": 0,
+                    "motivo": "setor financeiro: plano de contas diferente (fora da v1)"})
+
+    SAIDA.mkdir(parents=True, exist_ok=True)
+    base = pd.DataFrame(linhas)
+    base.to_csv(SAIDA / "base.csv.gz", index=False, compression="gzip")
+    pd.DataFrame(cob).to_csv(SAIDA / "cobertura.csv", index=False)
+    if aud:
+        ad = pd.DataFrame(aud).drop(columns=["dt_ini", "dt_fim"], errors="ignore")
+        ad.to_csv(SAIDA / "auditoria.csv.gz", index=False, compression="gzip")
+    meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
+            "empresas_com_dados": int((pd.DataFrame(cob)["anos_anuais"] > 0).sum()) if cob else 0,
+            "linhas": len(base), "janela_anos": n_anos,
+            "fontes": ["CVM Dados Abertos DFP/ITR", "B3 empresas listadas (classificação setorial)"]}
+    (SAIDA / "metadados.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+    print(f"  -> {SAIDA}/base.csv.gz ({len(base)} linhas), cobertura.csv, auditoria.csv.gz")

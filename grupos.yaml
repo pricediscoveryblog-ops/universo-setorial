@@ -1,0 +1,23 @@
+# grupos.yaml — Price Discovery / coletor setorial (modo "grupos")
+# O modo "universo" (padrão) já traz todas as empresas; os grupos servem para Excel de um setor.
+#
+# Cada grupo pode ter:
+#   filtro_b3:
+#     setor / subsetor / segmento:  regex sem acento, minúsculas (ex.: "refino", "exploracao de rodovias")
+#                                   obs.: a B3 usa ponto no lugar de vírgula ("petroleo. gas e biocombustiveis")
+#     incluir_tickers:  mantém só esses (apague a linha se não for usar)
+#     excluir_tickers:  remove esses (apague a linha se não for usar)
+#   empresas:    inclusões manuais (não listadas, categoria B, deslistadas). Cada uma precisa de
+#                nome e de busca (regex no cadastro CVM) ou cnpjs. Apague o bloco se não for usar.
+
+grupos:
+  distribuidoras_combustiveis:
+    filtro_b3:
+      # Na B3 só a Vibra está em "Distribuição de Combustíveis"; Ultrapar e Raízen estão em
+      # "Exploração. Refino e Distribuição", junto com Petrobras e PRIO. Daí a lista de tickers.
+      segmento: "distribuicao de combustiveis|refino e distribuicao"
+      incluir_tickers: [VBBR3, UGPA3, RAIZ4]
+
+  teste_alimentos:
+    filtro_b3:
+      segmento: "alimentos diversos|alimentos"
