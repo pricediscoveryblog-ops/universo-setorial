@@ -150,12 +150,25 @@ def metricas_empresa_ano(g: pd.DataFrame) -> tuple[dict, list]:
         m["custo_credito"] = (abs(pdd) / m["carteira_credito"]) if pd.notna(pdd) and pd.notna(m["carteira_credito"]) else np.nan
         m["credito_depositos"] = (m["carteira_credito"] / m["depositos"]) if pd.notna(m["carteira_credito"]) and pd.notna(m["depositos"]) else np.nan
 
+    # dividendos e JCP pagos aos acionistas da controladora (DFC; positivo = pago)
+    dfc = g[g["demonstracao"].isin(["DFC_MI", "DFC_MD"])]
+    if len(dfc):
+        dv = dfc[~dfc["cd_conta"].str.match(r"^6\.01\.0[12]|^6\.02") &
+                 dfc["d"].str.contains(r"dividend|capital proprio|\bjcp\b") & (dfc["valor_rs_mm"] < 0) &
+                 ~dfc["d"].str.contains(r"receb|nao controlador|minoritari|a pagar")]
+        dv = _topo(dv)
+        m["dividendos_pagos"] = -dv["valor_rs_mm"].sum() if len(dv) else 0.0
+        reg("dividendos_pagos", dv)
+    else:
+        m["dividendos_pagos"] = np.nan
+
     def div(a, b):
         return a / b if pd.notna(a) and pd.notna(b) and b != 0 else np.nan
     m["roe"] = div(m["lucro_controladores"], m["pl_controladores"])
     m["roa"] = div(m["lucro_liquido"], m["ativo_total"])
     m["pl_ativo"] = div(m["patrimonio_liquido"], m["ativo_total"])
     m["margem_liquida"] = div(m["lucro_liquido"], m["receita_total"])
+    m["payout"] = div(m["dividendos_pagos"], m["lucro_controladores"]) if m["lucro_controladores"] and m["lucro_controladores"] > 0 else np.nan
     return m, aud
 
 
