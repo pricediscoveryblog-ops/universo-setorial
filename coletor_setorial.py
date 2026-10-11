@@ -376,13 +376,14 @@ def preparar(df: pd.DataFrame) -> pd.DataFrame:
 RX_DA = re.compile(r"deprec|amortiz|exaust")
 RX_DA_EXC = re.compile(r"emprest|financ|debent|custo.{0,10}transac|agio|desagio|juro|capta")
 RX_ARR = re.compile(r"arrendament|leasing|direito de uso")
-RX_ARR_PAG = re.compile(r"pag|amortiz|liquid|quitac")
+RX_ARR_PAG = re.compile(r"pag|amortiz|liquid|quitac|contraprestac|encargo")
 RX_ARR_EXC = re.compile(r"receb|receita|subarrend")
-RX_ARR_MISTO = re.compile(r"emprest|financiament|debent|divida|captac")  # linha que mistura dívida e arrendamento
+RX_ARR_MISTO = re.compile(r"emprest|financiament(?!os? por arrend)|debent|divida|captac")  # linha que mistura dívida e arrendamento
 RX_TOTAL = re.compile(r"principal e juros|juros e principal|total")
 # Capex e aquisições (bloco de investimento da DFC, 6.02)
 RX_INV_VERBO = re.compile(r"aquisi|adic|adico|invest|compra|aplica|pagamento|aporte|integraliz|aumento de capital|desembols")
-RX_INV_EXC = re.compile(r"venda|aliena|baixa|receb|recurso|resgat|dividend|juros sobre|reembols|devoluc|reducao de capital")
+RX_INV_EXC = re.compile(r"venda|aliena|baixa|receb|recursos? (?:proveniente|obtido|recebido)|resgat|dividend|juros sobre|reembols|devoluc|reducao de capital")
+RX_INV_DISP = re.compile(r"venda|aliena|receb|dividend")  # descarte de verdade (linha líquida "(aquisição) baixa" é aceita)
 RX_IMOB = re.compile(r"imobilizad")
 RX_INTANG = re.compile(r"intangive")
 RX_ATIVO_CONTRATO = re.compile(r"ativos? de contrato|ativos? de concess|infraestrutura de concess|ativos? financeiros? de concess")
@@ -456,8 +457,10 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
 
     # D&A — ajustes da DFC indireta (6.01.01.*)
     if dfc_demo == "DFC_MI":
-        aj = dfc[dfc["CD_CONTA"].str.startswith("6.01.01.")]
-        da = topo(aj[aj["DESC"].str.contains(RX_DA) & ~aj["DESC"].str.contains(RX_DA_EXC)])
+        aj = dfc[dfc["CD_CONTA"].str.match(r"^6\.01\.0[13]\.")]  # ajustes e, em algumas empresas, "outros"
+        da = aj[aj["DESC"].str.contains(RX_DA) & ~aj["DESC"].str.contains(RX_DA_EXC)
+                & ~aj["DESC"].str.contains(r"custo a? ?amortiz")]
+        da = topo(da[da["CD_CONTA"].str.startswith("6.01.01.") | (da["VL"] > 0)])
         registrar(da, "d&a")
         m["da"] = da["VL"].sum() if len(da) else np.nan
         if da.empty:
@@ -469,7 +472,11 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
 
     # Pagamentos de arrendamento — DFC inteira, exceto ajustes não-caixa (6.01.01)
     pg = dfc[~dfc["CD_CONTA"].str.startswith("6.01.01")]
-    pg = pg[pg["DESC"].str.contains(RX_ARR) & pg["DESC"].str.contains(RX_ARR_PAG)
+    # linha só com o substantivo ("Contratos de arrendamento") vale quando é saída de caixa no
+    # financiamento (6.03) ou, no operacional, quando cita o passivo de arrendamento
+    sem_verbo = (pg["VL"] < 0) & (pg["CD_CONTA"].str.startswith("6.03") |
+                                  pg["DESC"].str.contains("passivos? de arrendament"))
+    pg = pg[pg["DESC"].str.contains(RX_ARR) & (pg["DESC"].str.contains(RX_ARR_PAG) | sem_verbo)
             & ~pg["DESC"].str.contains(RX_ARR_EXC)]
     misto = pg[pg["DESC"].str.contains(RX_ARR_MISTO)]
     if len(misto):
@@ -493,7 +500,8 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     inv = dfc[dfc["CD_CONTA"].str.startswith("6.02.")]
     so_subst = (inv["VL"] < 0) & inv["DESC"].str.contains(RX_IMOB.pattern + "|" + RX_INTANG.pattern + "|" +
                                                           RX_ATIVO_CONTRATO.pattern)
-    inv = inv[(inv["DESC"].str.contains(RX_INV_VERBO) | so_subst) & ~inv["DESC"].str.contains(RX_INV_EXC)]
+    inv = inv[(inv["DESC"].str.contains(RX_INV_VERBO) & ~inv["DESC"].str.contains(RX_INV_EXC)) |
+              (so_subst & ~inv["DESC"].str.contains(RX_INV_DISP))]
     e_aquis = inv["DESC"].str.contains(RX_AQUIS) & ~inv["DESC"].str.contains(RX_AQUIS_EXC)
     e_imob = inv["DESC"].str.contains(RX_IMOB)
     e_intang = inv["DESC"].str.contains(RX_INTANG)
