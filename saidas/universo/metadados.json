@@ -1,0 +1,11 @@
+{
+  "gerado_em": "2026-10-11T02:26",
+  "empresas": 355,
+  "empresas_com_dados": 349,
+  "linhas": 27652,
+  "janela_anos": 10,
+  "fontes": [
+    "CVM Dados Abertos DFP/ITR",
+    "B3 empresas listadas (classificação setorial)"
+  ]
+}
