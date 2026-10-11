@@ -35,7 +35,7 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
           "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
-          "fcl_pos_arrend"]
+          "fcl_pos_arrend", "dividendos_pagos"]
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores"]
