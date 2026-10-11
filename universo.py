@@ -368,6 +368,13 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             ef[c] = ef["cnpj"].map(ident_f[col])
         ef.to_csv(SAIDA / "estrutura_financeiras.csv.gz", index=False, compression="gzip")
         print(f"  -> estrutura_financeiras.csv.gz ({len(ef)} linhas, {ef['cnpj'].nunique()} empresas)")
+        import financeiras
+        fb, fa = financeiras.calcular_financeiras(ef)
+        ult = fb.groupby("cnpj")["exercicio"].transform(lambda s: s.nlargest(n_anos).min())
+        fb = fb[fb["exercicio"] >= ult]
+        fb.to_csv(SAIDA / "financeiras.csv.gz", index=False, compression="gzip")
+        fa.to_csv(SAIDA / "auditoria_financeiras.csv.gz", index=False, compression="gzip")
+        print(f"  -> financeiras.csv.gz ({len(fb)} linhas), auditoria_financeiras.csv.gz")
     if diag:
         pd.DataFrame(diag).to_csv(SAIDA / "diagnostico_dfc.csv.gz", index=False, compression="gzip")
     meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
