@@ -424,6 +424,11 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     m["lucro_bruto"] = conta(sub, "DRE", "3.03")
     m["ebit"] = conta(sub, "DRE", "3.05")
     m["lucro_liquido"] = conta(sub, "DRE", "3.11")
+    # lucro atribuído aos controladores (abertura da 3.11); sem abertura, vale o lucro total
+    ctrl = sub[(sub["DEMO"] == "DRE") & sub["CD_CONTA"].str.startswith("3.11.") &
+               sub["DESC"].str.contains("controlador") & ~sub["DESC"].str.contains("nao controlador")]
+    lc = ctrl["VL"].sum() if len(ctrl) else np.nan
+    m["lucro_controladores"] = lc if pd.notna(lc) and (lc != 0 or m["lucro_liquido"] == 0) else m["lucro_liquido"]
     # Balanço
     m["ativo_total"] = conta(sub, "BPA", "1")
     m["ativo_circulante"] = conta(sub, "BPA", "1.01")
@@ -431,6 +436,9 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     m["passivo_circulante"] = conta(sub, "BPP", "2.01")
     m["passivo_nao_circulante"] = conta(sub, "BPP", "2.02")
     m["patrimonio_liquido"] = conta(sub, "BPP", "2.03")
+    nc = sub[(sub["DEMO"] == "BPP") & sub["CD_CONTA"].str.startswith("2.03.") & sub["DESC"].str.contains("nao controlador")]
+    m["nao_controladores"] = topo(nc)["VL"].sum() if len(nc) else 0.0
+    m["pl_controladores"] = m["patrimonio_liquido"] - m["nao_controladores"]
     m["emprestimos_financiamentos"] = np.nansum([conta(sub, "BPP", "2.01.04"),
                                                  conta(sub, "BPP", "2.02.01")])
 
