@@ -1,0 +1,5 @@
+# sucessoes.yaml — emenda séries de empresas que mudaram de CNPJ (reorganização, redomiciliação)
+# Formato:  "CNPJ atual": ["CNPJ anterior", ...]   (só dígitos ou formatado, tanto faz)
+# Nos exercícios que o CNPJ atual não cobre, o universo usa os dados do anterior e marca na cobertura.
+
+"49115815000105": ["02916265000160"]   # JBS N.V. (JBSS32) <- JBS S.A. (JBSS3) — CNPJ anterior a confirmar

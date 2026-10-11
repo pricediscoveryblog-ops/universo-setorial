@@ -6,17 +6,21 @@ Coleta TODAS as empresas com classificação setorial na B3 (exceto setor financ
                  4T = anual − 9M); balanço = posição na data (não acumula)
   - ltm        : soma dos últimos 4 trimestres consecutivos (fluxos) + balanço do último trimestre
 
-Saídas em saidas/universo/: base.csv.gz, cobertura.csv, auditoria.csv.gz, metadados.json
+Saídas em saidas/universo/: base.csv.gz, cobertura.csv, auditoria.csv.gz, metadados.json,
+diagnostico_dfc.csv.gz (linhas da DFC dos anos em que a busca textual não achou D&A, capex
+ou pagamento de arrendamento — serve para calibrar os filtros)
 """
 import gc
 import json
 import re
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import requests
+import yaml
 
 import coletor_setorial as cs
 
@@ -115,10 +119,22 @@ def snapshots(df: pd.DataFrame, doc: str, aud: list) -> list[dict]:
         a_tmp = []
         m = cs.calcular(g, a_tmp, ctx)
         exerc = _fim_exercicio(dt_ini)
+        diag = []
+        faltou = [k for k in ("da", "capex_organico") if pd.isna(m.get(k))]
+        if pd.isna(m.get("pagamento_arrendamento")) and (m.get("passivo_arrendamento") or 0) > 0:
+            faltou.append("pagamento_arrendamento")
+        if "misturada com dívida" in (m.get("notas") or ""):
+            faltou.append("arrendamento_misto")
+        if doc == "DFP" and ordem == "ultimo" and faltou:
+            dfc = g[g["DEMO"].isin(["DFC_MI", "DFC_MD"])]
+            diag = [{"cnpj": cnpj, "exercicio": exerc.year, "faltou": ",".join(faltou), "demonstracao": r.DEMO,
+                     "cd_conta": r.CD_CONTA, "ds_conta": r.DS_CONTA, "valor_rs_mm": r.VL}
+                    for r in dfc.itertuples()]
         out.append({"cnpj": cnpj, "doc": doc, "tipo": tipo, "dt_ini": dt_ini, "dt_fim": dt_fim,
                     "exercicio": exerc.year, "trimestre": 4 if doc == "DFP" else _trimestre(dt_ini, dt_fim),
                     "base": "consolidado" if base == "con" else "individual",
-                    "denominacao": g["DENOM_CIA"].iloc[0], "arq_ano": ctx["arq_ano"], "m": m, "aud": a_tmp})
+                    "denominacao": g["DENOM_CIA"].iloc[0], "arq_ano": ctx["arq_ano"], "m": m, "aud": a_tmp,
+                    "diag": diag})
     return out
 
 
@@ -231,7 +247,32 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     univ = univ[~financ]
     if limite:
         univ = univ.head(limite)
-    cnpjs = set(univ["cnpj"])
+
+    # CNPJ da B3 x CNPJ registrado na CVM: se não bate, tenta pela raiz (8 primeiros dígitos)
+    cad_ok = cad.copy()
+    cad_ok["_raiz"] = cad_ok["CNPJ_NUM"].str[:8]
+    cad_ok["_ativo"] = cad_ok.get("SIT", pd.Series("", index=cad_ok.index)).map(cs.norm).str.contains("ativo")
+    no_cad = set(cad_ok["CNPJ_NUM"])
+    mapa, ajuste = {}, {}
+    for c in univ["cnpj"]:
+        if c in no_cad:
+            mapa[c] = c
+            continue
+        cand = cad_ok[cad_ok["_raiz"] == c[:8]].sort_values("_ativo", ascending=False)
+        if len(cand["CNPJ_NUM"].unique()) >= 1:
+            mapa[c] = cand["CNPJ_NUM"].iloc[0]
+            ajuste[c] = f"CNPJ da B3 ({c}) não está no cadastro CVM; usado {mapa[c]} (mesma raiz)"
+        else:
+            mapa[c] = c
+    univ = univ.assign(cnpj_cvm=univ["cnpj"].map(mapa))
+
+    # sucessões societárias: CNPJ atual <- CNPJs anteriores (sucessoes.yaml)
+    suc = {}
+    if Path("sucessoes.yaml").exists():
+        bruto_suc = yaml.safe_load(open("sucessoes.yaml", encoding="utf-8")) or {}
+        suc = {cs.so_digitos(k): [cs.so_digitos(x) for x in (v or [])] for k, v in bruto_suc.items()}
+    anteriores = {a for lst in suc.values() for a in lst}
+    cnpjs = set(univ["cnpj_cvm"]) | anteriores
     print(f"Universo: {len(univ)} empresas ({len(excluidas)} do setor financeiro fora da v1)")
 
     snaps: dict[str, list] = {c: [] for c in cnpjs}
@@ -251,16 +292,30 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             del bruto
             gc.collect()
 
-    linhas, aud, cob = [], [], []
-    ident = univ.set_index("cnpj")
-    for cnpj in sorted(cnpjs):
+    linhas, aud, cob, diag = [], [], [], []
+    ident = univ.set_index("cnpj_cvm")
+    for cnpj in sorted(set(univ["cnpj_cvm"])):
         r = ident.loc[cnpj]
+        if isinstance(r, pd.DataFrame):
+            r = r.iloc[0]
+        notas_emp = [ajuste[r["cnpj"]]] if r["cnpj"] in ajuste else []
+        # emenda séries de CNPJs anteriores nos exercícios que o atual não cobre
+        for ant in suc.get(cnpj, []) + suc.get(r["cnpj"], []):
+            cobertos = {(s["doc"], s["exercicio"], s["trimestre"], s["tipo"]) for s in snaps.get(cnpj, [])}
+            herd = [s for s in snaps.get(ant, []) if (s["doc"], s["exercicio"], s["trimestre"], s["tipo"]) not in cobertos]
+            for s in herd:
+                s = dict(s); s["cnpj"] = cnpj
+                snaps.setdefault(cnpj, []).append(s)
+            if herd:
+                notas_emp.append(f"série emendada com CNPJ anterior {ant}")
         meta = {"empresa": r["tradingName"], "ticker": r["ticker_principal"], "setor": r["setor"],
                 "subsetor": r["subsetor"], "segmento": r["segmento"]}
-        if not snaps[cnpj]:
+        if not snaps.get(cnpj):
             cob.append({"cnpj": cnpj, **meta, "anos_anuais": 0, "trimestres": 0,
-                        "motivo": "nenhuma DFP/ITR estruturada encontrada"})
+                        "motivo": "nenhuma DFP/ITR estruturada encontrada", "observacao": "; ".join(notas_emp)})
             continue
+        for s in snaps[cnpj]:
+            diag += [{**d, "empresa": meta["empresa"], "ticker": meta["ticker"]} for d in s.get("diag", [])]
         l, a, info = montar_empresa(snaps[cnpj], n_anos)
         linhas += [{**meta, **x} for x in l]
         aud += [{"cnpj": cnpj, "empresa": meta["empresa"], **x} for x in a]
@@ -272,6 +327,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
                 motivo = f"registro na CVM em {dt_reg.date()}"
         obs = "" if info["mes_fim_exercicio"] in ([], [12]) else \
             f"exercício social termina no mês {info['mes_fim_exercicio']}"
+        obs = "; ".join(x for x in [obs] + notas_emp if x)
         cob.append({"cnpj": cnpj, **meta, **{k: v for k, v in info.items() if k != "mes_fim_exercicio"},
                     "motivo": motivo, "observacao": obs})
     for _, r in excluidas.iterrows():
@@ -287,9 +343,12 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     if aud:
         ad = pd.DataFrame(aud).drop(columns=["dt_ini", "dt_fim"], errors="ignore")
         ad.to_csv(SAIDA / "auditoria.csv.gz", index=False, compression="gzip")
+    if diag:
+        pd.DataFrame(diag).to_csv(SAIDA / "diagnostico_dfc.csv.gz", index=False, compression="gzip")
     meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
             "empresas_com_dados": int((pd.DataFrame(cob)["anos_anuais"] > 0).sum()) if cob else 0,
             "linhas": len(base), "janela_anos": n_anos,
             "fontes": ["CVM Dados Abertos DFP/ITR", "B3 empresas listadas (classificação setorial)"]}
     (SAIDA / "metadados.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
-    print(f"  -> {SAIDA}/base.csv.gz ({len(base)} linhas), cobertura.csv, auditoria.csv.gz")
+    print(f"  -> {SAIDA}/base.csv.gz ({len(base)} linhas), cobertura.csv, auditoria.csv.gz, "
+          f"diagnostico_dfc.csv.gz ({len(diag)} linhas)")

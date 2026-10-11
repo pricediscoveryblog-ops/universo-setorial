@@ -36,6 +36,11 @@ na B3 (exceto setor financeiro) e grava em `saidas/universo/`:
 - `cobertura.csv` — anos e trimestres disponíveis por empresa e motivo de séries curtas.
 - `auditoria.csv.gz` — linhas da DFC/balanço capturadas por busca textual.
 - `metadados.json` — data de geração e contagens.
+- `diagnostico_dfc.csv.gz` — linhas da DFC dos anos em que a busca não achou D&A, capex ou
+  pagamento de arrendamento (para calibrar os filtros).
+
+`sucessoes.yaml` emenda séries de empresas que trocaram de CNPJ (ex.: JBS S.A. → JBS N.V.).
+Se o CNPJ informado pela B3 não existir no cadastro da CVM, o universo usa o CNPJ de mesma raiz.
 
 O workflow roda o universo todo dia 20 (e manualmente em Actions → Run workflow → modo).
 

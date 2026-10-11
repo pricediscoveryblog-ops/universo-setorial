@@ -378,6 +378,7 @@ RX_DA_EXC = re.compile(r"emprest|financ|debent|custo.{0,10}transac|agio|desagio|
 RX_ARR = re.compile(r"arrendament|leasing|direito de uso")
 RX_ARR_PAG = re.compile(r"pag|amortiz|liquid|quitac")
 RX_ARR_EXC = re.compile(r"receb|receita|subarrend")
+RX_ARR_MISTO = re.compile(r"emprest|financiament|debent|divida|captac")  # linha que mistura dívida e arrendamento
 RX_TOTAL = re.compile(r"principal e juros|juros e principal|total")
 # Capex e aquisições (bloco de investimento da DFC, 6.02)
 RX_INV_VERBO = re.compile(r"aquisi|adic|adico|invest|compra|aplica|pagamento|aporte|integraliz|aumento de capital|desembols")
@@ -470,7 +471,11 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     pg = dfc[~dfc["CD_CONTA"].str.startswith("6.01.01")]
     pg = pg[pg["DESC"].str.contains(RX_ARR) & pg["DESC"].str.contains(RX_ARR_PAG)
             & ~pg["DESC"].str.contains(RX_ARR_EXC)]
-    pg = topo(pg).copy()
+    misto = pg[pg["DESC"].str.contains(RX_ARR_MISTO)]
+    if len(misto):
+        registrar(topo(misto), "excluido:arrendamento_misturado_com_divida")
+        notas.append("linha de arrendamento misturada com dívida: excluída (pagamento pode estar subestimado)")
+    pg = topo(pg[~pg["DESC"].str.contains(RX_ARR_MISTO)]).copy()
     if len(pg):
         pg["classe"] = np.where(pg["DESC"].str.contains(RX_TOTAL), "total",
                                 np.where(pg["DESC"].str.contains("juro"), "juros", "principal"))
@@ -486,7 +491,9 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
 
     # Capex e aquisições — bloco de investimento (6.02), só contas de nível mais alto
     inv = dfc[dfc["CD_CONTA"].str.startswith("6.02.")]
-    inv = inv[inv["DESC"].str.contains(RX_INV_VERBO) & ~inv["DESC"].str.contains(RX_INV_EXC)]
+    so_subst = (inv["VL"] < 0) & inv["DESC"].str.contains(RX_IMOB.pattern + "|" + RX_INTANG.pattern + "|" +
+                                                          RX_ATIVO_CONTRATO.pattern)
+    inv = inv[(inv["DESC"].str.contains(RX_INV_VERBO) | so_subst) & ~inv["DESC"].str.contains(RX_INV_EXC)]
     e_aquis = inv["DESC"].str.contains(RX_AQUIS) & ~inv["DESC"].str.contains(RX_AQUIS_EXC)
     e_imob = inv["DESC"].str.contains(RX_IMOB)
     e_intang = inv["DESC"].str.contains(RX_INTANG)
