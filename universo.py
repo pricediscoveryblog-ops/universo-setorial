@@ -25,9 +25,12 @@ import yaml
 import coletor_setorial as cs
 
 URL_DOC_DIR = {"DFP": f"{cs.BASE}/DOC/DFP/DADOS/", "ITR": f"{cs.BASE}/DOC/ITR/DADOS/"}
+# preenchidos por ler_doc: data de divulgação (recebimento na CVM) e número de ações por documento
+DISPONIB: dict[tuple, str] = {}   # (cnpj, DT_REFER) -> menor DT_RECEB
+COMPOS: dict[tuple, tuple] = {}   # (cnpj, DT_REFER) -> (ações ON, ações PN) em circulação (sem tesouraria)
 SAIDA = cs.SAIDAS / "universo"
 
-FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "da", "ebitda",
+FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "da", "ebitda",
           "pagamento_arrendamento", "pag_arrend_juros", "pag_arrend_principal", "ebitda_pre_ifrs16",
           "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
@@ -35,7 +38,7 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "da", "ebitda",
           "fcl_pos_arrend"]
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
-            "divida_bruta_ex_arrend"]
+            "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores"]
 # fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
 CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento"]
 
@@ -65,6 +68,7 @@ def ler_doc(doc: str, ano: int, cnpjs: set[str], forcar: bool) -> pd.DataFrame:
     partes, com_con = [], set()
     with zipfile.ZipFile(p) as z:
         nomes = set(z.namelist())
+        _ler_disponib_e_capital(z, nomes, doc, ano, cnpjs)
         # consolidado primeiro; individual só para quem não tem consolidado (economiza memória)
         for base in ("con", "ind"):
             alvo = cnpjs if base == "con" else cnpjs - com_con
@@ -84,6 +88,46 @@ def ler_doc(doc: str, ano: int, cnpjs: set[str], forcar: bool) -> pd.DataFrame:
                 df["DEMO"], df["BASE"], df["ARQ_ANO"] = demo, base, ano
                 partes.append(df)
     return pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
+
+
+def _ler_disponib_e_capital(z, nomes, doc, ano, cnpjs):
+    """Data de recebimento de cada documento (arquivo-índice) e composição do capital."""
+    idx = f"{doc.lower()}_cia_aberta_{ano}.csv"
+    if idx in nomes:
+        try:
+            ix = pd.read_csv(z.open(idx), sep=";", encoding="latin-1", dtype=str,
+                             usecols=lambda c: c in ("CNPJ_CIA", "DT_REFER", "DT_RECEB"))
+            ix["c"] = ix["CNPJ_CIA"].map(cs.so_digitos)
+            ix = ix[ix["c"].isin(cnpjs)]
+            for (c, r), dr in ix.groupby(["c", "DT_REFER"])["DT_RECEB"].min().items():
+                k = (c, str(r)[:10])
+                DISPONIB[k] = min(DISPONIB.get(k, str(dr)[:10]), str(dr)[:10])
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! índice {idx}: {e}")
+    cp = [n for n in nomes if "composicao_capital" in n]
+    if not cp:
+        return
+    try:
+        c = pd.read_csv(z.open(cp[0]), sep=";", encoding="latin-1", dtype=str)
+        def achar(*partes):
+            return next((col for col in c.columns if all(p in col.upper() for p in partes)), None)
+        on_i, pn_i = achar("ORDIN", "INTEGR"), achar("PREF", "INTEGR")
+        on_t, pn_t = achar("ORDIN", "TESOUR"), achar("PREF", "TESOUR")
+        if not on_i:
+            print(f"  ! composição do capital sem colunas esperadas: {list(c.columns)[:12]}")
+            return
+        c["c"] = c["CNPJ_CIA"].map(cs.so_digitos)
+        c = c[c["c"].isin(cnpjs)]
+        if "VERSAO" in c.columns:
+            c["VERSAO"] = pd.to_numeric(c["VERSAO"], errors="coerce").fillna(0)
+            c = c.sort_values("VERSAO").drop_duplicates(["c", "DT_REFER"], keep="last")
+        num = lambda col: pd.to_numeric(c[col], errors="coerce").fillna(0) if col else pd.Series(0.0, index=c.index)
+        on = num(on_i) - num(on_t)
+        pn = num(pn_i) - num(pn_t)
+        for cc, r, a, b in zip(c["c"], c["DT_REFER"], on, pn):
+            COMPOS[(cc, str(r)[:10])] = (float(a), float(b))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! composição do capital {cp[0]}: {e}")
 
 
 def _fim_exercicio(dt_ini: pd.Timestamp) -> pd.Timestamp:
@@ -377,6 +421,15 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         print(f"  -> financeiras.csv.gz ({len(fb)} linhas), auditoria_financeiras.csv.gz")
     if diag:
         pd.DataFrame(diag).to_csv(SAIDA / "diagnostico_dfc.csv.gz", index=False, compression="gzip")
+    # múltiplos de mercado (valor de mercado × PL, lucro e EBITDA), trimestrais e anuais
+    try:
+        import multiplos
+        mult = multiplos.calcular(base, univ, DISPONIB, COMPOS, suc, n_anos)
+        if len(mult):
+            mult.to_csv(SAIDA / "multiplos.csv.gz", index=False, compression="gzip")
+            print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
+    except Exception as e:  # noqa: BLE001 — múltiplos não podem derrubar a base
+        print(f"  ! múltiplos não calculados: {e}")
     meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
             "empresas_com_dados": int((pd.DataFrame(cob)["anos_anuais"] > 0).sum()) if cob else 0,
             "linhas": len(base), "janela_anos": n_anos,
