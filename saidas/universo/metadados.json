@@ -1,8 +1,8 @@
 {
-  "gerado_em": "2026-10-11T02:26",
+  "gerado_em": "2026-10-11T02:55",
   "empresas": 355,
-  "empresas_com_dados": 349,
-  "linhas": 27652,
+  "empresas_com_dados": 350,
+  "linhas": 27811,
   "janela_anos": 10,
   "fontes": [
     "CVM Dados Abertos DFP/ITR",

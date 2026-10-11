@@ -239,7 +239,7 @@ cnpj,empresa,ticker,setor,subsetor,segmento,anos_anuais,inicio_anual,fim_anual,t
 45987245000192,BIOMA EDUC,BIED3,Consumo Cíclico,Diversos,Serviços Educacionais,10,2016.0,2025.0,42,2T26,janela completa,
 47508411000156,P.ACUCAR-CBD,PCAR3,Consumo não Cíclico,Comércio e Distribuição,Alimentos,10,2016.0,2025.0,42,2T26,janela completa,
 47960950000121,MAGAZ LUIZA,MGLU3,Consumo Cíclico,Comércio,Eletrodomésticos,10,2016.0,2025.0,42,2T26,janela completa,
-49115815000105,JBS N.V.,JBSS32,Consumo não Cíclico,Alimentos Processados,Carnes e Derivados,4,2022.0,2025.0,11,2T26,série mais curta,
+49115815000105,JBS N.V.,JBSS32,Consumo não Cíclico,Alimentos Processados,Carnes e Derivados,10,2016.0,2025.0,42,2T26,janela completa,série emendada com CNPJ anterior 02916265000160
 49263189000102,HELBOR,HBOR3,Consumo Cíclico,Construção Civil,Incorporações,10,2016.0,2025.0,42,2T26,janela completa,
 49669856000143,VESTE,VSTE3,Consumo Cíclico,Comércio,Tecidos. Vestuário e Calçados,10,2016.0,2025.0,42,2T26,janela completa,
 50564053000103,BOMBRIL,BOBR3,Consumo não Cíclico,Produtos de Uso Pessoal e de Limpeza,Produtos de Limpeza,10,2016.0,2025.0,40,4T25,janela completa,
@@ -317,7 +317,7 @@ cnpj,empresa,ticker,setor,subsetor,segmento,anos_anuais,inicio_anual,fim_anual,t
 83475913000191,PORTOBELLO,PTBL3,Bens Industriais,Construção e Engenharia,Produtos para Construção,10,2016.0,2025.0,42,2T26,janela completa,
 83878892000155,CELESC,CLSC3,Utilidade Pública,Energia Elétrica,Energia Elétrica,10,2016.0,2025.0,42,2T26,janela completa,
 84429695000111,WEG,WEGE3,Bens Industriais,Máquinas e Equipamentos,Motores . Compressores e Outros,10,2016.0,2025.0,42,2T26,janela completa,
-84683374000300,TUPY,TUPY3,Bens Industriais,Material de Transporte,Material Rodoviário,0,,,0,,nenhuma DFP/ITR estruturada encontrada,
+84683374000149,TUPY,TUPY3,Bens Industriais,Material de Transporte,Material Rodoviário,10,2016.0,2025.0,42,2T26,janela completa,CNPJ da B3 (84683374000300) não está no cadastro CVM; usado 84683374000149 (mesma raiz)
 84683408000103,DOHLER,DOHL3,Consumo Cíclico,Tecidos. Vestuário e Calçados,Fios e Tecidos,10,2016.0,2025.0,42,2T26,janela completa,
 84683671000194,WETZEL S/A,MWET3,Bens Industriais,Material de Transporte,Material Rodoviário,10,2016.0,2025.0,42,2T26,janela completa,
 84693183000168,SCHULZ,SHUL3,Bens Industriais,Máquinas e Equipamentos,Motores . Compressores e Outros,10,2015.0,2025.0,41,2T26,janela completa,
