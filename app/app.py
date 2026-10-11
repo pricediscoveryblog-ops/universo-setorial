@@ -59,6 +59,29 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16")}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
+
+# Bancos e seguradoras: (rótulo, formato, agregação do setor)
+# agregação: "soma" | (numerador, denominador) para razão das somas | None (só mediana)
+FIN = {
+    "lucro_controladores": ("Lucro líquido (controladores)", "mm", "soma"),
+    "pl_controladores": ("PL (controladores)", "mm", "soma"),
+    "ativo_total": ("Ativo total", "mm", "soma"),
+    "receita_total": ("Receita total (linha 3.01)", "mm", "soma"),
+    "roe": ("ROE", "pct", ("lucro_controladores", "pl_controladores")),
+    "roa": ("ROA", "pct", ("lucro_liquido", "ativo_total")),
+    "pl_ativo": ("PL / ativo", "pct", ("patrimonio_liquido", "ativo_total")),
+    "margem_liquida": ("Margem líquida", "pct", ("lucro_liquido", "receita_total")),
+    "resultado_bruto_intermediacao": ("Resultado bruto da intermediação", "mm", "soma"),
+    "margem_financeira_antes_pdd": ("Margem financeira antes da PDD", "mm", "soma"),
+    "despesa_pdd": ("Despesa de PDD", "mm", "soma"),
+    "receita_servicos": ("Receitas de serviços e tarifas", "mm", "soma"),
+    "despesas_pessoal_adm": ("Despesas de pessoal e administrativas", "mm", "soma"),
+    "carteira_credito": ("Carteira de crédito (aprox.)", "mm", "soma"),
+    "depositos": ("Depósitos", "mm", "soma"),
+    "custo_credito": ("Custo do crédito (PDD / carteira)", "pct", ("despesa_pdd", "carteira_credito")),
+    "credito_depositos": ("Crédito / depósitos", "x", ("carteira_credito", "depositos")),
+    "indice_eficiencia": ("Índice de eficiência (aprox.)", "pct", None),
+}
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
 
@@ -76,7 +99,12 @@ def carregar():
     base["alerta"] = base["notas"].str.contains("implausível|ausente|alerta", regex=True)
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
-    return base, cob, meta
+    fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
+    if not fin.empty:
+        for c in ("ticker", "empresa", "segmento"):
+            fin[c] = fin[c].fillna("")
+        fin["rotulo"] = fin["ticker"] + " — " + fin["empresa"]
+    return base, cob, meta, fin
 
 
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
@@ -113,7 +141,7 @@ def eixo_x(tipo: str) -> str:
 
 
 try:
-    base, cob, meta = carregar()
+    base, cob, meta, fin = carregar()
 except FileNotFoundError:
     st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
     st.stop()
@@ -170,8 +198,9 @@ if not sel_met:
 st.sidebar.caption(f"{filtrado['cnpj'].nunique()} empresas · {len(filtrado)} linhas no filtro")
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_dados, aba_cob, aba_met = st.tabs(
-    ["Visão do setor", "Empresa", "Ranking", "Dados e download", "Cobertura", "Metodologia"])
+aba_setor, aba_emp, aba_rank, aba_fin, aba_dados, aba_cob, aba_met = st.tabs(
+    ["Visão do setor", "Empresa", "Ranking", "Financeiro (bancos e seguradoras)", "Dados e download", "Cobertura",
+     "Metodologia"])
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
@@ -372,6 +401,116 @@ with aba_rank:
             fig.update_xaxes(tickformat=".0%")
         st.plotly_chart(fig, width="stretch")
 
+# -------- Financeiro: bancos e seguradoras (plano de contas próprio, base separada)
+with aba_fin:
+    if fin.empty:
+        st.info("Base de bancos e seguradoras ainda não gerada (financeiras.csv.gz). Rode o workflow no modo universo.")
+    else:
+        st.caption("Base separada: bancos e seguradoras usam plano de contas próprio e não entram nas medianas das "
+                   "demais abas. Fonte: CVM (DFP anual). Métricas são definições próprias; conferir com os releases.")
+        c1, c2, c3 = st.columns([1.2, 1.2, 1])
+        grupos_f = {"Bancos e financeiras": ~fin["segmento"].str.contains("Segurad|Ressegurad", regex=True),
+                    "Seguradoras e resseguradoras": fin["segmento"].str.contains("Segurad|Ressegurad", regex=True)}
+        grp = c1.radio("Grupo", list(grupos_f), horizontal=True)
+        ff = fin[grupos_f[grp]]
+        opcoes = [k for k in FIN if ff[k].notna().any()] if len(ff) else list(FIN)
+        ind_f = c2.selectbox("Indicador", opcoes, format_func=lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]],
+                             key="fin_ind")
+        rot_f, fmt_f, agg_f = FIN[ind_f]
+        modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, disabled=(fmt_f != "mm"), key="fin_modo")
+        pct_f = modo_f == "% do grupo" and fmt_f == "mm"
+        anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
+        if anos_f:
+            fa0, fa1 = st.select_slider("Exercícios", options=anos_f, value=(anos_f[0], anos_f[-1]), key="fin_anos")
+            ff = ff[ff["exercicio"].between(fa0, fa1)]
+        sel_f = st.multiselect("Empresas (vazio = todas do grupo)", sorted(ff["rotulo"].unique()), key="fin_emp")
+        periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
+        ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
+        if agg_f == "soma":
+            tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
+        elif isinstance(agg_f, tuple):
+            n_, d_ = agg_f
+            ok = ff.dropna(subset=[n_, d_])
+            g_ = ok.groupby("_c")[[n_, d_]].sum()
+            tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
+        else:
+            tot_f = pd.Series(dtype=float)
+        tot_f = tot_f.reindex(periodos_f)
+        med_f = ff.groupby("_c")[ind_f].median().reindex(periodos_f)
+        vis_f = ff[ff["rotulo"].isin(sel_f)] if sel_f else ff
+        tab_f = vis_f.pivot_table(index="rotulo", columns="_c", values=ind_f, aggfunc="first").reindex(columns=periodos_f)
+        ultf = [p for p in periodos_f[::-1] if p in tab_f.columns and tab_f[p].notna().any()]
+        if ultf:
+            tab_f = tab_f.sort_values(ultf[0], ascending=False)
+        if pct_f:
+            tab_f = tab_f.div(tot_f, axis=1)
+        extra_f = {}
+        if fmt_f == "mm":
+            if sel_f:
+                dem = tot_f - vis_f.groupby("_c")[ind_f].sum(min_count=1).reindex(periodos_f).fillna(0)
+                extra_f["Demais do grupo"] = dem / tot_f if pct_f else dem
+            extra_f["TOTAL DO GRUPO"] = tot_f / tot_f if pct_f else tot_f
+        elif len(tot_f.dropna()):
+            extra_f["GRUPO AGREGADO"] = tot_f
+        if not pct_f:
+            extra_f["Mediana do grupo"] = med_f
+        full_f = pd.concat([tab_f, pd.DataFrame(extra_f).T.reindex(columns=periodos_f)])
+        full_f.index.name = "Empresa"
+        if pct_f or fmt_f == "pct":
+            cfg_f = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos_f}
+            vis_tab = full_f * 100
+        elif fmt_f == "x":
+            cfg_f = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos_f}
+            vis_tab = full_f
+        else:
+            cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
+            vis_tab = full_f
+        st.dataframe(vis_tab, column_config=cfg_f, width="stretch", height=min(650, 38 + 35 * len(vis_tab)))
+        if fmt_f != "mm" and isinstance(agg_f, tuple):
+            st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
+        notas_fin = {
+            "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
+                                 "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
+                                 "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
+            "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
+                                "pode diferir da carteira ampliada divulgada.",
+            "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
+            "custo_credito": "PDD do ano ÷ carteira no fim do ano (aproximação).",
+        }
+        if ind_f in notas_fin:
+            st.caption("ℹ️ " + notas_fin[ind_f])
+        if fmt_f == "mm":
+            topf = tab_f.index[:10] if not sel_f else tab_f.index
+            plotf = tab_f.loc[topf].T if len(tab_f) else pd.DataFrame()
+            if not sel_f and len(tab_f) > 10:
+                plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
+            elif sel_f and "Demais do grupo" in extra_f:
+                plotf["Demais do grupo"] = extra_f["Demais do grupo"]
+            lf = plotf.reset_index(names="Exercício").melt(id_vars="Exercício", var_name="Empresa", value_name="v")
+            fig = px.bar(lf, x="Exercício", y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
+            fig.update_layout(barmode="relative", height=460, legend_title_text="")
+            if pct_f:
+                fig.update_yaxes(tickformat=".0%")
+        else:
+            fig = go.Figure()
+            for r in tab_f.index[:10]:
+                fig.add_trace(go.Scatter(x=periodos_f, y=tab_f.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+            if len(tot_f.dropna()):
+                fig.add_trace(go.Scatter(x=periodos_f, y=tot_f, mode="lines", name="Grupo agregado", line=dict(width=4, dash="dash")))
+            fig.add_trace(go.Scatter(x=periodos_f, y=med_f, mode="lines", name="Mediana", line=dict(dash="dot")))
+            fig.update_layout(height=460, legend_title_text="")
+            if fmt_f == "pct":
+                fig.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig, width="stretch")
+        ex_f = full_f.reset_index()
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                           file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key="fin_csv")
+        bruto_f = ff.drop(columns=["_c", "rotulo"], errors="ignore")
+        c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
+                           file_name="financeiro_base.xlsx", key="fin_xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 # -------- Dados e download
 with aba_dados:
     cols_out = [c for c in IDENT if c in filtrado.columns] + sel_met + ["notas"]
@@ -431,6 +570,11 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
+
+**Bancos e seguradoras (aba Financeiro).** Base separada, a partir das demonstrações completas (plano de
+contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
+ROE = lucro dos controladores ÷ PL dos controladores (PL total − não controladores), no fim do ano.
+Eficiência e carteira de crédito são aproximações próprias. Basileia e inadimplência não constam da DFP.
 
 **Limitações conhecidas.**
 - D&A, capex e arrendamento vêm de busca textual na DFC: vazio = não identificado (nunca zero).
