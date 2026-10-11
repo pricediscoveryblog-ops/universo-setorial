@@ -575,6 +575,23 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     if len(fco_ac):
         notas.append("ativo de contrato no FCO: parte do investimento em concessão pode estar no operacional (não somado ao capex)")
 
+    # Dividendos e JCP pagos aos acionistas da controladora (saída de caixa; positivo = pago).
+    # Exclui ajustes não-caixa, variação de "dividendos a pagar", investimento (dividendos recebidos)
+    # e pagamentos a não controladores.
+    dv = dfc[~dfc["CD_CONTA"].str.match(r"^6\.01\.0[12]|^6\.02")]
+    dv = dv[dv["DESC"].str.contains(r"dividend|capital proprio|\bjcp\b") & (dv["VL"] < 0)
+            & ~dv["DESC"].str.contains(r"receb|nao controlador|minoritari|a pagar")]
+    dv = topo(dv)
+    for _, r in dv.iterrows():
+        aud.append({**ctx, "uso": "dividendos_pagos", "demonstracao": r["DEMO"], "cd_conta": r["CD_CONTA"],
+                    "ds_conta": r["DS_CONTA"], "valor_rs_mm": r["VL"]})
+    if dfc.empty:
+        m["dividendos_pagos"] = np.nan
+    else:
+        m["dividendos_pagos"] = -dv["VL"].sum() if len(dv) else 0.0
+        if not len(dv):
+            notas.append("nenhum pagamento de dividendos/JCP identificado na DFC (assumido 0)")
+
     # Fluxo de caixa operacional e FCL (definição própria)
     m["fco"] = conta(sub, dfc_demo, "6.01") if not dfc.empty else np.nan
     pag_fora_fco = 0.0
