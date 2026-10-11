@@ -242,7 +242,10 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     univ = univ[univ["segmento"].map(cs.norm).str.len() > 0]
     univ = univ[univ["segmento"].map(cs.norm) != cs.B3_NAO_CLASSIF]
     univ = univ.drop_duplicates("cnpj")
-    financ = univ["setor"].map(cs.norm).str.contains("financeiro")
+    # fora só quem usa plano de contas de instituição financeira (bancos, seguradoras); o setor
+    # "Financeiro" da B3 também tem shoppings, imóveis, holdings e B3/Cielo, que usam o plano geral
+    financ = (univ["subsetor"].map(cs.norm).str.contains("intermediarios financeiros") |
+              univ["segmento"].map(cs.norm).isin(["seguradoras", "resseguradoras"]))
     excluidas = univ[financ]
     univ = univ[~financ]
     if limite:
@@ -273,7 +276,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         suc = {cs.so_digitos(k): [cs.so_digitos(x) for x in (v or [])] for k, v in bruto_suc.items()}
     anteriores = {a for lst in suc.values() for a in lst}
     cnpjs = set(univ["cnpj_cvm"]) | anteriores
-    print(f"Universo: {len(univ)} empresas ({len(excluidas)} do setor financeiro fora da v1)")
+    print(f"Universo: {len(univ)} empresas ({len(excluidas)} bancos/seguradoras fora da v1)")
 
     snaps: dict[str, list] = {c: [] for c in cnpjs}
     for doc in ("DFP", "ITR"):
@@ -334,7 +337,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         cob.append({"cnpj": r["cnpj"], "empresa": r["tradingName"], "ticker": r["ticker_principal"],
                     "setor": r["setor"], "subsetor": r["subsetor"], "segmento": r["segmento"],
                     "anos_anuais": 0, "trimestres": 0,
-                    "motivo": "setor financeiro: plano de contas diferente (fora da v1)"})
+                    "motivo": "banco/seguradora: plano de contas de instituição financeira (fora da v1)"})
 
     SAIDA.mkdir(parents=True, exist_ok=True)
     base = pd.DataFrame(linhas)
