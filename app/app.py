@@ -32,6 +32,7 @@ METRICAS = {
     "capex_total": ("Capex total c/ aquisições", "mm", "Caixa e investimento"),
     "pagamento_arrendamento": ("Pagamentos de arrendamento", "mm", "Caixa e investimento"),
     "fcl_pos_arrend": ("FCL pós-arrendamento", "mm", "Caixa e investimento"),
+    "dividendos_pagos": ("Dividendos + JCP pagos", "mm", "Caixa e investimento"),
     "caixa": ("Caixa + aplicações CP", "mm", "Balanço e dívida"),
     "divida_bruta_ex_arrend": ("Dívida bruta ex-arrendamento", "mm", "Balanço e dívida"),
     "passivo_arrendamento": ("Passivo de arrendamento", "mm", "Balanço e dívida"),
@@ -404,15 +405,17 @@ with aba_emp:
                            "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
                            "data; lucro e EBITDA dos 12 meses desse documento. O último ponto é o pregão mais recente. ")
                 pares_m = mult[(mult["segmento"] == seg) & (mult["tipo"] == tipo_m)]
-                med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe"]].median()
+                med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
+                                                    "dividend_yield"]].median()
                 med_m = med_m[med_m.index.isin(dm["data"])]
                 graficos = [("P/VPA (valor de mercado ÷ PL dos controladores)", [("p_vpa", "P/VPA")]),
                             ("P/L (valor de mercado ÷ lucro 12m dos controladores)", [("p_l", "P/L")]),
                             ("EV/EBITDA", [("ev_ebitda_ifrs16", "c/ arrendamento ÷ EBITDA IFRS 16"),
                                            ("ev_ebitda_pre_ifrs16", "s/ arrendamento ÷ EBITDA pré-IFRS 16")]),
-                            ("ROE (lucro 12m ÷ PL dos controladores)", [("roe", "ROE")])]
-                linha1, linha2 = st.columns(2), st.columns(2)
-                cm = [linha1[0], linha1[1], linha2[0], linha2[1]]
+                            ("ROE (lucro 12m ÷ PL dos controladores)", [("roe", "ROE")]),
+                            ("Dividend yield (dividendos + JCP pagos em 12m ÷ valor de mercado)",
+                             [("dividend_yield", "Dividend yield")])]
+                cm = [c for _ in range((len(graficos) + 1) // 2) for c in st.columns(2)]
                 for (tit, series), col in zip(graficos, cm):
                     fig = go.Figure()
                     for k, nome in series:
@@ -425,18 +428,21 @@ with aba_emp:
                                                  name="Nota no cálculo", marker=dict(symbol="circle-open", size=12, color="orange")))
                     fig.update_layout(title=tit, height=340, margin=dict(t=40, b=20, l=10, r=10),
                                       legend=dict(orientation="h", y=-0.25))
-                    if series[0][0] == "roe":
+                    if series[0][0] in ("roe", "dividend_yield"):
                         fig.update_yaxes(tickformat=".0%")
                     else:
                         fig.update_yaxes(ticksuffix="x")
                     col.plotly_chart(fig, width="stretch")
                 st.caption("Vazio = denominador ≤ 0 (prejuízo, EBITDA ou PL negativos) ou sem cotação. "
                            "EV = valor de mercado + dívida líquida + participação de não controladores. "
-                           "ROE usa o mesmo lucro 12m e PL dos múltiplos, então P/VPA = P/L × ROE em cada ponto.")
+                           "ROE usa o mesmo lucro 12m e PL dos múltiplos, então P/VPA = P/L × ROE em cada ponto. "
+                           "Dividend yield em regime de caixa: dividendos e JCP efetivamente pagos nos 12 meses (DFC), "
+                           "não pela data-com; exclui pagamentos a não controladores.")
                 with st.expander("Valor de mercado, EV, preços, ações e notas"):
                     cols_m = ["data", "periodo_base", "valor_mercado", "ev_com_arrend", "ev_sem_arrend", "ticker_on", "preco_on",
                               "data_preco_on", "acoes_on", "ticker_pn", "preco_pn", "data_preco_pn", "acoes_pn",
-                              "p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe", "notas"]
+                              "p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
+                              "dividendos_12m", "dividend_yield", "notas"]
                     tab_m = dm[cols_m].assign(data=dm["data"].dt.date)
                     st.dataframe(tab_m, hide_index=True, width="stretch", column_config={
                         "valor_mercado": st.column_config.NumberColumn("Valor de mercado (R$ mm)", format="%,.1f"),
@@ -446,7 +452,9 @@ with aba_emp:
                         "acoes_pn": st.column_config.NumberColumn("Ações PN", format="%,.0f"),
                         **{k: st.column_config.NumberColumn(k, format="%.2fx") for k in
                            ("p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16")},
-                        "roe": st.column_config.NumberColumn("ROE", format="percent")})
+                        "roe": st.column_config.NumberColumn("ROE", format="percent"),
+                        "dividendos_12m": st.column_config.NumberColumn("Dividendos + JCP 12m (R$ mm)", format="%,.1f"),
+                        "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
 
@@ -649,6 +657,7 @@ todas as classes. Classe sem negócio na data: último preço negociado; classe 
 classe (indicado nas notas). Trimestral = ponto no tempo (último documento divulgado até a data, lucro e
 EBITDA dos 12 meses); anual = preço do fim do exercício com os números do exercício.
 P/VPA e P/L usam PL e lucro dos controladores; EV inclui a participação de não controladores.
+Dividend yield = dividendos + JCP pagos nos 12 meses (DFC, regime de caixa, só acionistas da controladora) ÷ valor de mercado.
 
 **Bancos e seguradoras (aba Financeiro).** Base separada, a partir das demonstrações completas (plano de
 contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
