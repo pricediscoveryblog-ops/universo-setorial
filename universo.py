@@ -257,7 +257,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     cad_ok["_ativo"] = cad_ok.get("SIT", pd.Series("", index=cad_ok.index)).map(cs.norm).str.contains("ativo")
     no_cad = set(cad_ok["CNPJ_NUM"])
     mapa, ajuste = {}, {}
-    for c in univ["cnpj"]:
+    for c in pd.concat([univ["cnpj"], excluidas["cnpj"]]):
         if c in no_cad:
             mapa[c] = c
             continue
@@ -268,6 +268,8 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         else:
             mapa[c] = c
     univ = univ.assign(cnpj_cvm=univ["cnpj"].map(mapa))
+    excluidas = excluidas.assign(cnpj_cvm=excluidas["cnpj"].map(mapa))
+    fin_cnpjs = set(excluidas["cnpj_cvm"])
 
     # sucessões societárias: CNPJ atual <- CNPJs anteriores (sucessoes.yaml)
     suc = {}
@@ -275,7 +277,8 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         bruto_suc = yaml.safe_load(open("sucessoes.yaml", encoding="utf-8")) or {}
         suc = {cs.so_digitos(k): [cs.so_digitos(x) for x in (v or [])] for k, v in bruto_suc.items()}
     anteriores = {a for lst in suc.values() for a in lst}
-    cnpjs = set(univ["cnpj_cvm"]) | anteriores
+    cnpjs = set(univ["cnpj_cvm"]) | anteriores | fin_cnpjs
+    estrutura_fin = []  # demonstrações completas de bancos e seguradoras (para mapear o plano de contas)
     print(f"Universo: {len(univ)} empresas ({len(excluidas)} bancos/seguradoras fora da v1)")
 
     snaps: dict[str, list] = {c: [] for c in cnpjs}
@@ -290,7 +293,18 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             bruto = ler_doc(doc, ano, cnpjs, forcar=(ano >= max(anos) - 1 and not cs.OFFLINE))
             if bruto.empty:
                 continue
-            for s in snapshots(cs.preparar(bruto), doc, []):
+            prep = cs.preparar(bruto)
+            if doc == "DFP" and fin_cnpjs:
+                f = prep[prep["CNPJ_NUM"].isin(fin_cnpjs) & (prep["ORDEM"] == "ultimo")]
+                for (cn, _ref), g in f.groupby(["CNPJ_NUM", "DT_REFER"]):
+                    b = "con" if ((g["BASE"] == "con") & (g["DEMO"] == "DRE")).any() else "ind"
+                    g = g[g["BASE"] == b].drop_duplicates(["DEMO", "CD_CONTA", "DT_FIM"])
+                    estrutura_fin.append(pd.DataFrame({
+                        "cnpj": cn, "exercicio": g["DT_FIM"].dt.year, "dt_fim": g["DT_FIM"].dt.date,
+                        "base": "consolidado" if b == "con" else "individual", "demonstracao": g["DEMO"],
+                        "cd_conta": g["CD_CONTA"], "ds_conta": g["DS_CONTA"], "valor_rs_mm": g["VL"]}))
+                prep = prep[~prep["CNPJ_NUM"].isin(fin_cnpjs - set(univ["cnpj_cvm"]))]
+            for s in snapshots(prep, doc, []):
                 snaps[s["cnpj"]].append(s)
             del bruto
             gc.collect()
@@ -346,6 +360,14 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     if aud:
         ad = pd.DataFrame(aud).drop(columns=["dt_ini", "dt_fim"], errors="ignore")
         ad.to_csv(SAIDA / "auditoria.csv.gz", index=False, compression="gzip")
+    if estrutura_fin:
+        ef = pd.concat(estrutura_fin, ignore_index=True)
+        ident_f = excluidas.drop_duplicates("cnpj_cvm").set_index("cnpj_cvm")
+        for c, col in (("empresa", "tradingName"), ("ticker", "ticker_principal"), ("subsetor", "subsetor"),
+                       ("segmento", "segmento")):
+            ef[c] = ef["cnpj"].map(ident_f[col])
+        ef.to_csv(SAIDA / "estrutura_financeiras.csv.gz", index=False, compression="gzip")
+        print(f"  -> estrutura_financeiras.csv.gz ({len(ef)} linhas, {ef['cnpj'].nunique()} empresas)")
     if diag:
         pd.DataFrame(diag).to_csv(SAIDA / "diagnostico_dfc.csv.gz", index=False, compression="gzip")
     meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
