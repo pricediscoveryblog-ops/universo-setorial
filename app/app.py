@@ -1,0 +1,331 @@
+"""
+Price Discovery — Universo setorial (app Streamlit)
+Lê saidas/universo/ (gerado pelo workflow) e permite filtrar, comparar, plotar e baixar.
+"""
+import io
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+DADOS = Path(os.environ.get("UNIVERSO_DIR", Path(__file__).resolve().parent.parent / "saidas" / "universo"))
+
+# chave: (rótulo, formato, grupo)   formato: mm = R$ milhões | pct = % | x = múltiplo
+METRICAS = {
+    "receita": ("Receita líquida", "mm", "Resultado"),
+    "lucro_bruto": ("Lucro bruto", "mm", "Resultado"),
+    "ebit": ("EBIT", "mm", "Resultado"),
+    "da": ("D&A", "mm", "Resultado"),
+    "ebitda": ("EBITDA (IFRS 16)", "mm", "Resultado"),
+    "ebitda_pre_ifrs16": ("EBITDA pré-IFRS 16", "mm", "Resultado"),
+    "lucro_liquido": ("Lucro líquido", "mm", "Resultado"),
+    "fco": ("Fluxo de caixa operacional", "mm", "Caixa e investimento"),
+    "capex_organico": ("Capex orgânico", "mm", "Caixa e investimento"),
+    "capex_organico_liquido": ("Capex orgânico líq. de vendas", "mm", "Caixa e investimento"),
+    "vendas_imob_intang": ("Vendas de imobilizado/intangível", "mm", "Caixa e investimento"),
+    "aquisicoes_participacoes": ("Aquisições de participações", "mm", "Caixa e investimento"),
+    "capex_total": ("Capex total c/ aquisições", "mm", "Caixa e investimento"),
+    "pagamento_arrendamento": ("Pagamentos de arrendamento", "mm", "Caixa e investimento"),
+    "fcl_pos_arrend": ("FCL pós-arrendamento", "mm", "Caixa e investimento"),
+    "caixa": ("Caixa + aplicações CP", "mm", "Balanço e dívida"),
+    "divida_bruta_ex_arrend": ("Dívida bruta ex-arrendamento", "mm", "Balanço e dívida"),
+    "passivo_arrendamento": ("Passivo de arrendamento", "mm", "Balanço e dívida"),
+    "div_liq_com_arrend": ("Dívida líquida c/ arrendamento", "mm", "Balanço e dívida"),
+    "div_liq_sem_arrend": ("Dívida líquida s/ arrendamento", "mm", "Balanço e dívida"),
+    "patrimonio_liquido": ("Patrimônio líquido", "mm", "Balanço e dívida"),
+    "ativo_total": ("Ativo total", "mm", "Balanço e dívida"),
+    "ncav": ("NCAV (Graham)", "mm", "Balanço e dívida"),
+    "margem_bruta": ("Margem bruta", "pct", "Margens e retorno"),
+    "margem_ebitda": ("Margem EBITDA (IFRS 16)", "pct", "Margens e retorno"),
+    "margem_ebitda_pre_ifrs16": ("Margem EBITDA pré-IFRS 16", "pct", "Margens e retorno"),
+    "margem_liquida": ("Margem líquida", "pct", "Margens e retorno"),
+    "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
+    "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
+    "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
+    "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
+    "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
+}
+ROT = {k: v[0] for k, v in METRICAS.items()}
+PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
+TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
+IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
+         "trimestre", "dt_fim", "fonte", "regime_contabil"]
+
+st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon="📊", layout="wide")
+
+
+# ------------------------------------------------------------------ dados
+@st.cache_data(show_spinner="Carregando a base…")
+def carregar():
+    base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
+    base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
+    for c in ("ticker", "setor", "subsetor", "segmento", "empresa", "notas"):
+        base[c] = base[c].fillna("")
+    base["rotulo"] = base["ticker"] + " — " + base["empresa"]
+    base["alerta"] = base["notas"].str.contains("implausível|ausente|alerta", regex=True)
+    cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
+    meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
+    return base, cob, meta
+
+
+def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
+    cfg = {}
+    for c in cols:
+        rot, f, _ = METRICAS[c]
+        if f == "mm":
+            cfg[c] = st.column_config.NumberColumn(f"{rot} (R$ mm)", format="%,.1f")
+        elif f == "pct":
+            cfg[c] = st.column_config.NumberColumn(rot, format="%.1f%%")
+        else:
+            cfg[c] = st.column_config.NumberColumn(rot, format="%.2fx")
+    return cfg
+
+
+def para_exibir(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if METRICAS[c][1] == "pct":
+            out[c] = out[c] * 100
+    return out
+
+
+def excel_bytes(abas: dict[str, pd.DataFrame]) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for nome, df in abas.items():
+            df.to_excel(xw, sheet_name=nome[:31], index=False)
+    return buf.getvalue()
+
+
+def eixo_x(tipo: str) -> str:
+    return "exercicio" if tipo == "anual" else "dt_fim"
+
+
+try:
+    base, cob, meta = carregar()
+except FileNotFoundError:
+    st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
+    st.stop()
+
+# ------------------------------------------------------------------ barra lateral
+st.sidebar.title("📊 Universo setorial")
+if meta is not None:
+    st.sidebar.caption(f"Base gerada em {meta.get('gerado_em', '?')} · {meta.get('empresas_com_dados', '?')} empresas · "
+                       "Fonte: CVM (DFP/ITR) + classificação B3")
+
+tipo_rot = st.sidebar.radio("Periodicidade", list(TIPOS), horizontal=False)
+tipo = TIPOS[tipo_rot]
+df_t = base[base["tipo"] == tipo]
+
+setores = sorted(x for x in df_t["setor"].unique() if x)
+sel_setor = st.sidebar.multiselect("Setor", setores, placeholder="Todos")
+f1 = df_t[df_t["setor"].isin(sel_setor)] if sel_setor else df_t
+subs = sorted(x for x in f1["subsetor"].unique() if x)
+sel_sub = st.sidebar.multiselect("Subsetor", subs, placeholder="Todos")
+f2 = f1[f1["subsetor"].isin(sel_sub)] if sel_sub else f1
+segs = sorted(x for x in f2["segmento"].unique() if x)
+sel_seg = st.sidebar.multiselect("Segmento", segs, placeholder="Todos")
+f3 = f2[f2["segmento"].isin(sel_seg)] if sel_seg else f2
+emps = sorted(f3["rotulo"].unique())
+sel_emp = st.sidebar.multiselect("Empresas", emps, placeholder="Todas do filtro")
+filtrado = f3[f3["rotulo"].isin(sel_emp)] if sel_emp else f3
+
+if tipo == "anual":
+    anos = sorted(filtrado["exercicio"].dropna().astype(int).unique())
+    if anos:
+        a0, a1 = st.sidebar.select_slider("Exercícios", options=anos, value=(anos[0], anos[-1]))
+        filtrado = filtrado[filtrado["exercicio"].between(a0, a1)]
+else:
+    datas = sorted(filtrado["dt_fim"].dropna().unique())
+    if datas:
+        rot_d = [pd.Timestamp(d).strftime("%m/%Y") for d in datas]
+        i0, i1 = st.sidebar.select_slider("Período (data de fechamento)", options=list(range(len(datas))),
+                                          value=(max(0, len(datas) - 12), len(datas) - 1),
+                                          format_func=lambda i: rot_d[i])
+        filtrado = filtrado[filtrado["dt_fim"].between(datas[i0], datas[i1])]
+
+if st.sidebar.checkbox("Esconder períodos com alerta de qualidade", value=False,
+                       help="Trimestres com diferença implausível, acumulado ausente ou LTM que inclui esses trimestres."):
+    filtrado = filtrado[~filtrado["alerta"]]
+
+grupos = {}
+for k, (_, _, g) in METRICAS.items():
+    grupos.setdefault(g, []).append(k)
+sel_met = st.sidebar.multiselect("Métricas", list(METRICAS), default=PADRAO, format_func=lambda k: ROT[k])
+if not sel_met:
+    sel_met = PADRAO
+
+st.sidebar.caption(f"{filtrado['cnpj'].nunique()} empresas · {len(filtrado)} linhas no filtro")
+
+# ------------------------------------------------------------------ abas
+aba_setor, aba_emp, aba_rank, aba_dados, aba_cob, aba_met = st.tabs(
+    ["Visão do setor", "Empresa", "Ranking", "Dados e download", "Cobertura", "Metodologia"])
+
+# -------- Visão do setor: último período de cada empresa + mediana + dispersão
+with aba_setor:
+    if filtrado.empty:
+        st.info("Nenhum dado para o filtro.")
+    else:
+        if tipo == "anual":
+            ref_opts = sorted(filtrado["exercicio"].dropna().astype(int).unique(), reverse=True)
+            ref = st.selectbox("Exercício de referência", ref_opts)
+            snap = filtrado[filtrado["exercicio"] == ref]
+        else:
+            ref_opts = sorted(filtrado["periodo"].unique(), key=lambda p: filtrado.loc[filtrado["periodo"] == p, "dt_fim"].max(),
+                              reverse=True)
+            ref = st.selectbox("Período de referência", ref_opts)
+            snap = filtrado[filtrado["periodo"] == ref]
+        snap = snap.sort_values(sel_met[0], ascending=False)
+        med = snap[sel_met].median(numeric_only=True)
+        linha_med = pd.DataFrame([{"empresa": "MEDIANA DO FILTRO", "ticker": "", "segmento": "", **med.to_dict()}])
+        tab = pd.concat([snap[["empresa", "ticker", "segmento"] + sel_met], linha_med], ignore_index=True)
+        st.dataframe(para_exibir(tab, sel_met), column_config=fmt_tabela(tab, sel_met), hide_index=True,
+                     width="stretch", height=min(600, 38 + 35 * len(tab)))
+        if snap["alerta"].any():
+            st.caption("⚠️ Há empresas com alerta de qualidade neste período; veja a coluna de notas na aba Dados.")
+
+        st.subheader("Dispersão")
+        c1, c2, c3 = st.columns(3)
+        x = c1.selectbox("Eixo X", list(METRICAS), index=list(METRICAS).index("div_liq_ebitda_ifrs16"), format_func=lambda k: ROT[k])
+        y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
+        tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
+                           format_func=lambda k: "—" if k is None else ROT[k])
+        pts = snap.dropna(subset=[x, y])
+        if tam:
+            pts = pts[pts[tam] > 0]
+        if pts.empty:
+            st.info("Sem dados suficientes para os eixos escolhidos.")
+        else:
+            fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
+                             hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
+                             labels={x: ROT[x], y: ROT[y]})
+            for eixo, k in (("x", x), ("y", y)):
+                if METRICAS[k][1] == "pct":
+                    fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
+            fig.update_layout(height=520, legend_title_text="Segmento")
+            st.plotly_chart(fig, width="stretch")
+
+# -------- Empresa: séries históricas vs. mediana do segmento
+with aba_emp:
+    if filtrado.empty:
+        st.info("Nenhum dado para o filtro.")
+    else:
+        emp = st.selectbox("Empresa", sorted(filtrado["rotulo"].unique()))
+        d_emp = filtrado[filtrado["rotulo"] == emp].sort_values(eixo_x(tipo))
+        seg = d_emp["segmento"].iloc[0]
+        st.caption(f"{d_emp['setor'].iloc[0]} / {d_emp['subsetor'].iloc[0]} / **{seg}** · base {d_emp['fonte'].iloc[-1]}")
+        pares = base[(base["tipo"] == tipo) & (base["segmento"] == seg)]
+        med_seg = pares.groupby(eixo_x(tipo))[sel_met].median(numeric_only=True).reset_index()
+        cols = st.columns(2)
+        for i, m in enumerate(sel_met):
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=d_emp[eixo_x(tipo)], y=d_emp[m], mode="lines+markers", name=emp.split(" — ")[0]))
+            mm = med_seg[med_seg[eixo_x(tipo)].isin(d_emp[eixo_x(tipo)])]
+            fig.add_trace(go.Scatter(x=mm[eixo_x(tipo)], y=mm[m], mode="lines", name=f"Mediana {seg}",
+                                     line=dict(dash="dash")))
+            alertas = d_emp[d_emp["alerta"]]
+            if len(alertas):
+                fig.add_trace(go.Scatter(x=alertas[eixo_x(tipo)], y=alertas[m], mode="markers", name="Alerta",
+                                         marker=dict(symbol="x", size=11, color="red")))
+            unidade = {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[METRICAS[m][1]]
+            fig.update_layout(title=ROT[m] + unidade, height=320, margin=dict(t=40, b=20, l=10, r=10),
+                              legend=dict(orientation="h", y=-0.2))
+            if METRICAS[m][1] == "pct":
+                fig.update_yaxes(tickformat=".0%")
+            cols[i % 2].plotly_chart(fig, width="stretch")
+        notas = d_emp[d_emp["notas"] != ""][["periodo", "fonte", "notas"]]
+        with st.expander(f"Notas e alertas ({len(notas)} períodos)"):
+            st.dataframe(notas, hide_index=True, width="stretch")
+
+# -------- Ranking
+with aba_rank:
+    if filtrado.empty:
+        st.info("Nenhum dado para o filtro.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        met = c1.selectbox("Métrica", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
+        if tipo == "anual":
+            per = c2.selectbox("Exercício", sorted(filtrado["exercicio"].dropna().astype(int).unique(), reverse=True), key="rk_ano")
+            d = filtrado[filtrado["exercicio"] == per]
+        else:
+            per = c2.selectbox("Período", sorted(filtrado["periodo"].unique(),
+                               key=lambda p: filtrado.loc[filtrado["periodo"] == p, "dt_fim"].max(), reverse=True), key="rk_per")
+            d = filtrado[filtrado["periodo"] == per]
+        n = c3.slider("Quantas empresas", 5, 50, 20)
+        ordem = st.radio("Ordem", ["Maiores", "Menores"], horizontal=True)
+        d = d.dropna(subset=[met]).sort_values(met, ascending=(ordem == "Menores")).head(n)
+        fig = px.bar(d, x=met, y="rotulo", orientation="h", color="segmento", labels={met: ROT[met], "rotulo": ""})
+        fig.update_layout(height=max(350, 28 * len(d)), yaxis=dict(autorange="reversed"), legend_title_text="Segmento")
+        if METRICAS[met][1] == "pct":
+            fig.update_xaxes(tickformat=".0%")
+        st.plotly_chart(fig, width="stretch")
+
+# -------- Dados e download
+with aba_dados:
+    cols_out = [c for c in IDENT if c in filtrado.columns] + sel_met + ["notas"]
+    todas = st.checkbox("Incluir todas as métricas no download (não só as selecionadas)")
+    if todas:
+        cols_out = [c for c in IDENT if c in filtrado.columns] + list(METRICAS) + ["notas"]
+    saida = filtrado[cols_out].sort_values(["empresa", "dt_fim"])
+    mets_vis = [c for c in cols_out if c in METRICAS]
+    st.dataframe(para_exibir(saida, mets_vis), column_config=fmt_tabela(saida, mets_vis), hide_index=True,
+                 width="stretch", height=500)
+    st.caption("Valores em R$ milhões; margens e retornos em %. No download, percentuais vão como fração (0,15 = 15%).")
+    rot_cols = {c: (ROT[c] + (" (R$ mm)" if METRICAS[c][1] == "mm" else "")) for c in mets_vis}
+    exp = saida.assign(dt_fim=saida["dt_fim"].dt.date).rename(columns=rot_cols)
+    c1, c2 = st.columns(2)
+    c1.download_button("⬇️ Baixar CSV", exp.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                       file_name=f"universo_{tipo}.csv", mime="text/csv")
+    abas = {"dados": exp}
+    if not cob.empty:
+        abas["cobertura"] = cob[cob["cnpj"].astype(str).str.zfill(14).isin(saida["cnpj"].astype(str).str.zfill(14))]
+    abas["fontes"] = pd.DataFrame({"item": ["Fonte", "Gerado em", "Definições"],
+                                   "descrição": ["CVM Dados Abertos (DFP/ITR) + classificação setorial B3",
+                                                 str(meta.get("gerado_em", "")) if meta is not None else "",
+                                                 "Ver aba Metodologia do app / README do repositório"]})
+    c2.download_button("⬇️ Baixar XLSX", excel_bytes(abas), file_name=f"universo_{tipo}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# -------- Cobertura
+with aba_cob:
+    if cob.empty:
+        st.info("cobertura.csv não encontrado.")
+    else:
+        c = cob.copy()
+        for col, sel in (("setor", sel_setor), ("subsetor", sel_sub), ("segmento", sel_seg)):
+            if sel:
+                c = c[c[col].isin(sel)]
+        st.dataframe(c, hide_index=True, width="stretch", height=520)
+        st.caption("Inclui empresas sem dados e as do setor financeiro (fora da v1), com o motivo.")
+
+# -------- Metodologia
+with aba_met:
+    st.markdown("""
+**Fontes.** Demonstrações: CVM Dados Abertos (DFP anual e ITR trimestral). Universo e classificação setorial:
+lista de empresas listadas da B3. Setor financeiro fora da v1 (plano de contas diferente).
+
+**Períodos.**
+- *Anual*: DFP; usa a versão reapresentada (exercício anterior da DFP seguinte) quando existe.
+- *Trimestral*: balanço = posição na data. Fluxos (DRE e DFC) por diferença dos acumulados:
+  2T = 6M − 3M, 3T = 9M − 6M, 4T = anual − 9M.
+- *LTM*: soma dos últimos 4 trimestres consecutivos + balanço do último trimestre.
+
+**Definições próprias (não são números reportados pelas empresas).**
+- EBITDA = EBIT (DRE 3.05) + D&A da DFC. Não inclui os ajustes que as empresas divulgam.
+- EBITDA pré-IFRS 16 = EBITDA − pagamentos de arrendamento (principal + juros) da DFC; antes de 2019 = EBITDA.
+- Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
+- Capex orgânico = saídas para imobilizado, intangível e ativo de contrato/concessão no bloco de investimento.
+- FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
+- NCAV (Graham) = ativo circulante − passivo total.
+
+**Limitações conhecidas.**
+- D&A, capex e arrendamento vêm de busca textual na DFC: vazio = não identificado (nunca zero).
+- Arrendamento somado à dívida numa linha só fica vazio (com nota).
+- Locadoras de veículos registram a compra de frota no FCO, não no capex.
+- Universo só com empresas listadas hoje: medianas históricas têm viés de sobrevivência.
+- Trimestres podem divergir do anual quando há reapresentação (o anual usa a versão reapresentada).
+""")
