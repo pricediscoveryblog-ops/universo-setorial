@@ -4,6 +4,7 @@ Lê saidas/universo/ (gerado pelo workflow) e permite filtrar, comparar, plotar 
 """
 import io
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,12 @@ METRICAS = {
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
 }
 ROT = {k: v[0] for k, v in METRICAS.items()}
+# razões agregadas do setor = soma do numerador / soma do denominador (só empresas com os dois)
+AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda", "receita"),
+         "margem_ebitda_pre_ifrs16": ("ebitda_pre_ifrs16", "receita"), "margem_liquida": ("lucro_liquido", "receita"),
+         "roe_pl_final": ("lucro_liquido", "patrimonio_liquido"), "capex_org_receita": ("capex_organico", "receita"),
+         "capex_org_da": ("capex_organico", "da"), "div_liq_ebitda_ifrs16": ("div_liq_com_arrend", "ebitda"),
+         "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16")}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
@@ -97,7 +104,7 @@ def excel_bytes(abas: dict[str, pd.DataFrame]) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         for nome, df in abas.items():
-            df.to_excel(xw, sheet_name=nome[:31], index=False)
+            df.to_excel(xw, sheet_name=re.sub(r"[\\/*?:\[\]]", "-", nome)[:31], index=False)
     return buf.getvalue()
 
 
@@ -132,25 +139,26 @@ sel_seg = st.sidebar.multiselect("Segmento", segs, placeholder="Todos")
 f3 = f2[f2["segmento"].isin(sel_seg)] if sel_seg else f2
 emps = sorted(f3["rotulo"].unique())
 sel_emp = st.sidebar.multiselect("Empresas", emps, placeholder="Todas do filtro")
-filtrado = f3[f3["rotulo"].isin(sel_emp)] if sel_emp else f3
 
+setor_f = f3  # universo do setor filtrado (base da participação), antes do filtro de empresa
 if tipo == "anual":
-    anos = sorted(filtrado["exercicio"].dropna().astype(int).unique())
+    anos = sorted(setor_f["exercicio"].dropna().astype(int).unique())
     if anos:
         a0, a1 = st.sidebar.select_slider("Exercícios", options=anos, value=(anos[0], anos[-1]))
-        filtrado = filtrado[filtrado["exercicio"].between(a0, a1)]
+        setor_f = setor_f[setor_f["exercicio"].between(a0, a1)]
 else:
-    datas = sorted(filtrado["dt_fim"].dropna().unique())
+    datas = sorted(setor_f["dt_fim"].dropna().unique())
     if datas:
         rot_d = [pd.Timestamp(d).strftime("%m/%Y") for d in datas]
         i0, i1 = st.sidebar.select_slider("Período (data de fechamento)", options=list(range(len(datas))),
                                           value=(max(0, len(datas) - 12), len(datas) - 1),
                                           format_func=lambda i: rot_d[i])
-        filtrado = filtrado[filtrado["dt_fim"].between(datas[i0], datas[i1])]
+        setor_f = setor_f[setor_f["dt_fim"].between(datas[i0], datas[i1])]
 
 if st.sidebar.checkbox("Esconder períodos com alerta de qualidade", value=False,
                        help="Trimestres com diferença implausível, acumulado ausente ou LTM que inclui esses trimestres."):
-    filtrado = filtrado[~filtrado["alerta"]]
+    setor_f = setor_f[~setor_f["alerta"]]
+filtrado = setor_f[setor_f["rotulo"].isin(sel_emp)] if sel_emp else setor_f
 
 grupos = {}
 for k, (_, _, g) in METRICAS.items():
@@ -165,49 +173,149 @@ st.sidebar.caption(f"{filtrado['cnpj'].nunique()} empresas · {len(filtrado)} li
 aba_setor, aba_emp, aba_rank, aba_dados, aba_cob, aba_met = st.tabs(
     ["Visão do setor", "Empresa", "Ranking", "Dados e download", "Cobertura", "Metodologia"])
 
-# -------- Visão do setor: último período de cada empresa + mediana + dispersão
+# -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
+def col_periodo(df: pd.DataFrame) -> pd.Series:
+    return df["exercicio"].astype("Int64").astype(str) if tipo == "anual" else df["periodo"]
+
+
+def ordem_periodos(df: pd.DataFrame) -> list:
+    o = df.assign(_c=col_periodo(df)).groupby("_c")["dt_fim"].max().sort_values()
+    return list(o.index)
+
+
+def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
+    """Total do setor (métricas em R$) ou razão agregada (soma num / soma den) por período."""
+    d = df.assign(_c=col_periodo(df))
+    if METRICAS[m][1] == "mm":
+        return d.groupby("_c")[m].sum(min_count=1)
+    if m in AGREG:
+        if tipo == "trimestral" and m in ("roe_pl_final", "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16"):
+            return pd.Series(dtype=float)
+        n, dn = AGREG[m]
+        ok = d.dropna(subset=[n, dn])
+        g = ok.groupby("_c")[[n, dn]].sum()
+        return (g[n] / g[dn].where(g[dn] != 0)).astype(float)
+    return pd.Series(dtype=float)
+
+
 with aba_setor:
-    if filtrado.empty:
+    if setor_f.empty:
         st.info("Nenhum dado para o filtro.")
     else:
-        if tipo == "anual":
-            ref_opts = sorted(filtrado["exercicio"].dropna().astype(int).unique(), reverse=True)
-            ref = st.selectbox("Exercício de referência", ref_opts)
-            snap = filtrado[filtrado["exercicio"] == ref]
-        else:
-            ref_opts = sorted(filtrado["periodo"].unique(), key=lambda p: filtrado.loc[filtrado["periodo"] == p, "dt_fim"].max(),
-                              reverse=True)
-            ref = st.selectbox("Período de referência", ref_opts)
-            snap = filtrado[filtrado["periodo"] == ref]
-        snap = snap.sort_values(sel_met[0], ascending=False)
-        med = snap[sel_met].median(numeric_only=True)
-        linha_med = pd.DataFrame([{"empresa": "MEDIANA DO FILTRO", "ticker": "", "segmento": "", **med.to_dict()}])
-        tab = pd.concat([snap[["empresa", "ticker", "segmento"] + sel_met], linha_med], ignore_index=True)
-        st.dataframe(para_exibir(tab, sel_met), column_config=fmt_tabela(tab, sel_met), hide_index=True,
-                     width="stretch", height=min(600, 38 + 35 * len(tab)))
-        if snap["alerta"].any():
-            st.caption("⚠️ Há empresas com alerta de qualidade neste período; veja a coluna de notas na aba Dados.")
+        c1, c2 = st.columns([2, 1])
+        ind = c1.selectbox("Indicador", list(METRICAS), index=list(METRICAS).index("receita"),
+                           format_func=lambda k: ROT[k] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[METRICAS[k][1]])
+        fmt = METRICAS[ind][1]
+        modo = c2.radio("Mostrar", ["Valores", "% do setor"], horizontal=True, disabled=(fmt != "mm"),
+                        help="Participação = valor da empresa ÷ total do setor filtrado (setor/subsetor/segmento), "
+                             "no mesmo período. Disponível para indicadores em R$.")
+        pct_setor = (modo == "% do setor") and fmt == "mm"
+        periodos = ordem_periodos(setor_f)
+        d_set = setor_f.assign(_c=col_periodo(setor_f))
+        total = agregado_setor(setor_f, ind).reindex(periodos)
+        mediana = d_set.groupby("_c")[ind].median().reindex(periodos)
+        n_emp = d_set.dropna(subset=[ind]).groupby("_c")["cnpj"].nunique().reindex(periodos).fillna(0).astype(int)
 
-        st.subheader("Dispersão")
-        c1, c2, c3 = st.columns(3)
-        x = c1.selectbox("Eixo X", list(METRICAS), index=list(METRICAS).index("div_liq_ebitda_ifrs16"), format_func=lambda k: ROT[k])
-        y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
-        tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
-                           format_func=lambda k: "—" if k is None else ROT[k])
-        pts = snap.dropna(subset=[x, y])
-        if tam:
-            pts = pts[pts[tam] > 0]
-        if pts.empty:
-            st.info("Sem dados suficientes para os eixos escolhidos.")
+        d_emp = filtrado.assign(_c=col_periodo(filtrado))
+        tab = d_emp.pivot_table(index="rotulo", columns="_c", values=ind, aggfunc="first").reindex(columns=periodos)
+        ult = [p for p in periodos[::-1] if p in tab.columns and tab[p].notna().any()]
+        if ult:
+            tab = tab.sort_values(ult[0], ascending=False)
+        if pct_setor:
+            tab = tab.div(total, axis=1)
+        linhas_extra = {}
+        if fmt == "mm":
+            if sel_emp:
+                demais = total - d_emp.groupby("_c")[ind].sum(min_count=1).reindex(periodos).fillna(0)
+                linhas_extra["Demais empresas do setor"] = demais / total if pct_setor else demais
+            linhas_extra["TOTAL DO SETOR (filtro)"] = total / total if pct_setor else total
         else:
-            fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
-                             hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
-                             labels={x: ROT[x], y: ROT[y]})
-            for eixo, k in (("x", x), ("y", y)):
-                if METRICAS[k][1] == "pct":
-                    fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
-            fig.update_layout(height=520, legend_title_text="Segmento")
+            linhas_extra["SETOR AGREGADO"] = total
+        if not pct_setor:
+            linhas_extra["Mediana do setor"] = mediana
+        tab_full = pd.concat([tab, pd.DataFrame(linhas_extra).T.reindex(columns=periodos)])
+        tab_full.index.name = "Empresa"
+
+        if pct_setor:
+            cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
+            vis = tab_full * 100
+        elif fmt == "pct":
+            cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
+            vis = tab_full * 100
+        elif fmt == "x":
+            cfg = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos}
+            vis = tab_full
+        else:
+            cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
+            vis = tab_full
+        st.dataframe(vis, column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
+        st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
+                   ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
+        if fmt == "mm" and (setor_f[ind] < 0).any():
+            st.caption("⚠️ Há valores negativos neste indicador; a participação percentual pode não fazer sentido.")
+        if fmt != "mm":
+            st.caption("Setor agregado = soma do numerador ÷ soma do denominador das empresas com os dois dados "
+                       "(ex.: margem EBITDA = Σ EBITDA ÷ Σ receita).")
+
+        # gráfico
+        if fmt == "mm":
+            top = tab.index[:10] if not sel_emp else tab.index
+            plot = tab.loc[top].T if len(tab) else pd.DataFrame()
+            if not sel_emp and len(tab) > 10:
+                plot["Demais"] = tab.drop(index=top).sum(min_count=1)
+            elif sel_emp:
+                plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
+            longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
+            fig = px.bar(longo, x="Período", y="v", color="Empresa",
+                         labels={"v": "% do setor" if pct_setor else ROT[ind] + " (R$ mm)"})
+            fig.update_layout(barmode="relative", height=480, legend_title_text="")
+            if pct_setor:
+                fig.update_yaxes(tickformat=".0%")
             st.plotly_chart(fig, width="stretch")
+            if not sel_emp and len(tab) > 10:
+                st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
+                           "Selecione empresas na barra lateral para vê-las isoladamente.")
+        else:
+            fig = go.Figure()
+            for r in tab.index[:10]:
+                fig.add_trace(go.Scatter(x=periodos, y=tab.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+            fig.add_trace(go.Scatter(x=periodos, y=total, mode="lines", name="Setor agregado", line=dict(width=4, dash="dash")))
+            fig.add_trace(go.Scatter(x=periodos, y=mediana, mode="lines", name="Mediana", line=dict(dash="dot")))
+            fig.update_layout(height=480, legend_title_text="")
+            if fmt == "pct":
+                fig.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig, width="stretch")
+
+        exp_t = tab_full.reset_index()
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ Tabela (CSV)", exp_t.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                           file_name=f"setor_{ind}_{tipo}.csv", mime="text/csv")
+        c2.download_button("⬇️ Tabela (XLSX)", excel_bytes({ROT[ind][:31]: exp_t}), file_name=f"setor_{ind}_{tipo}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        with st.expander("Dispersão entre dois indicadores (um período)"):
+            ref_opts = periodos[::-1]
+            ref = st.selectbox("Período", ref_opts, key="disp_per")
+            snap = filtrado[col_periodo(filtrado) == ref]
+            c1, c2, c3 = st.columns(3)
+            x = c1.selectbox("Eixo X", list(METRICAS), index=list(METRICAS).index("div_liq_ebitda_ifrs16"), format_func=lambda k: ROT[k])
+            y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
+            tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
+                               format_func=lambda k: "—" if k is None else ROT[k])
+            pts = snap.dropna(subset=[x, y])
+            if tam:
+                pts = pts[pts[tam] > 0]
+            if pts.empty:
+                st.info("Sem dados suficientes para os eixos escolhidos.")
+            else:
+                fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
+                                 hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
+                                 labels={x: ROT[x], y: ROT[y]})
+                for eixo, k in (("x", x), ("y", y)):
+                    if METRICAS[k][1] == "pct":
+                        fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
+                fig.update_layout(height=520, legend_title_text="Segmento")
+                st.plotly_chart(fig, width="stretch")
 
 # -------- Empresa: séries históricas vs. mediana do segmento
 with aba_emp:
