@@ -93,6 +93,7 @@ st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon=
 def carregar():
     base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
     base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
+    base["cnpj"] = base["cnpj"].astype(str).str.zfill(14)
     for c in ("ticker", "setor", "subsetor", "segmento", "empresa", "notas"):
         base[c] = base[c].fillna("")
     base["rotulo"] = base["ticker"] + " — " + base["empresa"]
@@ -104,7 +105,15 @@ def carregar():
         for c in ("ticker", "empresa", "segmento"):
             fin[c] = fin[c].fillna("")
         fin["rotulo"] = fin["ticker"] + " — " + fin["empresa"]
-    return base, cob, meta, fin
+    mult = pd.read_csv(DADOS / "multiplos.csv.gz", dtype={"cnpj": str}) if (DADOS / "multiplos.csv.gz").exists() else pd.DataFrame()
+    if not mult.empty:
+        mult["cnpj"] = mult["cnpj"].str.zfill(14)
+        mult["data"] = pd.to_datetime(mult["data"], errors="coerce")
+        mult["notas"] = mult["notas"].fillna("")
+        # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
+        pl_ = mult["pl_controladores"].where(mult["pl_controladores"] > 0)
+        mult["roe"] = mult["lucro_controladores_12m"] / pl_
+    return base, cob, meta, fin, mult
 
 
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
@@ -141,7 +150,7 @@ def eixo_x(tipo: str) -> str:
 
 
 try:
-    base, cob, meta, fin = carregar()
+    base, cob, meta, fin, mult = carregar()
 except FileNotFoundError:
     st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
     st.stop()
@@ -378,6 +387,69 @@ with aba_emp:
         with st.expander(f"Notas e alertas ({len(notas)} períodos)"):
             st.dataframe(notas, hide_index=True, width="stretch")
 
+        # ---- múltiplos de mercado (valor de mercado com preços da B3 sem ajuste)
+        st.subheader("Múltiplos de mercado")
+        if mult.empty:
+            st.info("Múltiplos ainda não gerados (multiplos.csv.gz). Rode o workflow no modo universo.")
+        else:
+            tipo_m = "anual" if tipo == "anual" else "trimestral"
+            cnpj_e = d_emp["cnpj"].iloc[0]
+            ini = d_emp["dt_fim"].min()
+            dm = mult[(mult["cnpj"] == cnpj_e) & (mult["tipo"] == tipo_m) & (mult["data"] >= ini)].sort_values("data")
+            if dm.empty:
+                st.info("Sem múltiplos para esta empresa (sem cotação ou sem composição do capital).")
+            else:
+                st.caption("Anual: preço do último pregão do exercício com os números do exercício. "
+                           if tipo_m == "anual" else
+                           "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
+                           "data; lucro e EBITDA dos 12 meses desse documento. O último ponto é o pregão mais recente. ")
+                pares_m = mult[(mult["segmento"] == seg) & (mult["tipo"] == tipo_m)]
+                med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe"]].median()
+                med_m = med_m[med_m.index.isin(dm["data"])]
+                graficos = [("P/VPA (valor de mercado ÷ PL dos controladores)", [("p_vpa", "P/VPA")]),
+                            ("P/L (valor de mercado ÷ lucro 12m dos controladores)", [("p_l", "P/L")]),
+                            ("EV/EBITDA", [("ev_ebitda_ifrs16", "c/ arrendamento ÷ EBITDA IFRS 16"),
+                                           ("ev_ebitda_pre_ifrs16", "s/ arrendamento ÷ EBITDA pré-IFRS 16")]),
+                            ("ROE (lucro 12m ÷ PL dos controladores)", [("roe", "ROE")])]
+                linha1, linha2 = st.columns(2), st.columns(2)
+                cm = [linha1[0], linha1[1], linha2[0], linha2[1]]
+                for (tit, series), col in zip(graficos, cm):
+                    fig = go.Figure()
+                    for k, nome in series:
+                        fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=nome))
+                        fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"),
+                                                 name=f"Mediana {seg}" + ("" if len(series) == 1 else f" ({nome.split(' ')[0]})")))
+                    com_nota = dm[dm["notas"] != ""]
+                    if len(com_nota):
+                        fig.add_trace(go.Scatter(x=com_nota["data"], y=com_nota[series[0][0]], mode="markers",
+                                                 name="Nota no cálculo", marker=dict(symbol="circle-open", size=12, color="orange")))
+                    fig.update_layout(title=tit, height=340, margin=dict(t=40, b=20, l=10, r=10),
+                                      legend=dict(orientation="h", y=-0.25))
+                    if series[0][0] == "roe":
+                        fig.update_yaxes(tickformat=".0%")
+                    else:
+                        fig.update_yaxes(ticksuffix="x")
+                    col.plotly_chart(fig, width="stretch")
+                st.caption("Vazio = denominador ≤ 0 (prejuízo, EBITDA ou PL negativos) ou sem cotação. "
+                           "EV = valor de mercado + dívida líquida + participação de não controladores. "
+                           "ROE usa o mesmo lucro 12m e PL dos múltiplos, então P/VPA = P/L × ROE em cada ponto.")
+                with st.expander("Valor de mercado, EV, preços, ações e notas"):
+                    cols_m = ["data", "periodo_base", "valor_mercado", "ev_com_arrend", "ev_sem_arrend", "ticker_on", "preco_on",
+                              "data_preco_on", "acoes_on", "ticker_pn", "preco_pn", "data_preco_pn", "acoes_pn",
+                              "p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe", "notas"]
+                    tab_m = dm[cols_m].assign(data=dm["data"].dt.date)
+                    st.dataframe(tab_m, hide_index=True, width="stretch", column_config={
+                        "valor_mercado": st.column_config.NumberColumn("Valor de mercado (R$ mm)", format="%,.1f"),
+                        "ev_com_arrend": st.column_config.NumberColumn("EV c/ arrend. (R$ mm)", format="%,.1f"),
+                        "ev_sem_arrend": st.column_config.NumberColumn("EV s/ arrend. (R$ mm)", format="%,.1f"),
+                        "acoes_on": st.column_config.NumberColumn("Ações ON", format="%,.0f"),
+                        "acoes_pn": st.column_config.NumberColumn("Ações PN", format="%,.0f"),
+                        **{k: st.column_config.NumberColumn(k, format="%.2fx") for k in
+                           ("p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16")},
+                        "roe": st.column_config.NumberColumn("ROE", format="percent")})
+                    st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                                       file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
 # -------- Ranking
 with aba_rank:
     if filtrado.empty:
@@ -570,6 +642,13 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
+
+**Múltiplos de mercado (aba Empresa).** Preço de fechamento da série histórica da B3 (COTAHIST), sem ajuste
+por eventos corporativos, × ações em circulação (composição do capital do ITR/DFP, sem tesouraria), somando
+todas as classes. Classe sem negócio na data: último preço negociado; classe que nunca negociou: preço da outra
+classe (indicado nas notas). Trimestral = ponto no tempo (último documento divulgado até a data, lucro e
+EBITDA dos 12 meses); anual = preço do fim do exercício com os números do exercício.
+P/VPA e P/L usam PL e lucro dos controladores; EV inclui a participação de não controladores.
 
 **Bancos e seguradoras (aba Financeiro).** Base separada, a partir das demonstrações completas (plano de
 contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
