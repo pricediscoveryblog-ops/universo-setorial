@@ -12,6 +12,7 @@ Regras (definidas pelo Artur):
 - valor de mercado = Σ classes (ON e PN) × preço da classe. Classe sem negócio na data: último
   preço negociado antes; classe que nunca negociou: preço da outra classe. Sempre indicado em 'notas'.
 - P/VPA = VM ÷ PL dos controladores; P/L = VM ÷ lucro LTM dos controladores (vazio se ≤ 0)
+- dividend yield = dividendos + JCP pagos nos 12 meses (DFC, regime de caixa) ÷ VM
 - EV = VM + dívida líquida + participação de não controladores (a valor contábil)
   EV/EBITDA IFRS 16 = (VM + DL c/ arrendamento + minoritários) ÷ EBITDA IFRS 16
   EV/EBITDA pré-IFRS 16 = (VM + DL s/ arrendamento + minoritários) ÷ EBITDA pré-IFRS 16
@@ -134,6 +135,9 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
             "p_l": _div(vm, flu.get("lucro_controladores")),
             "ev_ebitda_ifrs16": _div(ev_c, flu.get("ebitda")),
             "ev_ebitda_pre_ifrs16": _div(ev_s, flu.get("ebitda_pre_ifrs16")),
+            "dividendos_12m": flu.get("dividendos_pagos"),
+            "dividend_yield": (flu.get("dividendos_pagos") / vm) if pd.notna(vm) and vm > 0
+                              and pd.notna(flu.get("dividendos_pagos")) else np.nan,
             "notas": "; ".join(n for n in notas_base + notas if n)}
 
 
