@@ -408,13 +408,14 @@ with aba_cob:
             if sel:
                 c = c[c[col].isin(sel)]
         st.dataframe(c, hide_index=True, width="stretch", height=520)
-        st.caption("Inclui empresas sem dados e as do setor financeiro (fora da v1), com o motivo.")
+        st.caption("Inclui empresas sem dados e os bancos e seguradoras (fora da v1), com o motivo.")
 
 # -------- Metodologia
 with aba_met:
     st.markdown("""
 **Fontes.** Demonstrações: CVM Dados Abertos (DFP anual e ITR trimestral). Universo e classificação setorial:
-lista de empresas listadas da B3. Setor financeiro fora da v1 (plano de contas diferente).
+lista de empresas listadas da B3. Bancos e seguradoras fora da v1 (plano de contas de instituição financeira);
+shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 estão incluídos.
 
 **Períodos.**
 - *Anual*: DFP; usa a versão reapresentada (exercício anterior da DFP seguinte) quando existe.
@@ -426,7 +427,8 @@ lista de empresas listadas da B3. Setor financeiro fora da v1 (plano de contas d
 - EBITDA = EBIT (DRE 3.05) + D&A da DFC. Não inclui os ajustes que as empresas divulgam.
 - EBITDA pré-IFRS 16 = EBITDA − pagamentos de arrendamento (principal + juros) da DFC; antes de 2019 = EBITDA.
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
-- Capex orgânico = saídas para imobilizado, intangível e ativo de contrato/concessão no bloco de investimento.
+- Capex orgânico = saídas para imobilizado (inclui propriedade para investimento), intangível e ativo de
+  contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
 
