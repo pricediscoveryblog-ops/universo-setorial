@@ -40,10 +40,10 @@ def _baixar(ano: int, forcar: bool):
     return None
 
 
-def ler_cotacoes(anos: list[int], raizes: set[str]) -> pd.DataFrame:
-    """Fechamento diário (mercado à vista) dos papéis ON/PN cujas 4 primeiras letras estão em raizes."""
-    rz = {r.encode() for r in raizes if r}
-    tk, dt, pr, vol = [], [], [], []
+def ler_cotacoes(anos: list[int], raizes: set[str]) -> tuple[pd.DataFrame, dict]:
+    """Fechamento diário (mercado à vista) dos papéis ON/PN. Retorna (cotações, ticker -> raiz atual).
+    Papéis que mudaram de código (ex.: CCRO3 -> MOTV3) são ligados à empresa pelo ISIN, que não muda."""
+    tk, dt, pr, vol, isin = [], [], [], [], []
     for ano in anos:
         p = _baixar(ano, forcar=(ano == max(anos) and not cs.OFFLINE))
         if p is None:
@@ -55,26 +55,49 @@ def ler_cotacoes(anos: list[int], raizes: set[str]) -> pd.DataFrame:
                         if ln[:2] != b"01" or ln[24:27] != b"010":
                             continue
                         cod = ln[12:24].strip()
-                        if len(cod) != 5 or cod[:4] not in rz or cod[4:5] not in SUFIXOS:
+                        if len(cod) != 5 or cod[4:5] not in SUFIXOS:
                             continue
                         fat = int(ln[210:217] or b"1") or 1
                         tk.append(cod.decode())
                         dt.append(ln[2:10].decode())
                         pr.append(int(ln[108:121]) / 100 / fat)
                         vol.append(int(ln[170:188]) / 100)
+                        isin.append(ln[230:242].decode().strip())
         print(f"  COTAHIST {ano}: {len(tk)} registros acumulados")
-    df = pd.DataFrame({"ticker": tk, "data": pd.to_datetime(dt, format="%Y%m%d"), "preco": pr, "volume": vol})
-    return df.sort_values(["ticker", "data"]).reset_index(drop=True)
+    df = pd.DataFrame({"ticker": tk, "data": pd.to_datetime(dt, format="%Y%m%d"), "preco": pr, "volume": vol,
+                       "isin": isin})
+    if df.empty:
+        return df, {}
+    # papel atual de cada empresa (raiz = 4 letras do código de emissor da B3) -> ISINs -> todos os códigos
+    # que já usaram esses ISINs
+    ult_ano = df["data"].dt.year.max()
+    recente = df[df["data"].dt.year >= ult_ano - 1]
+    isins_da_raiz = recente[recente["ticker"].str[:4].isin(raizes)].groupby(recente["ticker"].str[:4])["isin"].unique()
+    cod_por_isin = df.groupby("isin")["ticker"].unique()
+    mapa = {}
+    for raiz, isins in isins_da_raiz.items():
+        for i in isins:
+            if i and i in cod_por_isin.index:
+                for c in cod_por_isin[i]:
+                    mapa.setdefault(c, raiz)
+    for c in df["ticker"].unique():           # papéis da raiz que não aparecem no período recente
+        if c[:4] in raizes:
+            mapa.setdefault(c, c[:4])
+    df = df[df["ticker"].isin(mapa)]
+    antigos = {c: r for c, r in mapa.items() if c[:4] != r}
+    if antigos:
+        print(f"  códigos antigos ligados pelo ISIN: {len(antigos)} (ex.: {list(antigos.items())[:5]})")
+    return df.sort_values(["ticker", "data"]).reset_index(drop=True), mapa
 
 
 class Precos:
-    def __init__(self, cot: pd.DataFrame):
+    def __init__(self, cot: pd.DataFrame, mapa: dict | None = None):
         cot = cot.sort_values(["ticker", "data"])
         self.serie = {t: (list(g["data"]), list(g["preco"])) for t, g in cot.groupby("ticker")}
         liq = cot.groupby("ticker")["volume"].sum()
         self.por_raiz = {}
         for t in self.serie:
-            self.por_raiz.setdefault(t[:4], []).append(t)
+            self.por_raiz.setdefault((mapa or {}).get(t, t[:4]), []).append(t)
         for r in self.por_raiz:
             self.por_raiz[r].sort(key=lambda t: -liq.get(t, 0))
 
@@ -82,13 +105,15 @@ class Precos:
         return [t for t in self.por_raiz.get(raiz, []) if SUFIXOS[t[4:5].encode()] == cls]
 
     def ultimo(self, tickers: list[str], d: pd.Timestamp):
-        """Último preço até a data d, tentando os papéis da classe em ordem de liquidez."""
+        """Último preço até a data d entre os papéis da classe: o de negócio mais recente
+        (em empate, o mais líquido). Assim o código novo de um papel renomeado prevalece sobre o antigo."""
+        melhor = None
         for t in tickers:
             datas, precos = self.serie[t]
             i = bisect_right(datas, d)
-            if i:
-                return t, datas[i - 1], precos[i - 1]
-        return None
+            if i and (melhor is None or datas[i - 1] > melhor[1]):
+                melhor = (t, datas[i - 1], precos[i - 1])
+        return melhor
 
 
 def _valor_mercado(px: Precos, raiz: str, on: float, pn: float, d: pd.Timestamp):
@@ -114,12 +139,27 @@ def _valor_mercado(px: Precos, raiz: str, on: float, pn: float, d: pd.Timestamp)
     return vm, p_on, p_pn, notas
 
 
+def _escala_acoes(vm, pl, receita=None) -> int:
+    """Algumas companhias informam a quantidade de ações em milhares na composição do capital (ex.: Vale,
+    Ambev, Itaú). Detecta pelo absurdo econômico: valor de mercado < 2% do PL (ou < R$ 20 mi sem PL positivo)
+    que vira um P/VPA plausível quando multiplicado por 1.000."""
+    if pd.isna(vm) or vm <= 0:
+        return 1
+    if pd.notna(pl) and pl > 0:
+        return 1000 if vm / pl < 0.02 and 0.05 <= vm * 1000 / pl <= 200 else 1
+    return 1000 if vm < 20 else 1
+
+
 def _div(a, b):
     return a / b if pd.notna(a) and pd.notna(b) and b > 0 else np.nan
 
 
 def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
     vm, p_on, p_pn, notas = _valor_mercado(px, raiz, on, pn, d)
+    f = _escala_acoes(vm, fund.get("pl_controladores"))
+    if f != 1:
+        vm, on, pn = vm * f, on * f, pn * f
+        notas = notas + ["quantidade de ações informada em milhares na CVM: multiplicada por 1.000"]
     nc = fund.get("nao_controladores")
     nc = 0.0 if pd.isna(nc) else nc
     ev_c = vm + fund.get("div_liq_com_arrend") + nc if pd.notna(vm) and pd.notna(fund.get("div_liq_com_arrend")) else np.nan
@@ -168,6 +208,11 @@ def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px) -> list[dic
             if qt is None:
                 continue
             vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], dfim)
+            f = _escala_acoes(vm, r.get("pl_controladores"))
+            qt = (qt[0] * f, qt[1] * f)
+            if f != 1:
+                vm = vm * f
+                notas = notas + ["quantidade de ações informada em milhares na CVM: multiplicada por 1.000"]
             div_ = r.get("dividendos_pagos")
             linhas.append({**meta, "tipo": "anual", "data": dfim.date(), "periodo_base": str(r["exercicio"]),
                            "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
@@ -196,11 +241,11 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
     anos = list(range(int(b["exercicio"].min()) - 1, hoje.year + 1))
     anos = [a for a in anos if a >= hoje.year - n_anos - 1]
     raiz_de = {r["cnpj_cvm"]: str(r.get("issuingCompany") or "")[:4] for _, r in univ.iterrows()}
-    cot = ler_cotacoes(anos, set(raiz_de.values()))
+    cot, mapa = ler_cotacoes(anos, set(r for r in raiz_de.values() if r))
     if cot.empty:
         print("  ! nenhuma cotação lida: múltiplos não calculados")
         return pd.DataFrame()
-    px = Precos(cot)
+    px = Precos(cot, mapa)
     ultimo_pregao = cot["data"].max()
     datas_tri = [d for d in pd.date_range(f"{hoje.year - n_anos}-03-31", ultimo_pregao, freq="QE")]
     if not datas_tri or datas_tri[-1] < ultimo_pregao:
