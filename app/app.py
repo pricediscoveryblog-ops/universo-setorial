@@ -439,7 +439,10 @@ with aba_setor:
 
         d_emp = filtrado.assign(_c=col_periodo(filtrado))
         tab = d_emp.pivot_table(index="rotulo", columns="_c", values=ind, aggfunc="first").reindex(columns=periodos)
-        ult = [p for p in periodos[::-1] if p in tab.columns and tab[p].notna().any()]
+        # ordena pelo último período em que a maioria das empresas já tem dado (evita que um ano com poucas
+        # empresas, como exercícios encerrados em março, defina a ordem)
+        ult = [p for p in periodos[::-1] if p in tab.columns and n_emp.get(p, 0) >= 0.5 * n_emp.max()] or \
+              [p for p in periodos[::-1] if p in tab.columns and tab[p].notna().any()]
         if ult:
             tab = tab.sort_values(ult[0], ascending=False)
         if pct_setor:
