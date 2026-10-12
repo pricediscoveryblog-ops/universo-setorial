@@ -69,6 +69,7 @@ def ler_cotacoes(anos: list[int], raizes: set[str]) -> pd.DataFrame:
 
 class Precos:
     def __init__(self, cot: pd.DataFrame):
+        cot = cot.sort_values(["ticker", "data"])
         self.serie = {t: (list(g["data"]), list(g["preco"])) for t, g in cot.groupby("ticker")}
         liq = cot.groupby("ticker")["volume"].sum()
         self.por_raiz = {}
@@ -141,8 +142,52 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
             "notas": "; ".join(n for n in notas_base + notas if n)}
 
 
+def _acoes_em(cnpj, dt_fim, compos):
+    k = str(pd.Timestamp(dt_fim).date())
+    if (cnpj, k) in compos:
+        return compos[(cnpj, k)], ""
+    ant = sorted((kk[1], v) for kk, v in compos.items() if kk[0] == cnpj and kk[1] <= k)
+    if ant:
+        return ant[-1][1], f"ações do documento de {ant[-1][0]} (sem composição em {k})"
+    return None, "sem composição do capital"
+
+
+def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px) -> list[dict]:
+    """Bancos e seguradoras (base anual da DFP): P/VPA, P/L, dividend yield e ROE no fim do exercício.
+    EV/EBITDA não se aplica a instituições financeiras."""
+    linhas = []
+    for cnpj, g in fin.groupby("cnpj"):
+        raiz = raiz_de.get(cnpj, "")
+        if not raiz or raiz not in px.por_raiz:
+            continue
+        meta = {"cnpj": cnpj, "empresa": g["empresa"].iloc[0], "ticker": g["ticker"].iloc[0], "setor": "Financeiro",
+                "subsetor": g["subsetor"].iloc[0], "segmento": g["segmento"].iloc[0]}
+        for _, r in g.iterrows():
+            dfim = pd.Timestamp(r["dt_fim"])
+            qt, nota = _acoes_em(cnpj, dfim, compos)
+            if qt is None:
+                continue
+            vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], dfim)
+            div_ = r.get("dividendos_pagos")
+            linhas.append({**meta, "tipo": "anual", "data": dfim.date(), "periodo_base": str(r["exercicio"]),
+                           "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
+                           "data_preco_on": p_on[1].date() if p_on else None,
+                           "ticker_pn": p_pn[0] if p_pn else None, "preco_pn": p_pn[2] if p_pn else np.nan,
+                           "data_preco_pn": p_pn[1].date() if p_pn else None,
+                           "acoes_on": qt[0], "acoes_pn": qt[1], "valor_mercado": vm,
+                           "ev_com_arrend": np.nan, "ev_sem_arrend": np.nan,
+                           "pl_controladores": r.get("pl_controladores"),
+                           "lucro_controladores_12m": r.get("lucro_controladores"),
+                           "p_vpa": _div(vm, r.get("pl_controladores")), "p_l": _div(vm, r.get("lucro_controladores")),
+                           "ev_ebitda_ifrs16": np.nan, "ev_ebitda_pre_ifrs16": np.nan,
+                           "dividendos_12m": div_,
+                           "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
+                           "notas": "; ".join(n for n in [nota] + notas if n)})
+    return linhas
+
+
 def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dict, suc: dict,
-             n_anos: int = 10) -> pd.DataFrame:
+             n_anos: int = 10, fin: pd.DataFrame | None = None) -> pd.DataFrame:
     if base.empty:
         return pd.DataFrame()
     b = base.copy()
@@ -223,6 +268,8 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             row = _linha(meta, "trimestral", d, fund, flu, qt[0], qt[1], px, raiz, [nota_disp, nota_flu, nota_qt])
             row["periodo_base"] = fund.get("periodo")
             linhas.append(row)
+    if fin is not None and len(fin):
+        linhas += _financeiras(fin, raiz_de, compos, px)
     out = pd.DataFrame(linhas)
     if len(out):
         out = out.sort_values(["cnpj", "tipo", "data"])
