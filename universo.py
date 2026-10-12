@@ -130,6 +130,50 @@ def _ler_disponib_e_capital(z, nomes, doc, ano, cnpjs):
         print(f"  ! composição do capital {cp[0]}: {e}")
 
 
+def ler_fre_capital(anos: list[int], cnpjs: set[str]) -> dict:
+    """Ações ON/PN do Formulário de Referência (item 17.1, capital social), por empresa e ano de referência.
+    Usado nos anos sem composição do capital no ITR/DFP (os pacotes antigos não trazem essa seção).
+    Preferência: capital integralizado > subscrito > emitido; última versão entregue no ano."""
+    out = {}
+    for ano in anos:
+        nome_zip = f"fre_cia_aberta_{ano}.zip"
+        try:
+            p = cs.baixar(f"{cs.BASE}/DOC/FRE/DADOS/{nome_zip}", cs.CACHE / nome_zip, forcar=False)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! FRE {ano}: {e}")
+            continue
+        try:
+            with zipfile.ZipFile(p) as z:
+                arq = [n for n in z.namelist() if "capital_social" in n.lower()
+                       and not re.search(r"classe|titulo|aumento|desdobramento|reducao", n.lower())]
+                if not arq:
+                    print(f"  ! FRE {ano}: arquivo de capital social não encontrado")
+                    continue
+                c = pd.read_csv(z.open(arq[0]), sep=";", encoding="latin-1", dtype=str)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! FRE {ano}: {e}")
+            continue
+        col = lambda *ps: next((x for x in c.columns if all(p in cs.norm(x) for p in ps)), None)
+        c_cnpj, c_ver, c_tipo = col("cnpj"), col("versao"), col("tipo", "capital")
+        c_on, c_pn = col("quantidade", "ordinaria"), col("quantidade", "preferencia")
+        if not (c_cnpj and c_on):
+            print(f"  ! FRE {ano}: colunas inesperadas {list(c.columns)[:12]}")
+            continue
+        c["c"] = c[c_cnpj].map(cs.so_digitos)
+        c = c[c["c"].isin(cnpjs)].copy()
+        prio = {"integralizado": 0, "subscrito": 1, "emitido": 2}
+        c["_p"] = c[c_tipo].map(lambda t: next((v for k, v in prio.items() if k in cs.norm(t)), 9)) if c_tipo else 0
+        c["_v"] = pd.to_numeric(c[c_ver], errors="coerce").fillna(0) if c_ver else 0
+        c = c[c["_p"] < 9] if c_tipo else c
+        c = c.sort_values(["c", "_v", "_p"], ascending=[True, False, True]).drop_duplicates("c")
+        num = lambda x: pd.to_numeric(c[x], errors="coerce").fillna(0) if x else pd.Series(0.0, index=c.index)
+        for cc, on, pn in zip(c["c"], num(c_on), num(c_pn)):
+            if on + pn > 0:
+                out[(cc, ano)] = (float(on), float(pn))
+        print(f"  FRE {ano}: capital social de {len(c)} empresas")
+    return out
+
+
 def _fim_exercicio(dt_ini: pd.Timestamp) -> pd.Timestamp:
     return dt_ini + pd.DateOffset(years=1) - pd.Timedelta(days=1)
 
@@ -425,8 +469,12 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     # múltiplos de mercado (valor de mercado × PL, lucro e EBITDA), trimestrais e anuais
     try:
         import multiplos
+        anos_compos = sorted({int(k[1][:4]) for k in COMPOS})
+        ano_ini = int(base["exercicio"].min()) if len(base) else 0
+        fre = ler_fre_capital(list(range(ano_ini, (anos_compos[0] if anos_compos else ano_ini) + 1)), cnpjs) \
+            if ano_ini else {}
         mult = multiplos.calcular(base, pd.concat([univ, excluidas], ignore_index=True), DISPONIB, COMPOS, suc,
-                                  n_anos, fin=fb)
+                                  n_anos, fin=fb, fre=fre)
         if len(mult):
             mult.to_csv(SAIDA / "multiplos.csv.gz", index=False, compression="gzip")
             print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
