@@ -82,6 +82,8 @@ FIN = {
     "custo_credito": ("Custo do crédito (PDD / carteira)", "pct", ("despesa_pdd", "carteira_credito")),
     "credito_depositos": ("Crédito / depósitos", "x", ("carteira_credito", "depositos")),
     "indice_eficiencia": ("Índice de eficiência (aprox.)", "pct", None),
+    "dividendos_pagos": ("Dividendos + JCP pagos", "mm", "soma"),
+    "payout": ("Payout (dividendos pagos ÷ lucro)", "pct", ("dividendos_pagos", "lucro_controladores")),
 }
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
@@ -206,6 +208,62 @@ if not sel_met:
     sel_met = PADRAO
 
 st.sidebar.caption(f"{filtrado['cnpj'].nunique()} empresas · {len(filtrado)} linhas no filtro")
+
+def empresa_financeira():
+    """Aba Empresa para bancos e seguradoras: indicadores próprios vs. mediana do segmento + múltiplos."""
+    emp_f = st.selectbox("Instituição", sorted(fin["rotulo"].unique()), key="emp_fin")
+    d = fin[fin["rotulo"] == emp_f].sort_values("exercicio")
+    seg_f = d["segmento"].iloc[0]
+    st.caption(f"Financeiro / {d['subsetor'].iloc[0]} / **{seg_f}** · série anual (DFP) · "
+               "base separada, com plano de contas de instituição financeira")
+    disp_k = [k for k in FIN if k in d.columns and d[k].notna().any()]
+    padrao = [k for k in ("lucro_controladores", "roe", "pl_controladores", "roa", "indice_eficiencia", "custo_credito")
+              if k in disp_k]
+    sel = st.multiselect("Indicadores", disp_k, default=padrao, format_func=lambda k: FIN[k][0], key="ind_emp_fin")
+    med = fin[fin["segmento"] == seg_f].groupby("exercicio")[sel].median() if sel else pd.DataFrame()
+    cols = st.columns(2)
+    for i, k in enumerate(sel):
+        mm = med[med.index.isin(d["exercicio"])]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=d["exercicio"], y=d[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
+        fig.add_trace(go.Scatter(x=mm.index, y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        fig.update_layout(title=FIN[k][0] + {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[FIN[k][1]], height=320,
+                          margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2))
+        if FIN[k][1] == "pct":
+            fig.update_yaxes(tickformat=".0%")
+        cols[i % 2].plotly_chart(fig, width="stretch")
+
+    st.subheader("Múltiplos de mercado")
+    cnpj_f = str(d["cnpj"].iloc[0]).zfill(14)
+    dm = mult[(mult["cnpj"] == cnpj_f) & (mult["tipo"] == "anual")].sort_values("data") if not mult.empty else pd.DataFrame()
+    if dm.empty:
+        st.info("Múltiplos de bancos e seguradoras ainda não gerados: aparecem depois da próxima execução do coletor.")
+        return
+    st.caption("Anual: preço do último pregão do exercício com lucro e PL dos controladores do exercício. "
+               "EV/EBITDA não se aplica a instituições financeiras.")
+    pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == "anual")]
+    med_m = pares_m.groupby("data")[["p_vpa", "p_l", "roe", "dividend_yield"]].median()
+    med_m = med_m[med_m.index.isin(dm["data"])]
+    graficos = [("P/VPA", "p_vpa", "x"), ("P/L", "p_l", "x"), ("ROE (lucro ÷ PL dos controladores)", "roe", "pct"),
+                ("Dividend yield (dividendos + JCP pagos ÷ valor de mercado)", "dividend_yield", "pct")]
+    cm = [c for _ in range(2) for c in st.columns(2)]
+    for (tit, k, fmt), col in zip(graficos, cm):
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
+        fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        fig.update_layout(title=tit, height=320, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.25))
+        if fmt == "pct":
+            fig.update_yaxes(tickformat=".0%")
+        else:
+            fig.update_yaxes(ticksuffix="x")
+        col.plotly_chart(fig, width="stretch")
+    st.caption("No setor financeiro, P/VPA × ROE é a leitura central: P/VPA = P/L × ROE em cada ano.")
+    with st.expander("Valor de mercado, preços, ações e notas"):
+        cols_m = ["data", "valor_mercado", "ticker_on", "preco_on", "acoes_on", "ticker_pn", "preco_pn", "acoes_pn",
+                  "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
+        tab_m = dm[[c for c in cols_m if c in dm.columns]].assign(data=dm["data"].dt.date)
+        st.dataframe(tab_m, hide_index=True, width="stretch")
+
 
 # ------------------------------------------------------------------ abas
 aba_setor, aba_emp, aba_rank, aba_fin, aba_dados, aba_cob, aba_met = st.tabs(
@@ -358,7 +416,11 @@ with aba_setor:
 
 # -------- Empresa: séries históricas vs. mediana do segmento
 with aba_emp:
-    if filtrado.empty:
+    grupo_e = (st.radio("Grupo de empresas", ["Não financeiras", "Bancos e seguradoras"], horizontal=True,
+                        key="grupo_emp") if not fin.empty else "Não financeiras")
+    if grupo_e == "Bancos e seguradoras":
+        empresa_financeira()
+    elif filtrado.empty:
         st.info("Nenhum dado para o filtro.")
     else:
         emp = st.selectbox("Empresa", sorted(filtrado["rotulo"].unique()))
