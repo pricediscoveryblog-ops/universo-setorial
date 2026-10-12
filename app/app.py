@@ -137,6 +137,7 @@ def carregar():
         mult["cnpj"] = mult["cnpj"].str.zfill(14)
         mult["data"] = pd.to_datetime(mult["data"], errors="coerce")
         mult["notas"] = mult["notas"].fillna("")
+        mult["rotulo"] = mult["ticker"].fillna("").astype(str) + " — " + mult["empresa"].fillna("").astype(str)
         # colunas que podem faltar em bases geradas por versões anteriores do coletor
         for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
                   "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l", "ebitda_12m",
@@ -323,6 +324,19 @@ def empresa_financeira():
         st.dataframe(tab_m, hide_index=True, width="stretch")
 
 
+NIVEIS_CMP = {"Segmento": "segmento", "Subsetor": "subsetor", "Setor": "setor"}
+
+
+def grupo_comparacao(df: pd.DataFrame, linha: pd.Series, nivel: str, cesta: list[str]) -> pd.DataFrame:
+    """Recorte usado nas medianas da aba Empresa: segmento, subsetor ou setor da empresa, ou uma cesta
+    escolhida pelo usuário. A própria empresa entra na mediana do segmento/subsetor/setor; na cesta,
+    só se for incluída."""
+    if nivel == "Cesta de empresas":
+        return df[df["rotulo"].isin(cesta)]
+    col = NIVEIS_CMP[nivel]
+    return df[df[col] == linha[col]]
+
+
 RELATIVAS_PADRAO = ["margem_bruta", "margem_ebitda", "margem_liquida", "roe_pl_final", "giro_ativo",
                     "alavancagem_ativo_pl", "div_liq_ebitda_ifrs16", "capex_org_receita"]
 
@@ -361,7 +375,7 @@ def graus_alavancagem(g: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def secao_crescimento_dupont(rotulo: str, seg: str):
+def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     d, t = serie_anual_ou_ltm(rotulo)
     if len(d) < 2:
         st.info("Série insuficiente para crescimento e DuPont.")
@@ -395,7 +409,7 @@ def secao_crescimento_dupont(rotulo: str, seg: str):
     dp = d[["periodo", "margem_liquida", "giro_ativo", "alavancagem_ativo_pl", "roe_pl_final"]].copy()
     dp["roe_dupont"] = dp["margem_liquida"] * dp["giro_ativo"] * dp["alavancagem_ativo_pl"]
     cols = st.columns(4)
-    pares = base[(base["tipo"] == t) & (base["segmento"] == seg)]
+    pares = cmp(base[base["tipo"] == t])
     med = pares.groupby("periodo")[["margem_liquida", "giro_ativo", "alavancagem_ativo_pl", "roe_pl_final"]].median()
     for (k, tit, fmt), col in zip([("margem_liquida", "Margem líquida", "pct"), ("giro_ativo", "Giro do ativo", "x"),
                                    ("alavancagem_ativo_pl", "Alavancagem (ativo ÷ PL)", "x"),
@@ -403,7 +417,7 @@ def secao_crescimento_dupont(rotulo: str, seg: str):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=dp["periodo"], y=dp[k], mode="lines+markers", name="Empresa"))
         mm = med.reindex(dp["periodo"])
-        fig.add_trace(go.Scatter(x=dp["periodo"], y=mm[k], mode="lines", line=dict(dash="dash"), name="Mediana"))
+        fig.add_trace(go.Scatter(x=dp["periodo"], y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {nome_cmp}"))
         fig.update_layout(title=tit, height=280, showlegend=False, margin=dict(t=40, b=20, l=10, r=10))
         fig.update_yaxes(tickformat=".0%" if fmt == "pct" else None, ticksuffix="" if fmt == "pct" else "x")
         col.plotly_chart(fig, width="stretch")
@@ -598,17 +612,34 @@ with aba_emp:
         d_emp = filtrado[filtrado["rotulo"] == emp].sort_values(eixo_x(tipo))
         seg = d_emp["segmento"].iloc[0]
         st.caption(f"{d_emp['setor'].iloc[0]} / {d_emp['subsetor'].iloc[0]} / **{seg}** · base {d_emp['fonte'].iloc[-1]}")
+        linha_e = d_emp.iloc[-1]
+        cc1, cc2 = st.columns([1, 2])
+        nivel_cmp = cc1.radio("Comparar com (mediana)", list(NIVEIS_CMP) + ["Cesta de empresas"], horizontal=True,
+                              key="cmp_nivel")
+        cesta = []
+        if nivel_cmp == "Cesta de empresas":
+            cesta = cc2.multiselect("Empresas da cesta (qualquer empresa da base)", sorted(base["rotulo"].unique()),
+                                    default=[emp], key="cmp_cesta")
+            nome_cmp = f"da cesta ({len(cesta)})"
+        else:
+            nome_cmp = str(linha_e[NIVEIS_CMP[nivel_cmp]])
+        cmp = lambda df: grupo_comparacao(df, linha_e, nivel_cmp, cesta)
+        n_cmp = cmp(base[base["tipo"] == tipo])["cnpj"].nunique()
+        if nivel_cmp == "Cesta de empresas":
+            cc2.caption(f"Mediana calculada sobre {n_cmp} empresa(s) da cesta.")
+        else:
+            cc2.caption(f"Mediana calculada sobre {n_cmp} empresa(s): {nome_cmp}.")
         relativas = [k for k in METRICAS if METRICAS[k][1] in ("pct", "x")]
         sel_rel = st.multiselect("Indicadores relativos", relativas, default=RELATIVAS_PADRAO,
                                  format_func=lambda k: ROT[k], key="rel_emp")
-        pares = base[(base["tipo"] == tipo) & (base["segmento"] == seg)]
+        pares = cmp(base[base["tipo"] == tipo])
         med_seg = pares.groupby(eixo_x(tipo))[sel_rel].median(numeric_only=True).reset_index()
         cols = st.columns(2)
         for i, m in enumerate(sel_rel):
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=d_emp[eixo_x(tipo)], y=d_emp[m], mode="lines+markers", name=emp.split(" — ")[0]))
             mm = med_seg[med_seg[eixo_x(tipo)].isin(d_emp[eixo_x(tipo)])]
-            fig.add_trace(go.Scatter(x=mm[eixo_x(tipo)], y=mm[m], mode="lines", name=f"Mediana {seg}",
+            fig.add_trace(go.Scatter(x=mm[eixo_x(tipo)], y=mm[m], mode="lines", name=f"Mediana {nome_cmp}",
                                      line=dict(dash="dash")))
             alertas = d_emp[d_emp["alerta"]]
             if len(alertas):
@@ -627,7 +658,7 @@ with aba_emp:
         with st.expander(f"Notas e alertas ({len(notas)} períodos)"):
             st.dataframe(notas, hide_index=True, width="stretch")
 
-        secao_crescimento_dupont(emp, seg)
+        secao_crescimento_dupont(emp, cmp, nome_cmp)
 
         # ---- múltiplos de mercado (valor de mercado com preços da B3 sem ajuste)
         st.subheader("Múltiplos de mercado")
@@ -645,7 +676,7 @@ with aba_emp:
                            if tipo_m == "anual" else
                            "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
                            "data; lucro e EBITDA dos 12 meses desse documento. O último ponto é o pregão mais recente. ")
-                pares_m = mult[(mult["segmento"] == seg) & (mult["tipo"] == tipo_m)]
+                pares_m = cmp(mult[mult["tipo"] == tipo_m])
                 med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
                                                     "dividend_yield"]].median()
                 med_m = med_m[med_m.index.isin(dm["data"])]
@@ -662,7 +693,7 @@ with aba_emp:
                     for k, nome in series:
                         fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=nome))
                         fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"),
-                                                 name=f"Mediana {seg}" + ("" if len(series) == 1 else f" ({nome.split(' ')[0]})")))
+                                                 name=f"Mediana {nome_cmp}" + ("" if len(series) == 1 else f" ({nome.split(' ')[0]})")))
                     com_nota = dm[dm["notas"] != ""]
                     if len(com_nota):
                         fig.add_trace(go.Scatter(x=com_nota["data"], y=com_nota[series[0][0]], mode="markers",
