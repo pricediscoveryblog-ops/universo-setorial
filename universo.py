@@ -404,6 +404,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     if aud:
         ad = pd.DataFrame(aud).drop(columns=["dt_ini", "dt_fim"], errors="ignore")
         ad.to_csv(SAIDA / "auditoria.csv.gz", index=False, compression="gzip")
+    fb = None
     if estrutura_fin:
         ef = pd.concat(estrutura_fin, ignore_index=True)
         ident_f = excluidas.drop_duplicates("cnpj_cvm").set_index("cnpj_cvm")
@@ -424,7 +425,8 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
     # múltiplos de mercado (valor de mercado × PL, lucro e EBITDA), trimestrais e anuais
     try:
         import multiplos
-        mult = multiplos.calcular(base, univ, DISPONIB, COMPOS, suc, n_anos)
+        mult = multiplos.calcular(base, pd.concat([univ, excluidas], ignore_index=True), DISPONIB, COMPOS, suc,
+                                  n_anos, fin=fb)
         if len(mult):
             mult.to_csv(SAIDA / "multiplos.csv.gz", index=False, compression="gzip")
             print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
