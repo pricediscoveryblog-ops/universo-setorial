@@ -182,17 +182,28 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
             "notas": "; ".join(n for n in notas_base + notas if n)}
 
 
-def _acoes_em(cnpj, dt_fim, compos):
+def _acoes_fre(cnpjs, dt_fim, fre):
+    """Fallback: Formulário de Referência do mesmo ano (ou o mais próximo, até 1 ano de distância)."""
+    ano = pd.Timestamp(dt_fim).year
+    for a in (ano, ano + 1, ano - 1):
+        for c in cnpjs:
+            if (c, a) in fre:
+                return fre[(c, a)], (f"ações do Formulário de Referência {a} (capital social; sem desconto de "
+                                     "tesouraria; aproximação para anos sem composição do capital no ITR/DFP)")
+    return None, "sem composição do capital"
+
+
+def _acoes_em(cnpj, dt_fim, compos, fre=None):
     k = str(pd.Timestamp(dt_fim).date())
     if (cnpj, k) in compos:
         return compos[(cnpj, k)], ""
     ant = sorted((kk[1], v) for kk, v in compos.items() if kk[0] == cnpj and kk[1] <= k)
     if ant:
         return ant[-1][1], f"ações do documento de {ant[-1][0]} (sem composição em {k})"
-    return None, "sem composição do capital"
+    return _acoes_fre([cnpj], dt_fim, fre or {})
 
 
-def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px) -> list[dict]:
+def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px, fre=None) -> list[dict]:
     """Bancos e seguradoras (base anual da DFP): P/VPA, P/L, dividend yield e ROE no fim do exercício.
     EV/EBITDA não se aplica a instituições financeiras."""
     linhas = []
@@ -204,7 +215,7 @@ def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px) -> list[dic
                 "subsetor": g["subsetor"].iloc[0], "segmento": g["segmento"].iloc[0]}
         for _, r in g.iterrows():
             dfim = pd.Timestamp(r["dt_fim"])
-            qt, nota = _acoes_em(cnpj, dfim, compos)
+            qt, nota = _acoes_em(cnpj, dfim, compos, fre)
             if qt is None:
                 continue
             vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], dfim)
@@ -232,7 +243,7 @@ def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px) -> list[dic
 
 
 def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dict, suc: dict,
-             n_anos: int = 10, fin: pd.DataFrame | None = None) -> pd.DataFrame:
+             n_anos: int = 10, fin: pd.DataFrame | None = None, fre: dict | None = None) -> pd.DataFrame:
     if base.empty:
         return pd.DataFrame()
     b = base.copy()
@@ -267,7 +278,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             ant = sorted((kk[1], v) for c in cands for kk, v in compos.items() if kk[0] == c and kk[1] <= k)
             if ant:
                 return ant[-1][1], f"ações do documento de {ant[-1][0]} (sem composição em {k})"
-            return None, "sem composição do capital"
+            return _acoes_fre(cands, dt_fim, fre or {})
 
         def divulgado(dt_fim):
             k = str(pd.Timestamp(dt_fim).date())
@@ -314,7 +325,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             row["periodo_base"] = fund.get("periodo")
             linhas.append(row)
     if fin is not None and len(fin):
-        linhas += _financeiras(fin, raiz_de, compos, px)
+        linhas += _financeiras(fin, raiz_de, compos, px, fre)
     out = pd.DataFrame(linhas)
     if len(out):
         out = out.sort_values(["cnpj", "tipo", "data"])
