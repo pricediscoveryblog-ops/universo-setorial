@@ -119,6 +119,11 @@ def carregar():
         mult["cnpj"] = mult["cnpj"].str.zfill(14)
         mult["data"] = pd.to_datetime(mult["data"], errors="coerce")
         mult["notas"] = mult["notas"].fillna("")
+        # colunas que podem faltar em bases geradas por versões anteriores do coletor
+        for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
+                  "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l"):
+            if c not in mult.columns:
+                mult[c] = np.nan
         # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
         pl_ = mult["pl_controladores"].where(mult["pl_controladores"] > 0)
         mult["roe"] = mult["lucro_controladores_12m"] / pl_
