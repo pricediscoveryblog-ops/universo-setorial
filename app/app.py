@@ -448,9 +448,9 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_fin, aba_dados, aba_cob, aba_met = st.tabs(
-    ["Visão do setor", "Empresa", "Ranking", "Financeiro (bancos e seguradoras)", "Dados e download", "Cobertura",
-     "Metodologia"])
+aba_setor, aba_emp, aba_rank, aba_scr, aba_fin, aba_dados, aba_cob, aba_met = st.tabs(
+    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Financeiro (bancos e seguradoras)",
+     "Dados e download", "Cobertura", "Metodologia"])
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
@@ -729,6 +729,113 @@ with aba_emp:
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
+# -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
+MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
+               "ev_ebitda_pre_ifrs16", "dividend_yield"]
+EXTRA_SCR = {"cresc_receita_12m": ("Crescimento da receita 12m (a/a)", "pct"),
+             "cresc_ebitda_12m": ("Crescimento do EBITDA 12m (a/a)", "pct"),
+             "cresc_lucro_12m": ("Crescimento do lucro 12m (a/a)", "pct")}
+
+
+def snapshot_atual(cnpjs) -> pd.DataFrame:
+    """Uma linha por empresa: fundamentos do LTM mais recente (ou do último anual, se não houver LTM) e
+    múltiplos de mercado na última cotação disponível (com PL, dívida e lucro do último documento divulgado)."""
+    b = base[base["cnpj"].isin(cnpjs)]
+    ltm = b[b["tipo"] == "ltm"]
+    anu = b[(b["tipo"] == "anual") & ~b["cnpj"].isin(ltm["cnpj"])]
+    fonte = pd.concat([ltm, anu])
+    ult = fonte.sort_values("dt_fim").groupby("cnpj").tail(1).copy()
+    # crescimento contra o mesmo período 1 ano antes
+    ref = ult[["cnpj", "dt_fim"]].assign(dt_ant=lambda x: x["dt_fim"] - pd.DateOffset(years=1))
+    j = ref.merge(fonte[["cnpj", "dt_fim", "receita", "ebitda", "lucro_liquido"]], on="cnpj", suffixes=("", "_a"))
+    j = j[(j["dt_fim_a"] - j["dt_ant"]).abs() <= pd.Timedelta(days=20)].drop_duplicates("cnpj")
+    j = j.set_index("cnpj")
+    for c, k in (("receita", "cresc_receita_12m"), ("ebitda", "cresc_ebitda_12m"), ("lucro_liquido", "cresc_lucro_12m")):
+        ant = ult["cnpj"].map(j[c]) if len(j) else np.nan
+        ult[k] = np.where(pd.notna(ant) & (ant > 0), ult[c] / ant - 1, np.nan)
+    ult = ult.rename(columns={"periodo": "periodo_fundamentos"})
+    # mercado: ponto mais recente da série trimestral de múltiplos (= último pregão)
+    ult = ult.drop(columns=[c for c in MERCADO_SCR if c in ult.columns])
+    if not mult.empty:
+        mm = mult[(mult["tipo"] == "trimestral") & mult["cnpj"].isin(cnpjs)].sort_values("data").groupby("cnpj").tail(1)
+        dpo = pd.to_datetime(mm.get("data_preco_on"), errors="coerce")
+        dpp = pd.to_datetime(mm.get("data_preco_pn"), errors="coerce")
+        mm = mm.assign(data_ultimo_negocio=pd.concat([dpo, dpp], axis=1).max(axis=1))
+        ult = ult.merge(mm[["cnpj", "data", "data_ultimo_negocio", "notas"] + MERCADO_SCR]
+                        .rename(columns={"data": "data_cotacao", "notas": "notas_mercado"}), on="cnpj", how="left")
+    else:
+        for c in MERCADO_SCR + ["data_cotacao", "data_ultimo_negocio", "notas_mercado"]:
+            ult[c] = np.nan
+    return ult
+
+
+with aba_scr:
+    st.caption("Uma linha por empresa. Fundamentos: últimos 12 meses (LTM) mais recentes. Indicadores de mercado: "
+               "última cotação disponível, com PL, dívida e lucro do último documento divulgado até essa data. "
+               "Respeita os filtros de setor, subsetor, segmento e empresas da barra lateral.")
+    snap = snapshot_atual(set(f3["cnpj"]) if sel_emp == [] else set(f3[f3["rotulo"].isin(sel_emp)]["cnpj"]))
+    rot_scr = {**{k: ROT[k] for k in METRICAS}, **{k: v[0] for k, v in EXTRA_SCR.items()}}
+    fmt_scr = {**{k: METRICAS[k][1] for k in METRICAS}, **{k: v[1] for k, v in EXTRA_SCR.items()}}
+    opcoes_scr = [k for k in list(METRICAS) + list(EXTRA_SCR) if k in snap.columns and snap[k].notna().any()]
+    c1, c2 = st.columns([3, 2])
+    sel_scr = c1.multiselect("Indicadores para filtrar", opcoes_scr,
+                             default=[k for k in ("p_l", "p_vpa", "div_liq_ebitda_ifrs16", "roe_pl_final") if k in opcoes_scr],
+                             format_func=lambda k: rot_scr[k] + (" (%)" if fmt_scr[k] == "pct" else
+                                                                 " (R$ mm)" if fmt_scr[k] == "mm" else " (x)"),
+                             key="scr_ind")
+    sem_velha = c2.checkbox("Excluir cotações antigas (último negócio há mais de 30 dias)", value=True, key="scr_velha")
+    sem_alerta = c2.checkbox("Excluir empresas com alerta de qualidade no último LTM", value=False, key="scr_alerta")
+    res = snap.copy()
+    if sem_velha and "data_ultimo_negocio" in res:
+        ref_d = pd.to_datetime(res["data_cotacao"]).max()
+        res = res[(ref_d - pd.to_datetime(res["data_ultimo_negocio"])).dt.days <= 30]
+    if sem_alerta:
+        res = res[~res["alerta"].fillna(False).astype(bool)]
+    st.markdown("**Faixas** (deixe em branco para não limitar; percentuais em %, ex.: 15 = 15%)")
+    for k in sel_scr:
+        f = fmt_scr[k]
+        serie = res[k] * (100 if f == "pct" else 1)
+        med = serie.median()
+        a, b_, c_ = st.columns([2, 1, 1])
+        a.markdown(f"{rot_scr[k]}  \n<small>mediana do filtro: {med:,.2f}{'%' if f == 'pct' else 'x' if f == 'x' else ''}"
+                   f" · {serie.notna().sum()} empresas com dado</small>", unsafe_allow_html=True)
+        lo = b_.number_input("Mínimo", value=None, key=f"scr_lo_{k}", label_visibility="collapsed", placeholder="mínimo")
+        hi = c_.number_input("Máximo", value=None, key=f"scr_hi_{k}", label_visibility="collapsed", placeholder="máximo")
+        if lo is not None or hi is not None:
+            v = res[k] * (100 if f == "pct" else 1)
+            ok = v.notna()
+            if lo is not None:
+                ok &= v >= lo
+            if hi is not None:
+                ok &= v <= hi
+            res = res[ok]
+    st.markdown(f"**{len(res)} empresas** atendem aos critérios (de {len(snap)} no recorte).")
+    base_cols = ["p_l", "p_vpa", "ev_ebitda_ifrs16", "dividend_yield", "roe_pl_final", "margem_ebitda",
+                 "div_liq_ebitda_ifrs16", "cresc_receita_12m", "valor_mercado"]
+    mostrar = list(dict.fromkeys(sel_scr + [c for c in base_cols if c in res.columns]))
+    tab_r = res[["rotulo", "segmento", "periodo_fundamentos", "data_cotacao"] + mostrar].copy()
+    tab_r["data_cotacao"] = pd.to_datetime(tab_r["data_cotacao"]).dt.date
+    cfg = {"rotulo": st.column_config.TextColumn("Empresa"), "segmento": "Segmento",
+           "periodo_fundamentos": "Fundamentos", "data_cotacao": "Cotação de"}
+    vis_r = tab_r.copy()
+    for k in mostrar:
+        if fmt_scr[k] == "pct":
+            vis_r[k] = vis_r[k] * 100
+            cfg[k] = st.column_config.NumberColumn(rot_scr[k], format="%.1f%%")
+        elif fmt_scr[k] == "x":
+            cfg[k] = st.column_config.NumberColumn(rot_scr[k], format="%.2fx")
+        else:
+            cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (R$ mm)", format="%,.0f")
+    st.dataframe(vis_r.sort_values(mostrar[0] if mostrar else "rotulo"), column_config=cfg, hide_index=True,
+                 width="stretch", height=min(700, 38 + 35 * len(vis_r)))
+    st.caption("Clique no cabeçalho para ordenar. Múltiplos vazios = denominador ≤ 0 ou sem cotação.")
+    exp_r = tab_r.rename(columns={k: rot_scr[k] for k in mostrar})
+    d1, d2 = st.columns(2)
+    d1.download_button("⬇️ Resultado (CSV)", exp_r.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                       file_name="filtro_indicadores.csv", mime="text/csv", key="scr_csv")
+    d2.download_button("⬇️ Resultado (XLSX)", excel_bytes({"filtro": exp_r}), file_name="filtro_indicadores.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="scr_xlsx")
 
 # -------- Ranking
 with aba_rank:
