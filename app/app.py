@@ -52,6 +52,15 @@ METRICAS = {
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
+    # mercado (preço da B3 × ações; ver Metodologia)
+    "valor_mercado": ("Valor de mercado", "mm", "Mercado"),
+    "ev_com_arrend": ("EV c/ arrendamento", "mm", "Mercado"),
+    "ev_sem_arrend": ("EV s/ arrendamento", "mm", "Mercado"),
+    "p_vpa": ("P/VPA", "x", "Mercado"),
+    "p_l": ("P/L", "x", "Mercado"),
+    "ev_ebitda_ifrs16": ("EV/EBITDA IFRS 16 (c/ arrend.)", "x", "Mercado"),
+    "ev_ebitda_pre_ifrs16": ("EV/EBITDA pré-IFRS 16 (s/ arrend.)", "x", "Mercado"),
+    "dividend_yield": ("Dividend yield", "pct", "Mercado"),
 }
 ROT = {k: v[0] for k, v in METRICAS.items()}
 # razões agregadas do setor = soma do numerador / soma do denominador (só empresas com os dois)
@@ -60,7 +69,11 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "roe_pl_final": ("lucro_liquido", "patrimonio_liquido"), "capex_org_receita": ("capex_organico", "receita"),
          "capex_org_da": ("capex_organico", "da"), "div_liq_ebitda_ifrs16": ("div_liq_com_arrend", "ebitda"),
          "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16"),
-         "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido")}
+         "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido"),
+         # múltiplos do setor = Σ valor de mercado (ou EV) ÷ Σ fundamento, na mesma data
+         "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
+         "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
+         "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -87,6 +100,8 @@ FIN = {
     "indice_eficiencia": ("Índice de eficiência (aprox.)", "pct", None),
     "dividendos_pagos": ("Dividendos + JCP pagos", "mm", "soma"),
     "payout": ("Payout (dividendos pagos ÷ lucro)", "pct", ("dividendos_pagos", "lucro_controladores")),
+    "valor_mercado": ("Valor de mercado", "mm", "soma"),
+    "p_l": ("P/L", "x", ("valor_mercado", "lucro_controladores")),
 }
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
@@ -124,12 +139,41 @@ def carregar():
         mult["notas"] = mult["notas"].fillna("")
         # colunas que podem faltar em bases geradas por versões anteriores do coletor
         for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
-                  "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l"):
+                  "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l", "ebitda_12m",
+                  "ebitda_pre_ifrs16_12m", "valor_mercado"):
             if c not in mult.columns:
                 mult[c] = np.nan
         # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
         pl_ = mult["pl_controladores"].where(mult["pl_controladores"] > 0)
         mult["roe"] = mult["lucro_controladores_12m"] / pl_
+        # leva os múltiplos para a base (visão do setor, ranking, dados): anual na data de fim do exercício;
+        # trimestral e LTM na data de fim do trimestre (ponto no tempo: documentos já divulgados até ali)
+        ren = {"pl_controladores": "m_pl_controladores", "lucro_controladores_12m": "m_lucro_12m",
+               "ebitda_12m": "m_ebitda_12m", "ebitda_pre_ifrs16_12m": "m_ebitda_pre_12m",
+               "dividendos_12m": "m_dividendos_12m"}
+        cm = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
+              "ev_ebitda_pre_ifrs16", "dividend_yield"] + list(ren)
+        mm = mult[["cnpj", "tipo", "data"] + cm].rename(columns=ren).drop_duplicates(["cnpj", "tipo", "data"])
+        partes = []
+        for tipos, tm in ((["anual"], "anual"), (["trimestral", "ltm"], "trimestral")):
+            b_ = base[base["tipo"].isin(tipos)]
+            m_ = mm[mm["tipo"] == tm].drop(columns="tipo")
+            partes.append(b_.merge(m_, left_on=["cnpj", "dt_fim"], right_on=["cnpj", "data"], how="left")
+                          .drop(columns="data"))
+        base = pd.concat(partes, ignore_index=True)
+        if not fin.empty:
+            fin["_dt"] = pd.to_datetime(fin["dt_fim"], errors="coerce")
+            fin["cnpj"] = fin["cnpj"].astype(str).str.zfill(14)
+            mf = mult[mult["tipo"] == "anual"][["cnpj", "data", "valor_mercado", "p_l"]].drop_duplicates(["cnpj", "data"])
+            fin = fin.drop(columns=[c for c in ("valor_mercado", "p_l") if c in fin.columns]) \
+                     .merge(mf, left_on=["cnpj", "_dt"], right_on=["cnpj", "data"], how="left").drop(columns=["data", "_dt"])
+    for c in [k for k in METRICAS if k not in base.columns] + list(
+            {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m"} - set(base.columns)):
+        base[c] = np.nan
+    if not fin.empty:
+        for k in FIN:
+            if k not in fin.columns:
+                fin[k] = np.nan
     return base, cob, meta, fin, mult
 
 
@@ -847,6 +891,9 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
+- Mercado na visão do setor/ranking/dados: anual = preço do fim do exercício; trimestral e LTM = múltiplo na data de
+  fim do trimestre, com os documentos já divulgados até ali (por isso pode usar o trimestre anterior).
+  Setor agregado: Σ valor de mercado (ou EV) ÷ Σ PL, lucro 12m ou EBITDA 12m das empresas com os dois dados.
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
