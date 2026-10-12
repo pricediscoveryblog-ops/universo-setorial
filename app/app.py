@@ -111,6 +111,9 @@ def carregar():
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
     if not fin.empty:
+        for k in FIN:  # métricas novas ausentes em bases geradas por versões anteriores do coletor
+            if k not in fin.columns:
+                fin[k] = np.nan
         for c in ("ticker", "empresa", "segmento"):
             fin[c] = fin[c].fillna("")
         fin["rotulo"] = fin["ticker"] + " — " + fin["empresa"]
