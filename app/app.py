@@ -48,6 +48,8 @@ METRICAS = {
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
     "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
     "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
+    "giro_ativo": ("Giro do ativo (receita ÷ ativo total)", "x", "Margens e retorno"),
+    "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
 }
@@ -57,7 +59,8 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "margem_ebitda_pre_ifrs16": ("ebitda_pre_ifrs16", "receita"), "margem_liquida": ("lucro_liquido", "receita"),
          "roe_pl_final": ("lucro_liquido", "patrimonio_liquido"), "capex_org_receita": ("capex_organico", "receita"),
          "capex_org_da": ("capex_organico", "da"), "div_liq_ebitda_ifrs16": ("div_liq_com_arrend", "ebitda"),
-         "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16")}
+         "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16"),
+         "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido")}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -101,6 +104,9 @@ def carregar():
         base[c] = base[c].fillna("")
     base["rotulo"] = base["ticker"] + " — " + base["empresa"]
     base["alerta"] = base["notas"].str.contains("implausível|ausente|alerta", regex=True)
+    # DuPont: ROE (LL ÷ PL final) = margem líquida × giro do ativo × alavancagem (ativo ÷ PL)
+    base["giro_ativo"] = base["receita"] / base["ativo_total"].where(base["ativo_total"] > 0)
+    base["alavancagem_ativo_pl"] = base["ativo_total"] / base["patrimonio_liquido"].where(base["patrimonio_liquido"] > 0)
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
@@ -216,8 +222,8 @@ def empresa_financeira():
     seg_f = d["segmento"].iloc[0]
     st.caption(f"Financeiro / {d['subsetor'].iloc[0]} / **{seg_f}** · série anual (DFP) · "
                "base separada, com plano de contas de instituição financeira")
-    disp_k = [k for k in FIN if k in d.columns and d[k].notna().any()]
-    padrao = [k for k in ("lucro_controladores", "roe", "pl_controladores", "roa", "indice_eficiencia", "custo_credito")
+    disp_k = [k for k in FIN if k in d.columns and d[k].notna().any() and FIN[k][1] in ("pct", "x")]
+    padrao = [k for k in ("roe", "roa", "pl_ativo", "indice_eficiencia", "custo_credito", "payout")
               if k in disp_k]
     sel = st.multiselect("Indicadores", disp_k, default=padrao, format_func=lambda k: FIN[k][0], key="ind_emp_fin")
     med = fin[fin["segmento"] == seg_f].groupby("exercicio")[sel].median() if sel else pd.DataFrame()
@@ -263,6 +269,116 @@ def empresa_financeira():
                   "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
         tab_m = dm[[c for c in cols_m if c in dm.columns]].assign(data=dm["data"].dt.date)
         st.dataframe(tab_m, hide_index=True, width="stretch")
+
+
+RELATIVAS_PADRAO = ["margem_bruta", "margem_ebitda", "margem_liquida", "roe_pl_final", "giro_ativo",
+                    "alavancagem_ativo_pl", "div_liq_ebitda_ifrs16", "capex_org_receita"]
+
+
+def serie_anual_ou_ltm(rotulo: str) -> tuple[pd.DataFrame, str]:
+    """Série para crescimento e DuPont: anual na visão anual; LTM nas visões trimestral/LTM
+    (trimestre isolado não serve para crescimento anual nem para giro)."""
+    t = "anual" if tipo == "anual" else "ltm"
+    d = base[(base["rotulo"] == rotulo) & (base["tipo"] == t)].sort_values("dt_fim").copy()
+    return d, t
+
+
+def crescimento(d: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Variação contra o mesmo período do ano anterior (anual: ano anterior; LTM: 4 trimestres antes).
+    Vazio quando a base anterior é ≤ 0 (crescimento sobre base negativa não tem leitura)."""
+    ant = d.copy()
+    ant["dt_fim"] = ant["dt_fim"] + pd.DateOffset(years=1)
+    j = pd.merge_asof(d.sort_values("dt_fim"), ant[["dt_fim"] + cols].sort_values("dt_fim"), on="dt_fim",
+                      suffixes=("", "_ant"), tolerance=pd.Timedelta(days=20), direction="nearest")
+    out = j[["dt_fim", "periodo"]].copy()
+    for c in cols:
+        base_ant = j[c + "_ant"]
+        out["g_" + c] = np.where(base_ant > 0, j[c] / base_ant - 1, np.nan)
+    return out
+
+
+def graus_alavancagem(g: pd.DataFrame) -> pd.DataFrame:
+    """GAO = Δ% EBIT ÷ Δ% receita; GAF = Δ% lucro líquido ÷ Δ% EBIT; GAT = GAO × GAF = Δ% LL ÷ Δ% receita.
+    Vazio quando a variação do denominador é menor que 1% em módulo (o índice explode e perde sentido)."""
+    def razao(a, b):
+        return np.where((np.abs(b) >= 0.01) & pd.notna(a) & pd.notna(b), a / b, np.nan)
+    out = g[["dt_fim", "periodo"]].copy()
+    out["GAO"] = razao(g["g_ebit"], g["g_receita"])
+    out["GAF"] = razao(g["g_lucro_liquido"], g["g_ebit"])
+    out["GAT"] = razao(g["g_lucro_liquido"], g["g_receita"])
+    return out
+
+
+def secao_crescimento_dupont(rotulo: str, seg: str):
+    d, t = serie_anual_ou_ltm(rotulo)
+    if len(d) < 2:
+        st.info("Série insuficiente para crescimento e DuPont.")
+        return
+    nota_t = "anuais" if t == "anual" else "dos últimos 12 meses (LTM), comparados com 4 trimestres antes"
+    # ---- crescimento
+    st.subheader("Crescimento")
+    g = crescimento(d, ["receita", "ebitda", "ebit", "lucro_liquido"])
+    fig = go.Figure()
+    for c, nome in (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido")):
+        fig.add_trace(go.Bar(x=g["periodo"], y=g["g_" + c], name=nome))
+    fig.update_layout(barmode="group", height=360, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
+                      margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
+    st.plotly_chart(fig, width="stretch")
+    # ---- graus de alavancagem
+    st.subheader("Graus de alavancagem operacional e financeira")
+    ga = graus_alavancagem(g)
+    fig = go.Figure()
+    for c, nome in (("GAO", "GAO = Δ% EBIT ÷ Δ% receita"), ("GAF", "GAF = Δ% lucro ÷ Δ% EBIT"),
+                    ("GAT", "GAT = Δ% lucro ÷ Δ% receita")):
+        fig.add_trace(go.Scatter(x=ga["periodo"], y=ga[c], mode="lines+markers", name=nome))
+    fig.update_layout(height=340, yaxis_ticksuffix="x", legend=dict(orientation="h", y=-0.2),
+                      margin=dict(t=30, b=20, l=10, r=10))
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Leitura: GAO 3x = cada 1% de variação da receita moveu o EBIT em 3%. Graus calculados período a "
+               "período a partir das variações observadas (não da estrutura de custos). Ficam vazios quando a receita "
+               "ou o EBIT variaram menos de 1% ou quando a base anterior era negativa; valores muito altos indicam "
+               "variação pequena no denominador, não necessariamente alavancagem alta.")
+    # ---- DuPont
+    st.subheader("Análise DuPont")
+    dp = d[["periodo", "margem_liquida", "giro_ativo", "alavancagem_ativo_pl", "roe_pl_final"]].copy()
+    dp["roe_dupont"] = dp["margem_liquida"] * dp["giro_ativo"] * dp["alavancagem_ativo_pl"]
+    cols = st.columns(4)
+    pares = base[(base["tipo"] == t) & (base["segmento"] == seg)]
+    med = pares.groupby("periodo")[["margem_liquida", "giro_ativo", "alavancagem_ativo_pl", "roe_pl_final"]].median()
+    for (k, tit, fmt), col in zip([("margem_liquida", "Margem líquida", "pct"), ("giro_ativo", "Giro do ativo", "x"),
+                                   ("alavancagem_ativo_pl", "Alavancagem (ativo ÷ PL)", "x"),
+                                   ("roe_pl_final", "ROE (= produto)", "pct")], cols):
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=dp["periodo"], y=dp[k], mode="lines+markers", name="Empresa"))
+        mm = med.reindex(dp["periodo"])
+        fig.add_trace(go.Scatter(x=dp["periodo"], y=mm[k], mode="lines", line=dict(dash="dash"), name="Mediana"))
+        fig.update_layout(title=tit, height=280, showlegend=False, margin=dict(t=40, b=20, l=10, r=10))
+        fig.update_yaxes(tickformat=".0%" if fmt == "pct" else None, ticksuffix="" if fmt == "pct" else "x")
+        col.plotly_chart(fig, width="stretch")
+    # decomposição da variação do ROE entre o primeiro e o último período (substituição sequencial)
+    v = dp.dropna(subset=["margem_liquida", "giro_ativo", "alavancagem_ativo_pl"])
+    if len(v) >= 2:
+        opcoes = list(v["periodo"])
+        c1, c2 = st.columns(2)
+        p0 = c1.selectbox("De", opcoes, index=0, key="dp_de")
+        p1 = c2.selectbox("Até", opcoes, index=len(opcoes) - 1, key="dp_ate")
+        a, b = v[v["periodo"] == p0].iloc[0], v[v["periodo"] == p1].iloc[0]
+        m0, g0, l0 = a["margem_liquida"], a["giro_ativo"], a["alavancagem_ativo_pl"]
+        m1, g1, l1 = b["margem_liquida"], b["giro_ativo"], b["alavancagem_ativo_pl"]
+        r0, rm, rg, r1 = m0 * g0 * l0, m1 * g0 * l0, m1 * g1 * l0, m1 * g1 * l1
+        fig = go.Figure(go.Waterfall(
+            x=[f"ROE {p0}", "Efeito margem", "Efeito giro", "Efeito alavancagem", f"ROE {p1}"],
+            measure=["absolute", "relative", "relative", "relative", "total"],
+            y=[r0, rm - r0, rg - rm, r1 - rg, r1], text=[f"{x:.1%}" for x in (r0, rm - r0, rg - rm, r1 - rg, r1)]))
+        fig.update_layout(height=360, yaxis_tickformat=".0%", margin=dict(t=30, b=20, l=10, r=10),
+                          title="De onde veio a variação do ROE")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("ROE = margem líquida × giro do ativo × alavancagem, com lucro líquido consolidado e PL e ativo "
+                   "do fim do período. Efeitos por substituição sequencial (margem, depois giro, depois alavancagem); "
+                   "a ordem afeta um pouco a divisão entre os efeitos, não o total.")
+    with st.expander("Tabela: crescimento, graus de alavancagem e DuPont"):
+        tab = dp.merge(g.drop(columns="dt_fim"), on="periodo").merge(ga.drop(columns="dt_fim"), on="periodo")
+        st.dataframe(tab, hide_index=True, width="stretch")
 
 
 # ------------------------------------------------------------------ abas
@@ -427,10 +543,13 @@ with aba_emp:
         d_emp = filtrado[filtrado["rotulo"] == emp].sort_values(eixo_x(tipo))
         seg = d_emp["segmento"].iloc[0]
         st.caption(f"{d_emp['setor'].iloc[0]} / {d_emp['subsetor'].iloc[0]} / **{seg}** · base {d_emp['fonte'].iloc[-1]}")
+        relativas = [k for k in METRICAS if METRICAS[k][1] in ("pct", "x")]
+        sel_rel = st.multiselect("Indicadores relativos", relativas, default=RELATIVAS_PADRAO,
+                                 format_func=lambda k: ROT[k], key="rel_emp")
         pares = base[(base["tipo"] == tipo) & (base["segmento"] == seg)]
-        med_seg = pares.groupby(eixo_x(tipo))[sel_met].median(numeric_only=True).reset_index()
+        med_seg = pares.groupby(eixo_x(tipo))[sel_rel].median(numeric_only=True).reset_index()
         cols = st.columns(2)
-        for i, m in enumerate(sel_met):
+        for i, m in enumerate(sel_rel):
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=d_emp[eixo_x(tipo)], y=d_emp[m], mode="lines+markers", name=emp.split(" — ")[0]))
             mm = med_seg[med_seg[eixo_x(tipo)].isin(d_emp[eixo_x(tipo)])]
@@ -446,9 +565,14 @@ with aba_emp:
             if METRICAS[m][1] == "pct":
                 fig.update_yaxes(tickformat=".0%")
             cols[i % 2].plotly_chart(fig, width="stretch")
+        if tipo == "trimestral":
+            st.caption("No trimestral, giro do ativo usa a receita do trimestre (não anualizada); ROE e alavancagem "
+                       "sobre EBITDA ficam vazios. Para leitura anualizada, use LTM.")
         notas = d_emp[d_emp["notas"] != ""][["periodo", "fonte", "notas"]]
         with st.expander(f"Notas e alertas ({len(notas)} períodos)"):
             st.dataframe(notas, hide_index=True, width="stretch")
+
+        secao_crescimento_dupont(emp, seg)
 
         # ---- múltiplos de mercado (valor de mercado com preços da B3 sem ajuste)
         st.subheader("Múltiplos de mercado")
@@ -712,6 +836,10 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
+- Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
+- DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
+- Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
+  GAF = Δ% lucro líquido ÷ Δ% EBIT; GAT = GAO × GAF. Vazios quando o denominador varia menos de 1%.
 
 **Múltiplos de mercado (aba Empresa).** Preço de fechamento da série histórica da B3 (COTAHIST), sem ajuste
 por eventos corporativos, × ações em circulação (composição do capital do ITR/DFP, sem tesouraria), somando
