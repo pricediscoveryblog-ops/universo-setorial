@@ -52,6 +52,12 @@ METRICAS = {
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
+    # prazos médios (dias) e ciclos — capital de giro operacional
+    "pmr": ("Prazo médio de recebimento", "d", "Prazos médios"),
+    "pme": ("Prazo médio de estocagem/venda", "d", "Prazos médios"),
+    "pmp": ("Prazo médio de pagamento", "d", "Prazos médios"),
+    "ciclo_operacional": ("Ciclo operacional (PME + PMR)", "d", "Prazos médios"),
+    "ciclo_financeiro": ("Ciclo financeiro (ciclo operacional − PMP)", "d", "Prazos médios"),
     # mercado (preço da B3 × ações; ver Metodologia)
     "valor_mercado": ("Valor de mercado", "mm", "Mercado"),
     "ev_com_arrend": ("EV c/ arrendamento", "mm", "Mercado"),
@@ -122,6 +128,7 @@ def carregar():
     # DuPont: ROE (LL ÷ PL final) = margem líquida × giro do ativo × alavancagem (ativo ÷ PL)
     base["giro_ativo"] = base["receita"] / base["ativo_total"].where(base["ativo_total"] > 0)
     base["alavancagem_ativo_pl"] = base["ativo_total"] / base["patrimonio_liquido"].where(base["patrimonio_liquido"] > 0)
+    base = calc_prazos(base)
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
@@ -189,6 +196,40 @@ def carregar_aluguel() -> pd.DataFrame:
     return a
 
 
+def calc_prazos(b: pd.DataFrame) -> pd.DataFrame:
+    """Prazos médios com saldos médios (inicial e final). Dias: 365 no anual e LTM; 90 no trimestral.
+    PMR = dias ÷ (receita ÷ clientes médio); PME = dias ÷ (CPV ÷ estoque médio);
+    PMP = dias ÷ (compras ÷ fornecedores médio), com compras = estoque final − estoque inicial + CPV.
+    Saldo inicial: anual = fim do exercício anterior; LTM = 4 trimestres antes; trimestral = trimestre anterior."""
+    precisa = {"clientes", "estoques", "fornecedores", "cpv", "receita"}
+    if not precisa <= set(b.columns):
+        for k in ("pmr", "pme", "pmp", "ciclo_operacional", "ciclo_financeiro"):
+            b[k] = np.nan
+        return b
+    partes = []
+    for tp, dias, desloc in (("anual", 365, pd.DateOffset(years=1)), ("ltm", 365, pd.DateOffset(years=1)),
+                             ("trimestral", 90, pd.DateOffset(months=3))):
+        x = b[b["tipo"] == tp].sort_values("dt_fim")
+        if x.empty:
+            continue
+        ant = x[["cnpj", "dt_fim", "clientes", "estoques", "fornecedores"]].dropna(subset=["dt_fim"]).copy()
+        ant["dt_fim"] = ant["dt_fim"] + desloc
+        x = pd.merge_asof(x.dropna(subset=["dt_fim"]), ant.sort_values("dt_fim"), on="dt_fim", by="cnpj",
+                          suffixes=("", "_ini"), tolerance=pd.Timedelta(days=20), direction="nearest")
+        cli = (x["clientes"] + x["clientes_ini"]) / 2
+        est = (x["estoques"] + x["estoques_ini"]) / 2
+        forn = (x["fornecedores"] + x["fornecedores_ini"]) / 2
+        compras = x["estoques"] - x["estoques_ini"] + x["cpv"]
+        x["pmr"] = dias * cli / x["receita"].where(x["receita"] > 0)
+        x["pme"] = dias * est / x["cpv"].where(x["cpv"] > 0)
+        x["pmp"] = dias * forn / compras.where(compras > 0)
+        x["ciclo_operacional"] = x["pme"] + x["pmr"]
+        x["ciclo_financeiro"] = x["ciclo_operacional"] - x["pmp"]
+        partes.append(x.drop(columns=["clientes_ini", "estoques_ini", "fornecedores_ini"]))
+    resto = b[~b["tipo"].isin(["anual", "ltm", "trimestral"])]
+    return pd.concat(partes + [resto], ignore_index=True)
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -197,6 +238,8 @@ def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
             cfg[c] = st.column_config.NumberColumn(f"{rot} (R$ mm)", format="%,.1f")
         elif f == "pct":
             cfg[c] = st.column_config.NumberColumn(rot, format="%.1f%%")
+        elif f == "d":
+            cfg[c] = st.column_config.NumberColumn(f"{rot} (dias)", format="%.0f")
         else:
             cfg[c] = st.column_config.NumberColumn(rot, format="%.2fx")
     return cfg
@@ -515,7 +558,7 @@ with aba_setor:
     else:
         c1, c2 = st.columns([2, 1])
         ind = c1.selectbox("Indicador", list(METRICAS), index=list(METRICAS).index("receita"),
-                           format_func=lambda k: ROT[k] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[METRICAS[k][1]])
+                           format_func=lambda k: ROT[k] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)", "d": " (dias)"}[METRICAS[k][1]])
         fmt = METRICAS[ind][1]
         modo = c2.radio("Mostrar", ["Valores", "% do setor"], horizontal=True, disabled=(fmt != "mm"),
                         help="Participação = valor da empresa ÷ total do setor filtrado (setor/subsetor/segmento), "
@@ -558,6 +601,9 @@ with aba_setor:
             vis = tab_full * 100
         elif fmt == "x":
             cfg = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos}
+            vis = tab_full
+        elif fmt == "d":
+            cfg = {p: st.column_config.NumberColumn(p, format="%.0f dias") for p in periodos}
             vis = tab_full
         else:
             cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
@@ -661,7 +707,7 @@ with aba_emp:
             cc2.caption(f"Mediana calculada sobre {n_cmp} empresa(s) da cesta.")
         else:
             cc2.caption(f"Mediana calculada sobre {n_cmp} empresa(s): {nome_cmp}.")
-        relativas = [k for k in METRICAS if METRICAS[k][1] in ("pct", "x")]
+        relativas = [k for k in METRICAS if METRICAS[k][1] in ("pct", "x", "d")]
         sel_rel = st.multiselect("Indicadores relativos", relativas, default=RELATIVAS_PADRAO,
                                  format_func=lambda k: ROT[k], key="rel_emp")
         pares = cmp(base[base["tipo"] == tipo])
@@ -678,12 +724,43 @@ with aba_emp:
             if len(alertas):
                 fig.add_trace(go.Scatter(x=alertas[eixo_x(tipo)], y=alertas[m], mode="markers", name="Alerta",
                                          marker=dict(symbol="x", size=11, color="red")))
-            unidade = {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[METRICAS[m][1]]
+            unidade = {"mm": " (R$ mm)", "pct": "", "x": " (x)", "d": " (dias)"}[METRICAS[m][1]]
             fig.update_layout(title=ROT[m] + unidade, height=320, margin=dict(t=40, b=20, l=10, r=10),
                               legend=dict(orientation="h", y=-0.2))
             if METRICAS[m][1] == "pct":
                 fig.update_yaxes(tickformat=".0%")
             cols[i % 2].plotly_chart(fig, width="stretch")
+        # ---- prazos médios e ciclos
+        st.subheader("Prazos médios e ciclos")
+        if d_emp[["pmr", "pme", "pmp"]].notna().any().any():
+            ex_ = eixo_x(tipo)
+            med_pz = pares.groupby(ex_)[["pmr", "pme", "pmp", "ciclo_operacional", "ciclo_financeiro"]].median()
+            med_pz = med_pz.reindex(d_emp[ex_])
+            p1, p2 = st.columns(2)
+            fig = go.Figure()
+            for k, nome in (("pmr", "PMR (recebimento)"), ("pme", "PME (estocagem/venda)"), ("pmp", "PMP (pagamento)")):
+                fig.add_trace(go.Scatter(x=d_emp[ex_], y=d_emp[k], mode="lines+markers", name=nome))
+            fig.update_layout(title="Prazos médios (dias)", height=360, legend=dict(orientation="h", y=-0.25),
+                              margin=dict(t=40, b=20, l=10, r=10))
+            p1.plotly_chart(fig, width="stretch")
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["ciclo_operacional"], name="Ciclo operacional", opacity=0.6))
+            fig.add_trace(go.Scatter(x=d_emp[ex_], y=d_emp["ciclo_financeiro"], mode="lines+markers",
+                                     name="Ciclo financeiro", line=dict(width=3)))
+            fig.add_trace(go.Scatter(x=d_emp[ex_], y=med_pz["ciclo_financeiro"].values, mode="lines",
+                                     line=dict(dash="dash"), name=f"Mediana ciclo financeiro {nome_cmp}"))
+            add_medias(fig, d_emp[ex_], d_emp["ciclo_financeiro"], med_pz["ciclo_financeiro"].values, "ciclo financeiro")
+            fig.add_hline(y=0, line_color="gray", line_width=1)
+            fig.update_layout(title="Ciclo operacional e ciclo financeiro (dias)", height=360,
+                              legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+            p2.plotly_chart(fig, width="stretch")
+            st.caption("Dias: 365 no anual e LTM; 90 no trimestral. Saldos médios (inicial e final) de clientes, estoques "
+                       "e fornecedores, circulante + não circulante. Compras = estoque final − estoque inicial + CPV. "
+                       "Ciclo operacional = PME + PMR; ciclo financeiro = ciclo operacional − PMP (negativo = fornecedores "
+                       "financiam o giro). Os três prazos também estão na lista de indicadores relativos, com mediana.")
+        else:
+            st.info("Prazos médios ainda não disponíveis para esta empresa (exigem a coleta com clientes, estoques, "
+                    "fornecedores e CPV).")
         if tipo == "trimestral":
             st.caption("No trimestral, giro do ativo usa a receita do trimestre (não anualizada); ROE e alavancagem "
                        "sobre EBITDA ficam vazios. Para leitura anualizada, use LTM.")
@@ -924,7 +1001,8 @@ with aba_scr:
     sel_scr = c1.multiselect("Indicadores para filtrar", opcoes_scr,
                              default=[k for k in ("p_l", "p_vpa", "div_liq_ebitda_ifrs16", "roe_pl_final") if k in opcoes_scr],
                              format_func=lambda k: rot_scr[k] + (" (%)" if fmt_scr[k] == "pct" else
-                                                                 " (R$ mm)" if fmt_scr[k] == "mm" else " (x)"),
+                                                                 " (R$ mm)" if fmt_scr[k] == "mm" else
+                                                                 " (dias)" if fmt_scr[k] == "d" else " (x)"),
                              key="scr_ind")
     sem_velha = c2.checkbox("Excluir cotações antigas (último negócio há mais de 30 dias)", value=True, key="scr_velha")
     sem_alerta = c2.checkbox("Excluir empresas com alerta de qualidade no último LTM", value=False, key="scr_alerta")
@@ -940,7 +1018,7 @@ with aba_scr:
         serie = res[k] * (100 if f == "pct" else 1)
         med = serie.median()
         a, b_, c_ = st.columns([2, 1, 1])
-        a.markdown(f"{rot_scr[k]}  \n<small>mediana do filtro: {med:,.2f}{'%' if f == 'pct' else 'x' if f == 'x' else ''}"
+        a.markdown(f"{rot_scr[k]}  \n<small>mediana do filtro: {med:,.2f}{'%' if f == 'pct' else 'x' if f == 'x' else ' dias' if f == 'd' else ''}"
                    f" · {serie.notna().sum()} empresas com dado</small>", unsafe_allow_html=True)
         lo = b_.number_input("Mínimo", value=None, key=f"scr_lo_{k}", label_visibility="collapsed", placeholder="mínimo")
         hi = c_.number_input("Máximo", value=None, key=f"scr_hi_{k}", label_visibility="collapsed", placeholder="máximo")
@@ -967,6 +1045,8 @@ with aba_scr:
             cfg[k] = st.column_config.NumberColumn(rot_scr[k], format="%.1f%%")
         elif fmt_scr[k] == "x":
             cfg[k] = st.column_config.NumberColumn(rot_scr[k], format="%.2fx")
+        elif fmt_scr[k] == "d":
+            cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (dias)", format="%.0f")
         else:
             cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (R$ mm)", format="%,.0f")
     st.dataframe(vis_r.sort_values(mostrar[0] if mostrar else "rotulo"), column_config=cfg, hide_index=True,
@@ -1171,6 +1251,9 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   contrato/concessão no bloco de investimento.
 - FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
 - NCAV (Graham) = ativo circulante − passivo total.
+- Prazos médios (dias; 365 no anual/LTM, 90 no trimestral), com saldos médios inicial e final (CP + LP):
+  PMR = dias ÷ (receita ÷ clientes); PME = dias ÷ (CPV ÷ estoques); PMP = dias ÷ (compras ÷ fornecedores),
+  compras = estoque final − estoque inicial + CPV. Ciclo operacional = PME + PMR; financeiro = operacional − PMP.
 - Mercado na visão do setor/ranking/dados: anual = preço do fim do exercício; trimestral e LTM = múltiplo na data de
   fim do trimestre, com os documentos já divulgados até ali (por isso pode usar o trimestre anterior).
   Setor agregado: Σ valor de mercado (ou EV) ÷ Σ PL, lucro 12m ou EBITDA 12m das empresas com os dois dados.
