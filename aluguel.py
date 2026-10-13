@@ -21,7 +21,7 @@ def ler(pasta: str) -> pd.DataFrame:
     if not arqs:
         print(f"  ! nenhum arquivo em {ORIG / pasta}")
         return pd.DataFrame()
-    df = pd.concat([pd.read_parquet(a) for a in arqs], ignore_index=True)
+    df = pd.concat([pd.read_parquet(a).assign(_data_arquivo=a.stem) for a in arqs], ignore_index=True)
     print(f"  {pasta}: {len(arqs)} arquivos, {len(df)} linhas")
     return df
 
@@ -33,12 +33,22 @@ def num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+def data_ref(df: pd.DataFrame) -> pd.Series:
+    """Data do pregão: a do nome do arquivo gravado pelo coletor (AAAA-MM-DD.parquet). O campo RptDt vem em
+    formato variável entre arquivos; só é usado (lido como dia/mês/ano) quando o nome não tem data."""
+    f = pd.to_datetime(df["_data_arquivo"], errors="coerce", format="%Y-%m-%d")
+    if "RptDt" in df:
+        d = pd.to_datetime(df["RptDt"].astype(str), errors="coerce", format="mixed", dayfirst=True)
+        f = f.fillna(d)
+    return f
+
+
 def resumo() -> pd.DataFrame:
     emp = ler("emprestimos_registrados")
     pos = ler("posicoes_em_aberto")
     partes = []
     if not emp.empty:
-        e = pd.DataFrame({"data": pd.to_datetime(emp["RptDt"], errors="coerce"),
+        e = pd.DataFrame({"data": data_ref(emp),
                           "ticker": emp["TckrSymb"].astype(str).str.strip()})
         for c in ("ValCtrctsDay", "QtyCtrctsDay", "BRLValue", "DnrAvrgRate", "TkrAvrgRate", "DnrMinRate", "DnrMaxRate",
                   "TkrMinRate", "TkrMaxRate"):
@@ -58,7 +68,7 @@ def resumo() -> pd.DataFrame:
         g["taxa_doador_media"] = np.where(g["peso"] > 0, g["dn_x"] / g["peso"].where(g["peso"] > 0), g["dn_simples"])
         partes.append(g.drop(columns=["peso", "tk_x", "dn_x", "tk_simples", "dn_simples"]))
     if not pos.empty:
-        p = pd.DataFrame({"data": pd.to_datetime(pos["RptDt"], errors="coerce"),
+        p = pd.DataFrame({"data": data_ref(pos),
                           "ticker": pos["TckrSymb"].astype(str).str.strip(),
                           "saldo_alugado_qtd": num(pos["StockBalance"]) if "StockBalance" in pos else np.nan,
                           "saldo_alugado_rs": num(pos["Balance"]) if "Balance" in pos else np.nan})
