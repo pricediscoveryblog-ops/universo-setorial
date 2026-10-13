@@ -793,7 +793,7 @@ with aba_emp:
                                      name=f"Mediana tomador {nome_cmp}"))
             add_medias(fig, at["data"], at["taxa_tomador_media"], mt, "tomador")
             fig.update_layout(title="Taxa de aluguel (média ponderada do dia, % a.a.)", height=360,
-                              yaxis_ticksuffix="%", legend=dict(orientation="h", y=-0.25),
+                              yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.25),
                               margin=dict(t=40, b=20, l=10, r=10))
             a1.plotly_chart(fig, width="stretch")
             # saldo alugado em % das ações em circulação (todas as classes da empresa)
@@ -820,7 +820,7 @@ with aba_emp:
                               legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
             a2.plotly_chart(fig, width="stretch")
             st.caption(f"Fonte: B3 (empréstimo de ativos), via coletor-aluguel-b3; série desde "
-                       f"{alug['data'].min().date()}. Taxas em % a.a., média ponderada pela quantidade contratada no "
+                       f"{alug['data'].min().date()}. Taxas ao ano (a B3 informa em fração; 0,04 = 4% a.a.), média ponderada pela quantidade contratada no "
                        "dia (eletrônico e balcão). Saldo alugado ÷ ações em circulação da última composição do capital. "
                        "Comparáveis: o papel com maior saldo alugado de cada empresa do grupo escolhido.")
 
