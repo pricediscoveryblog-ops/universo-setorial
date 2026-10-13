@@ -286,6 +286,7 @@ def empresa_financeira():
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=d["exercicio"], y=d[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
         fig.add_trace(go.Scatter(x=mm.index, y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        add_medias(fig, d["exercicio"], d[k], mm[k])
         fig.update_layout(title=FIN[k][0] + {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[FIN[k][1]], height=320,
                           margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2))
         if FIN[k][1] == "pct":
@@ -310,6 +311,7 @@ def empresa_financeira():
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
         fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        add_medias(fig, dm["data"], dm[k], med_m[k])
         fig.update_layout(title=tit, height=320, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.25))
         if fmt == "pct":
             fig.update_yaxes(tickformat=".0%")
@@ -322,6 +324,24 @@ def empresa_financeira():
                   "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
         tab_m = dm[[c for c in cols_m if c in dm.columns]].assign(data=dm["data"].dt.date)
         st.dataframe(tab_m, hide_index=True, width="stretch")
+
+
+def add_medias(fig, x, y, ym=None, rotulo=""):
+    """Linhas horizontais pontilhadas: média da empresa e média das medianas dos comparáveis, no período exibido."""
+    xs = [v for v in pd.Series(list(x)).tolist() if pd.notna(v)]
+    if not xs:
+        return
+    xr = [xs[0], xs[-1]]
+    suf = f" ({rotulo})" if rotulo else ""
+    me = pd.to_numeric(pd.Series(list(y)), errors="coerce").mean()
+    if pd.notna(me):
+        fig.add_trace(go.Scatter(x=xr, y=[me, me], mode="lines", name="Média da empresa" + suf,
+                                 line=dict(dash="dot", width=1.5, color="#1f77b4"), opacity=0.7))
+    if ym is not None:
+        mm = pd.to_numeric(pd.Series(list(ym)), errors="coerce").mean()
+        if pd.notna(mm):
+            fig.add_trace(go.Scatter(x=xr, y=[mm, mm], mode="lines", name="Média da mediana" + suf,
+                                     line=dict(dash="dot", width=1.5, color="#ff7f0e"), opacity=0.7))
 
 
 NIVEIS_CMP = {"Segmento": "segmento", "Subsetor": "subsetor", "Setor": "setor"}
@@ -418,6 +438,7 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
         fig.add_trace(go.Scatter(x=dp["periodo"], y=dp[k], mode="lines+markers", name="Empresa"))
         mm = med.reindex(dp["periodo"])
         fig.add_trace(go.Scatter(x=dp["periodo"], y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {nome_cmp}"))
+        add_medias(fig, dp["periodo"], dp[k], mm[k])
         fig.update_layout(title=tit, height=280, showlegend=False, margin=dict(t=40, b=20, l=10, r=10))
         fig.update_yaxes(tickformat=".0%" if fmt == "pct" else None, ticksuffix="" if fmt == "pct" else "x")
         col.plotly_chart(fig, width="stretch")
@@ -641,6 +662,7 @@ with aba_emp:
             mm = med_seg[med_seg[eixo_x(tipo)].isin(d_emp[eixo_x(tipo)])]
             fig.add_trace(go.Scatter(x=mm[eixo_x(tipo)], y=mm[m], mode="lines", name=f"Mediana {nome_cmp}",
                                      line=dict(dash="dash")))
+            add_medias(fig, d_emp[eixo_x(tipo)], d_emp[m], mm[m])
             alertas = d_emp[d_emp["alerta"]]
             if len(alertas):
                 fig.add_trace(go.Scatter(x=alertas[eixo_x(tipo)], y=alertas[m], mode="markers", name="Alerta",
@@ -694,6 +716,7 @@ with aba_emp:
                         fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=nome))
                         fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"),
                                                  name=f"Mediana {nome_cmp}" + ("" if len(series) == 1 else f" ({nome.split(' ')[0]})")))
+                        add_medias(fig, dm["data"], dm[k], med_m[k], "" if len(series) == 1 else nome.split(" ")[0])
                     com_nota = dm[dm["notas"] != ""]
                     if len(com_nota):
                         fig.add_trace(go.Scatter(x=com_nota["data"], y=com_nota[series[0][0]], mode="markers",
@@ -729,6 +752,52 @@ with aba_emp:
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
+        # ---- gráficos sobrepostos: valor de mercado (padrão) + outras linhas para comparar comportamento
+        st.subheader("Gráficos sobrepostos")
+        ex_ = eixo_x(tipo)
+        cand = [k for k in METRICAS if k in d_emp.columns and d_emp[k].notna().any()]
+        o1, o2 = st.columns([3, 2])
+        sel_ov = o1.multiselect("Linhas da empresa", cand, default=[k for k in ("valor_mercado",) if k in cand],
+                                format_func=lambda k: ROT[k], key="ov_ind")
+        outras = o1.multiselect("Valor de mercado de outras empresas (opcional)",
+                                sorted(r for r in base["rotulo"].unique() if r != emp), key="ov_emp")
+        escala = o2.radio("Escala", ["Base 100 (primeiro ponto do período)", "Valores (dois eixos)"], key="ov_esc")
+        series_ov = [(ROT[k], d_emp[ex_], d_emp[k], METRICAS[k][1]) for k in sel_ov]
+        for o in outras:
+            dd = base[(base["rotulo"] == o) & (base["tipo"] == tipo) & base[ex_].isin(d_emp[ex_])].sort_values(ex_)
+            series_ov.append((f"Valor de mercado {o.split(' — ')[0]}", dd[ex_], dd["valor_mercado"], "mm"))
+        if not series_ov:
+            st.info("Escolha ao menos uma linha.")
+        else:
+            fig = go.Figure()
+            ignoradas = []
+            for nome, x, y, f in series_ov:
+                y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
+                x = pd.Series(list(x))
+                if escala.startswith("Base 100"):
+                    validos = y[y.notna()]
+                    if validos.empty or validos.iloc[0] <= 0:
+                        ignoradas.append(nome)
+                        continue
+                    fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+                else:
+                    fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
+                                             name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
+                                             yaxis="y" if f == "mm" else "y2"))
+            if escala.startswith("Base 100"):
+                fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
+                fig.add_hline(y=100, line_dash="dot", line_color="gray")
+            else:
+                fig.update_layout(yaxis=dict(title="R$ mm"),
+                                  yaxis2=dict(title="Múltiplos (x) e % ", overlaying="y", side="right", showgrid=False))
+            fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), margin=dict(t=30, b=20, l=10, r=10))
+            st.plotly_chart(fig, width="stretch")
+            if ignoradas:
+                st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
+                           ". Use a escala de valores para vê-las.")
+            st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
+                       "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita.")
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
