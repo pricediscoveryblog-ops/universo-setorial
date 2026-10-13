@@ -178,6 +178,17 @@ def carregar():
     return base, cob, meta, fin, mult
 
 
+@st.cache_data(show_spinner=False)
+def carregar_aluguel() -> pd.DataFrame:
+    arq = DADOS.parent / "aluguel" / "resumo.csv.gz"
+    if not arq.exists():
+        return pd.DataFrame()
+    a = pd.read_csv(arq)
+    a["data"] = pd.to_datetime(a["data"], errors="coerce")
+    a["ticker"] = a["ticker"].astype(str)
+    return a
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -752,6 +763,66 @@ with aba_emp:
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
+        # ---- aluguel de ações (custo do short)
+        st.subheader("Aluguel de ações (custo do short)")
+        alug = carregar_aluguel()
+        raiz_e = str(linha_e["ticker"])[:4]
+        a_emp = alug[alug["ticker"].str[:4] == raiz_e] if not alug.empty else pd.DataFrame()
+        if alug.empty:
+            st.info("Dados de aluguel ainda não disponíveis (saidas/aluguel/resumo.csv.gz).")
+        elif a_emp.empty:
+            st.info(f"Sem registros de aluguel para os papéis {raiz_e}*.")
+        else:
+            tks = a_emp.groupby("ticker")["saldo_alugado_qtd"].mean().sort_values(ascending=False).index.tolist()
+            tk = st.selectbox("Papel", tks, key="alug_tk")
+            at = a_emp[a_emp["ticker"] == tk].sort_values("data")
+            # comparáveis: em cada empresa do grupo, o papel com maior saldo alugado médio
+            grupo = cmp(base[base["tipo"] == tipo])[["cnpj", "ticker"]].drop_duplicates("cnpj")
+            raiz_cnpj = dict(zip(grupo["ticker"].astype(str).str[:4], grupo["cnpj"]))
+            ag = alug[alug["ticker"].str[:4].isin(raiz_cnpj)]
+            princ = (ag.groupby("ticker")["saldo_alugado_qtd"].mean().reset_index()
+                     .assign(r=lambda x: x["ticker"].str[:4]).sort_values("saldo_alugado_qtd").groupby("r").tail(1)["ticker"])
+            med_tx = ag[ag["ticker"].isin(princ)].groupby("data")["taxa_tomador_media"].median()
+            a1, a2 = st.columns(2)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_tomador_media"], mode="lines", name=f"Tomador {tk}"))
+            fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_doador_media"], mode="lines", name=f"Doador {tk}"))
+            mt = med_tx.reindex(at["data"])
+            fig.add_trace(go.Scatter(x=at["data"], y=mt, mode="lines", line=dict(dash="dash"),
+                                     name=f"Mediana tomador {nome_cmp}"))
+            add_medias(fig, at["data"], at["taxa_tomador_media"], mt, "tomador")
+            fig.update_layout(title="Taxa de aluguel (média ponderada do dia, % a.a.)", height=360,
+                              yaxis_ticksuffix="%", legend=dict(orientation="h", y=-0.25),
+                              margin=dict(t=40, b=20, l=10, r=10))
+            a1.plotly_chart(fig, width="stretch")
+            # saldo alugado em % das ações em circulação (todas as classes da empresa)
+            if not mult.empty:
+                ult_m = mult[mult["tipo"] == "trimestral"].sort_values("data").groupby("cnpj").tail(1)
+                acoes = (ult_m["acoes_on"].fillna(0) + ult_m["acoes_pn"].fillna(0)).where(lambda x: x > 0)
+                acoes_por_cnpj = dict(zip(ult_m["cnpj"], acoes))
+            else:
+                acoes_por_cnpj = {}
+            def pct_alugado(df_r, cnpj_):
+                q = acoes_por_cnpj.get(cnpj_)
+                serie = df_r.groupby("data")["saldo_alugado_qtd"].sum(min_count=1)
+                return serie / q if q else serie * np.nan
+            p_emp = pct_alugado(a_emp, linha_e["cnpj"])
+            pares_pct = [pct_alugado(ag[ag["ticker"].str[:4] == r], c).rename(r) for r, c in raiz_cnpj.items()]
+            med_pct = pd.concat(pares_pct, axis=1).median(axis=1) if pares_pct else pd.Series(dtype=float)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=p_emp.index, y=p_emp.values, mode="lines", name=f"{raiz_e} (todas as classes)"))
+            mp = med_pct.reindex(p_emp.index)
+            fig.add_trace(go.Scatter(x=p_emp.index, y=mp.values, mode="lines", line=dict(dash="dash"),
+                                     name=f"Mediana {nome_cmp}"))
+            add_medias(fig, p_emp.index, p_emp.values, mp.values)
+            fig.update_layout(title="Saldo alugado (% das ações em circulação)", height=360, yaxis_tickformat=".1%",
+                              legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+            a2.plotly_chart(fig, width="stretch")
+            st.caption(f"Fonte: B3 (empréstimo de ativos), via coletor-aluguel-b3; série desde "
+                       f"{alug['data'].min().date()}. Taxas em % a.a., média ponderada pela quantidade contratada no "
+                       "dia (eletrônico e balcão). Saldo alugado ÷ ações em circulação da última composição do capital. "
+                       "Comparáveis: o papel com maior saldo alugado de cada empresa do grupo escolhido.")
 
         # ---- gráficos sobrepostos: valor de mercado (padrão) + outras linhas para comparar comportamento
         st.subheader("Gráficos sobrepostos")
