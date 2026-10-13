@@ -715,8 +715,10 @@ with aba_emp:
                 med_m = med_m[med_m.index.isin(dm["data"])]
                 graficos = [("P/VPA (valor de mercado ÷ PL dos controladores)", [("p_vpa", "P/VPA")]),
                             ("P/L (valor de mercado ÷ lucro 12m dos controladores)", [("p_l", "P/L")]),
-                            ("EV/EBITDA", [("ev_ebitda_ifrs16", "c/ arrendamento ÷ EBITDA IFRS 16"),
-                                           ("ev_ebitda_pre_ifrs16", "s/ arrendamento ÷ EBITDA pré-IFRS 16")]),
+                            ("EV/EBITDA IFRS 16 (EV c/ arrendamento ÷ EBITDA IFRS 16)",
+                             [("ev_ebitda_ifrs16", "EV/EBITDA IFRS 16")]),
+                            ("EV/EBITDA pré-IFRS 16 (EV s/ arrendamento ÷ EBITDA pré-IFRS 16)",
+                             [("ev_ebitda_pre_ifrs16", "EV/EBITDA pré-IFRS 16")]),
                             ("ROE (lucro 12m ÷ PL dos controladores)", [("roe", "ROE")]),
                             ("Dividend yield (dividendos + JCP pagos em 12m ÷ valor de mercado)",
                              [("dividend_yield", "Dividend yield")])]
