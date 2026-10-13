@@ -1,0 +1,43 @@
+name: aluguel-resumo
+
+on:
+  workflow_dispatch:
+  schedule:
+    # dias úteis, 11h30 de Brasília (14h30 UTC): depois da coleta diária do coletor-aluguel-b3 (10h)
+    - cron: "30 14 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  resumo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ler os dados do coletor de aluguel (repositório privado, token só de leitura)
+        uses: actions/checkout@v4
+        with:
+          repository: pricediscoveryblog-ops/coletor-aluguel-b3
+          token: ${{ secrets.ALUGUEL_TOKEN }}
+          path: aluguel_repo
+          sparse-checkout: dados
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pandas pyarrow
+
+      - name: Montar resumo
+        run: python aluguel.py aluguel_repo/dados
+
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/aluguel
+          git diff --cached --quiet || git commit -m "aluguel: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
