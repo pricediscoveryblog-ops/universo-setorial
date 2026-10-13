@@ -30,7 +30,7 @@ DISPONIB: dict[tuple, str] = {}   # (cnpj, DT_REFER) -> menor DT_RECEB
 COMPOS: dict[tuple, tuple] = {}   # (cnpj, DT_REFER) -> (ações ON, ações PN) em circulação (sem tesouraria)
 SAIDA = cs.SAIDAS / "universo"
 
-FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "da", "ebitda",
+FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "cpv", "da", "ebitda",
           "pagamento_arrendamento", "pag_arrend_juros", "pag_arrend_principal", "ebitda_pre_ifrs16",
           "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
@@ -38,7 +38,8 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "fcl_pos_arrend", "dividendos_pagos"]
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
-            "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores"]
+            "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
+            "fornecedores"]
 # fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
 CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento"]
 
