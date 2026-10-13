@@ -429,6 +429,27 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
                sub["DESC"].str.contains("controlador") & ~sub["DESC"].str.contains("nao controlador")]
     lc = ctrl["VL"].sum() if len(ctrl) else np.nan
     m["lucro_controladores"] = lc if pd.notna(lc) and (lc != 0 or m["lucro_liquido"] == 0) else m["lucro_liquido"]
+    # Capital de giro operacional (base dos prazos médios): CPV, clientes, estoques e fornecedores (CP + LP)
+    cpv = conta(sub, "DRE", "3.02")
+    m["cpv"] = -cpv if pd.notna(cpv) else np.nan
+
+    def _soma_txt(demo, prefixo, rx):
+        d = sub[(sub["DEMO"] == demo) & sub["CD_CONTA"].str.match(prefixo) & sub["DESC"].str.contains(rx)]
+        d = topo(d)
+        return d["VL"].sum() if len(d) else np.nan
+
+    def _total(cp, lp):
+        return np.nan if pd.isna(cp) and pd.isna(lp) else np.nansum([cp, lp])
+    cli_cp = conta(sub, "BPA", "1.01.03")
+    if pd.isna(cli_cp):
+        cli_cp = _soma_txt("BPA", r"^1\.01\.", r"contas a receber|clientes")
+    m["clientes"] = _total(cli_cp, _soma_txt("BPA", r"^1\.02\.01\.", r"contas a receber|clientes"))
+    est_cp = conta(sub, "BPA", "1.01.04")
+    m["estoques"] = _total(est_cp, _soma_txt("BPA", r"^1\.02\.01\.", r"^estoques?"))
+    forn_cp = conta(sub, "BPP", "2.01.02")
+    if pd.isna(forn_cp):
+        forn_cp = _soma_txt("BPP", r"^2\.01\.", r"fornecedores")
+    m["fornecedores"] = _total(forn_cp, _soma_txt("BPP", r"^2\.02\.", r"fornecedores"))
     # Balanço
     m["ativo_total"] = conta(sub, "BPA", "1")
     m["ativo_circulante"] = conta(sub, "BPA", "1.01")
