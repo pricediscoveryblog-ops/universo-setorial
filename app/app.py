@@ -235,6 +235,37 @@ def calc_prazos(b: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(partes + [resto], ignore_index=True)
 
 
+@st.cache_data(show_spinner=False)
+def carregar_juros() -> tuple[pd.DataFrame, pd.DataFrame]:
+    pasta = DADOS.parent / "juros"
+    p = pd.read_csv(pasta / "parametros.csv", parse_dates=["data"]) if (pasta / "parametros.csv").exists() else pd.DataFrame()
+    v = pd.read_csv(pasta / "vertices.csv.gz", parse_dates=["data"]) if (pasta / "vertices.csv.gz").exists() else pd.DataFrame()
+    return p, v
+
+
+def svensson(t, b1, b2, b3, b4, l1, l2):
+    """Taxa (fração a.a., base 252) da ETTJ ANBIMA no prazo t (anos = dias úteis ÷ 252)."""
+    t = np.asarray(t, dtype=float)
+    a = (1 - np.exp(-l1 * t)) / (l1 * t)
+    c = (1 - np.exp(-l2 * t)) / (l2 * t)
+    return b1 + b2 * a + b3 * (a - np.exp(-l1 * t)) + b4 * (c - np.exp(-l2 * t))
+
+
+def curva_juros(pj: pd.DataFrame, d, tipo_c: str, anos) -> np.ndarray:
+    """Curva na data d: 'pre', 'ipca' ou 'implicita' = (1 + pre) / (1 + real) − 1."""
+    linha = {c: r for c, r in pj[pj["data"] == d].set_index("curva").iterrows()}
+    def taxa(nome):
+        if nome not in linha:
+            return np.full(len(anos), np.nan)
+        r = linha[nome]
+        return svensson(anos, r["b1"], r["b2"], r["b3"], r["b4"], r["l1"], r["l2"])
+    if tipo_c == "pre":
+        return taxa("PREFIXADOS")
+    if tipo_c == "ipca":
+        return taxa("IPCA")
+    return (1 + taxa("PREFIXADOS")) / (1 + taxa("IPCA")) - 1
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -528,9 +559,9 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_scr, aba_fin, aba_dados, aba_cob, aba_met = st.tabs(
+aba_setor, aba_emp, aba_rank, aba_scr, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
     ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Financeiro (bancos e seguradoras)",
-     "Dados e download", "Cobertura", "Metodologia"])
+     "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
@@ -1223,6 +1254,81 @@ with aba_fin:
         c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
                            file_name="financeiro_base.xlsx", key="fin_xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# -------- Juros: estrutura a termo (ANBIMA)
+with aba_jur:
+    pj, vj = carregar_juros()
+    if pj.empty:
+        st.info("Curvas ainda não coletadas (saidas/juros/). Rode o workflow juros-ettj.")
+    else:
+        datas_j = sorted(pj["data"].unique())
+        st.caption(f"Fonte: ANBIMA, Estrutura a Termo das Taxas de Juros (modelo Svensson), {len(datas_j)} datas de "
+                   f"{pd.Timestamp(datas_j[0]).date()} a {pd.Timestamp(datas_j[-1]).date()}. Taxas % a.a., base 252. "
+                   "A ANBIMA libera gratuitamente só os últimos 5 dias úteis: o histórico cresce com a coleta diária.")
+        tipos_c = {"Prefixada": "pre", "Real (IPCA)": "ipca", "Inflação implícita": "implicita"}
+        j1, j2, j3 = st.columns([1.3, 1.2, 2])
+        tc_rot = j1.radio("Curva", list(tipos_c), key="jur_curva")
+        tc = tipos_c[tc_rot]
+        base_j = j2.selectbox("Data", datas_j[::-1], format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"),
+                              key="jur_data")
+        prazos_cmp = {"1 semana antes": 7, "1 mês antes": 30, "3 meses antes": 91, "6 meses antes": 182,
+                      "1 ano antes": 365}
+        sel_cmp = j3.multiselect("Comparar com", list(prazos_cmp), default=["1 mês antes", "1 ano antes"],
+                                 key="jur_cmp")
+        extra = j3.multiselect("Outras datas", [d for d in datas_j[::-1] if d != base_j],
+                               format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="jur_extra")
+        max_anos = st.slider("Prazo máximo (anos)", 2, 30, 10, key="jur_max",
+                             help="A ANBIMA publica vértices prefixados até 10 anos; além disso a curva prefixada e a "
+                                  "implícita são extrapolação do modelo Svensson.")
+        anos = np.linspace(0.25, max_anos, 120)
+        datas_plot, faltam = [(pd.Timestamp(base_j), "Data escolhida")], []
+        for nome in sel_cmp:
+            alvo = pd.Timestamp(base_j) - pd.Timedelta(days=prazos_cmp[nome])
+            cand = [d for d in datas_j if pd.Timestamp(d) <= alvo]
+            if cand:
+                datas_plot.append((pd.Timestamp(cand[-1]), nome))
+            else:
+                faltam.append(nome)
+        datas_plot += [(pd.Timestamp(d), "") for d in extra]
+        fig = go.Figure()
+        for d, rot in datas_plot:
+            y = curva_juros(pj, d, tc, anos)
+            fig.add_trace(go.Scatter(x=anos, y=y, mode="lines", name=f"{d.strftime('%d/%m/%Y')} {rot}".strip(),
+                                     line=dict(width=4 if rot == "Data escolhida" else 2)))
+        fig.update_layout(title=f"Curva {tc_rot.lower()} (% a.a.)", height=460, yaxis_tickformat=".2%",
+                          xaxis_title="Prazo (anos)", legend=dict(orientation="h", y=-0.2),
+                          margin=dict(t=40, b=20, l=10, r=10))
+        st.plotly_chart(fig, width="stretch")
+        if faltam:
+            st.caption("Sem histórico suficiente para: " + ", ".join(faltam) + ".")
+        # tabela de vértices e variação em pontos-base
+        vert = [v for v in (0.5, 1, 2, 3, 5, 10, 15, 20, 30) if v <= max_anos]
+        tab_j = pd.DataFrame({f"{d.strftime('%d/%m/%Y')} {rot}".strip(): curva_juros(pj, d, tc, vert) * 100
+                              for d, rot in datas_plot}, index=[f"{v:g} ano(s)" for v in vert])
+        base_col = tab_j.columns[0]
+        for c in tab_j.columns[1:]:
+            tab_j[f"Δ vs {c} (bps)"] = (tab_j[base_col] - tab_j[c]) * 100
+        st.dataframe(tab_j.round(2), width="stretch")
+        # histórico de vértices
+        st.subheader("Histórico de vértices")
+        v_hist = st.multiselect("Vértices (anos)", [0.5, 1, 2, 3, 5, 10, 15, 20, 30], default=[1, 2, 5, 10],
+                                key="jur_vert")
+        if v_hist:
+            hist = pd.DataFrame({"data": [pd.Timestamp(d) for d in datas_j]})
+            for v in v_hist:
+                hist[f"{v:g}a"] = [curva_juros(pj, d, tc, [v])[0] for d in datas_j]
+            fig = go.Figure()
+            for v in v_hist:
+                fig.add_trace(go.Scatter(x=hist["data"], y=hist[f"{v:g}a"], mode="lines+markers", name=f"{v:g} ano(s)"))
+            fig.update_layout(title=f"{tc_rot}: vértices ao longo do tempo (% a.a.)", height=400,
+                              yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.2),
+                              margin=dict(t=40, b=20, l=10, r=10))
+            st.plotly_chart(fig, width="stretch")
+            exp_h = hist.assign(data=hist["data"].dt.date)
+            st.download_button("⬇️ Histórico (CSV)", exp_h.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                               file_name=f"ettj_{tc}_historico.csv", mime="text/csv", key="jur_csv")
+        st.caption("Curvas reconstruídas pelos parâmetros Svensson divulgados pela ANBIMA (reproduzem os vértices "
+                   "publicados). Inflação implícita = (1 + prefixada) ÷ (1 + real) − 1.")
 
 # -------- Dados e download
 with aba_dados:
