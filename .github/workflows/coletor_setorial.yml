@@ -14,11 +14,17 @@ on:
         required: false
         default: ""
   schedule:
-    # dia 20 de cada mês, 09:00 BRT (12:00 UTC): pega DFPs, ITRs e reapresentações do mês
-    - cron: "0 12 20 * *"
+    # todo dia útil às 20:00 de Brasília (23:00 UTC), depois do fechamento do pregão: atualiza preços do dia,
+    # múltiplos e balanços divulgados. Se a B3 ainda não tiver publicado o pregão, entra na execução seguinte.
+    - cron: "0 23 * * 1-5"
 
 permissions:
   contents: write
+
+# evita duas coletas simultâneas (agendada e manual) gravando os mesmos arquivos
+concurrency:
+  group: coletor-setorial
+  cancel-in-progress: false
 
 jobs:
   coletar:
