@@ -14,9 +14,9 @@ on:
         required: false
         default: ""
   schedule:
-    # todo dia útil às 20:00 de Brasília (23:00 UTC), depois do fechamento do pregão: atualiza preços do dia,
-    # múltiplos e balanços divulgados. Se a B3 ainda não tiver publicado o pregão, entra na execução seguinte.
-    - cron: "0 23 * * 1-5"
+    # todo dia útil às 23:00 de Brasília (02:00 UTC do dia seguinte, terça a sábado), depois do fechamento e da
+    # publicação da série histórica da B3: atualiza preços do dia, múltiplos e balanços divulgados.
+    - cron: "0 2 * * 2-6"
 
 permissions:
   contents: write
