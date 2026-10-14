@@ -47,6 +47,7 @@ METRICAS = {
     "margem_liquida": ("Margem líquida", "pct", "Margens e retorno"),
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
     "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
+    "conversao_fco_ebitda": ("Conversão de caixa (FCO ÷ EBITDA IFRS 16)", "pct", "Margens e retorno"),
     "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
     "giro_ativo": ("Giro do ativo (receita ÷ ativo total)", "x", "Margens e retorno"),
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
@@ -76,6 +77,7 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "capex_org_da": ("capex_organico", "da"), "div_liq_ebitda_ifrs16": ("div_liq_com_arrend", "ebitda"),
          "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16"),
          "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido"),
+         "conversao_fco_ebitda": ("fco", "ebitda"),
          # múltiplos do setor = Σ valor de mercado (ou EV) ÷ Σ fundamento, na mesma data
          "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
          "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
@@ -129,6 +131,9 @@ def carregar():
     base["giro_ativo"] = base["receita"] / base["ativo_total"].where(base["ativo_total"] > 0)
     base["alavancagem_ativo_pl"] = base["ativo_total"] / base["patrimonio_liquido"].where(base["patrimonio_liquido"] > 0)
     base = calc_prazos(base)
+    # conversão do EBITDA em caixa: FCO ÷ EBITDA IFRS 16 (sob IFRS 16 o arrendamento pago sai do FCO e vai para o
+    # financiamento, então FCO e EBITDA IFRS 16 estão no mesmo critério). Vazio com EBITDA ≤ 0.
+    base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
@@ -730,6 +735,33 @@ with aba_emp:
             if METRICAS[m][1] == "pct":
                 fig.update_yaxes(tickformat=".0%")
             cols[i % 2].plotly_chart(fig, width="stretch")
+        # ---- conversão do EBITDA em caixa
+        st.subheader("Conversão do EBITDA em caixa (FCO ÷ EBITDA)")
+        ex_ = eixo_x(tipo)
+        if d_emp["conversao_fco_ebitda"].notna().any():
+            med_cv = pares.groupby(ex_)["conversao_fco_ebitda"].median().reindex(d_emp[ex_])
+            k1, k2 = st.columns(2)
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["ebitda"], name="EBITDA IFRS 16", opacity=0.6))
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco"], name="Fluxo de caixa operacional", opacity=0.9))
+            fig.update_layout(title="EBITDA e FCO (R$ mm)", barmode="group", height=360,
+                              legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+            k1.plotly_chart(fig, width="stretch")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=d_emp[ex_], y=d_emp["conversao_fco_ebitda"], mode="lines+markers",
+                                     name="FCO ÷ EBITDA"))
+            fig.add_trace(go.Scatter(x=d_emp[ex_], y=med_cv.values, mode="lines", line=dict(dash="dash"),
+                                     name=f"Mediana {nome_cmp}"))
+            add_medias(fig, d_emp[ex_], d_emp["conversao_fco_ebitda"], med_cv.values)
+            fig.add_hline(y=1, line_color="gray", line_width=1, line_dash="dot")
+            fig.update_layout(title="Conversão de caixa (FCO ÷ EBITDA)", height=360, yaxis_tickformat=".0%",
+                              legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+            k2.plotly_chart(fig, width="stretch")
+            st.caption("FCO da DFC ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0). Abaixo de 100%: parte do "
+                       "EBITDA ficou em capital de giro, impostos pagos ou juros classificados no operacional. "
+                       "No trimestral, a sazonalidade do capital de giro pesa; LTM e anual são mais estáveis.")
+        else:
+            st.info("Sem FCO ou EBITDA positivo para calcular a conversão de caixa.")
         # ---- prazos médios e ciclos
         st.subheader("Prazos médios e ciclos")
         if d_emp[["pmr", "pme", "pmp"]].notna().any().any():
@@ -1258,6 +1290,7 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   fim do trimestre, com os documentos já divulgados até ali (por isso pode usar o trimestre anterior).
   Setor agregado: Σ valor de mercado (ou EV) ÷ Σ PL, lucro 12m ou EBITDA 12m das empresas com os dois dados.
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
+- Conversão de caixa = FCO ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
   GAF = Δ% lucro líquido ÷ Δ% EBIT; GAT = GAO × GAF. Vazios quando o denominador varia menos de 1%.
