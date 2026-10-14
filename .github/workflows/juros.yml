@@ -1,0 +1,36 @@
+name: juros-ettj
+
+on:
+  workflow_dispatch:
+  schedule:
+    # dias úteis às 22h de Brasília (01:00 UTC, terça a sábado): depois da divulgação da ETTJ pela ANBIMA.
+    # O script busca sempre os últimos dias úteis, então um dia perdido entra na execução seguinte.
+    - cron: "0 1 * * 2-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: juros-ettj
+  cancel-in-progress: false
+
+jobs:
+  ettj:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas requests
+      - name: Baixar ETTJ (ANBIMA)
+        run: python juros.py
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/juros
+          git diff --cached --quiet || git commit -m "juros: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
