@@ -118,8 +118,14 @@ st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon=
 
 
 # ------------------------------------------------------------------ dados
+def versao_arquivos(*arqs) -> tuple:
+    """Data de modificação dos arquivos: entra como argumento das funções em cache, então o app relê os dados
+    sozinho quando um workflow grava uma versão nova (sem depender de reiniciar o app)."""
+    return tuple(a.stat().st_mtime if a.exists() else 0 for a in arqs)
+
+
 @st.cache_data(show_spinner="Carregando a base…")
-def carregar():
+def carregar(versao: tuple = ()):
     base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
     base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
     base["cnpj"] = base["cnpj"].astype(str).str.zfill(14)
@@ -191,7 +197,7 @@ def carregar():
 
 
 @st.cache_data(show_spinner=False)
-def carregar_aluguel() -> pd.DataFrame:
+def carregar_aluguel(versao: tuple = ()) -> pd.DataFrame:
     arq = DADOS.parent / "aluguel" / "resumo.csv.gz"
     if not arq.exists():
         return pd.DataFrame()
@@ -236,7 +242,7 @@ def calc_prazos(b: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def carregar_juros() -> tuple[pd.DataFrame, pd.DataFrame]:
+def carregar_juros(versao: tuple = ()) -> tuple[pd.DataFrame, pd.DataFrame]:
     pasta = DADOS.parent / "juros"
     p = pd.read_csv(pasta / "parametros.csv", parse_dates=["data"]) if (pasta / "parametros.csv").exists() else pd.DataFrame()
     v = pd.read_csv(pasta / "vertices.csv.gz", parse_dates=["data"]) if (pasta / "vertices.csv.gz").exists() else pd.DataFrame()
@@ -302,7 +308,8 @@ def eixo_x(tipo: str) -> str:
 
 
 try:
-    base, cob, meta, fin, mult = carregar()
+    base, cob, meta, fin, mult = carregar(versao_arquivos(*(DADOS / f for f in (
+        "base.csv.gz", "cobertura.csv", "metadados.json", "financeiras.csv.gz", "multiplos.csv.gz"))))
 except FileNotFoundError:
     st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
     st.stop()
@@ -908,7 +915,7 @@ with aba_emp:
 
         # ---- aluguel de ações (custo do short)
         st.subheader("Aluguel de ações (custo do short)")
-        alug = carregar_aluguel()
+        alug = carregar_aluguel(versao_arquivos(DADOS.parent / "aluguel" / "resumo.csv.gz"))
         raiz_e = str(linha_e["ticker"])[:4]
         a_emp = alug[alug["ticker"].str[:4] == raiz_e] if not alug.empty else pd.DataFrame()
         if alug.empty:
@@ -1257,7 +1264,8 @@ with aba_fin:
 
 # -------- Juros: estrutura a termo (ANBIMA)
 with aba_jur:
-    pj, vj = carregar_juros()
+    pj, vj = carregar_juros(versao_arquivos(DADOS.parent / "juros" / "parametros.csv",
+                                            DADOS.parent / "juros" / "vertices.csv.gz"))
     if pj.empty:
         st.info("Curvas ainda não coletadas (saidas/juros/). Rode o workflow juros-ettj.")
     else:
