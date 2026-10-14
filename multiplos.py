@@ -94,6 +94,7 @@ class Precos:
     def __init__(self, cot: pd.DataFrame, mapa: dict | None = None):
         cot = cot.sort_values(["ticker", "data"])
         self.serie = {t: (list(g["data"]), list(g["preco"])) for t, g in cot.groupby("ticker")}
+        self.vol_acum = {t: [0.0] + list(np.cumsum(g["volume"].to_numpy())) for t, g in cot.groupby("ticker")}
         liq = cot.groupby("ticker")["volume"].sum()
         self.por_raiz = {}
         for t in self.serie:
@@ -103,6 +104,16 @@ class Precos:
 
     def classe(self, raiz: str, cls: str) -> list[str]:
         return [t for t in self.por_raiz.get(raiz, []) if SUFIXOS[t[4:5].encode()] == cls]
+
+    def volume_janela(self, tickers: list[str], d: pd.Timestamp, dias: int = 90) -> float:
+        """Volume financeiro negociado nos `dias` anteriores a d (inclusive), somando os papéis informados."""
+        ini = d - pd.Timedelta(days=dias)
+        tot = 0.0
+        for t in tickers:
+            datas = self.serie[t][0]
+            i, j = bisect_right(datas, d), bisect_right(datas, ini)
+            tot += self.vol_acum[t][i] - self.vol_acum[t][j]
+        return tot
 
     def ultimo(self, tickers: list[str], d: pd.Timestamp):
         """Último preço até a data d entre os papéis da classe: o de negócio mais recente
@@ -120,6 +131,12 @@ def _valor_mercado(px: Precos, raiz: str, on: float, pn: float, d: pd.Timestamp)
     notas = []
     p_on = px.ultimo(px.classe(raiz, "ON"), d) if on > 0 else None
     p_pn = px.ultimo(px.classe(raiz, "PN"), d) if pn > 0 else None
+    if on > 0 and pn > 0 and p_pn is not None:
+        v_on = px.volume_janela(px.classe(raiz, "ON"), d)
+        v_pn = px.volume_janela(px.classe(raiz, "PN"), d)
+        if v_pn > v_on:
+            p_on = p_pn
+            notas.append(f"ON precificada pela PN ({p_pn[0]}), mais líquida nos 90 dias anteriores")
     for nome, p, qt in (("ON", p_on, on), ("PN", p_pn, pn)):
         if qt > 0 and p is not None and (d - p[1]).days > DIAS_PRECO_VELHO:
             notas.append(f"{nome}: sem negócio desde {p[1].date()}, usado o último preço ({p[0]})")
@@ -156,10 +173,6 @@ def _div(a, b):
 
 def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
     vm, p_on, p_pn, notas = _valor_mercado(px, raiz, on, pn, d)
-    f = _escala_acoes(vm, fund.get("pl_controladores"))
-    if f != 1:
-        vm, on, pn = vm * f, on * f, pn * f
-        notas = notas + ["quantidade de ações informada em milhares na CVM: multiplicada por 1.000"]
     nc = fund.get("nao_controladores")
     nc = 0.0 if pd.isna(nc) else nc
     ev_c = vm + fund.get("div_liq_com_arrend") + nc if pd.notna(vm) and pd.notna(fund.get("div_liq_com_arrend")) else np.nan
@@ -180,6 +193,110 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
             "dividend_yield": (flu.get("dividendos_pagos") / vm) if pd.notna(vm) and vm > 0
                               and pd.notna(flu.get("dividendos_pagos")) else np.nan,
             "notas": "; ".join(n for n in notas_base + notas if n)}
+
+
+DIAG_ACOES: list[dict] = []   # diagnóstico da série de ações (gravado pelo universo)
+
+
+def montar_serie_acoes(cands, compos: dict, fre: dict) -> list[dict]:
+    """Todas as quantidades de ações da empresa (composição do capital do ITR/DFP e, antes dela, o FRE)."""
+    tl = []
+    for (c, k), (on, pn) in compos.items():
+        if c in cands:
+            tl.append({"data": pd.Timestamp(k), "on": on, "pn": pn, "fonte": f"ITR/DFP {k}"})
+    ini = min((e["data"] for e in tl), default=pd.Timestamp.max)
+    for (c, ano), (on, pn) in (fre or {}).items():
+        d = pd.Timestamp(f"{ano}-06-30")       # FRE retrata o capital por volta do meio do ano
+        if c in cands and d < ini:
+            tl.append({"data": d, "on": on, "pn": pn, "fonte": f"FRE {ano}"})
+    tl = sorted({e["data"]: e for e in tl}.values(), key=lambda e: e["data"])
+    return [e for e in tl if (e["on"] or 0) + (e["pn"] or 0) > 0]
+
+
+def normalizar_serie_acoes(tl: list[dict], px, raiz: str, pl_em) -> list[dict]:
+    """Corrige a unidade da quantidade de ações (algumas companhias informam em milhares, e às vezes alternam
+    entre documentos). Regras, nesta ordem:
+    1) em cada documento, escolhe a escala (1 ou 1.000) que dá P/VPA plausível (0,05x a 100x) — ou, sem PL
+       positivo, valor de mercado entre R$ 20 mi e R$ 3 tri — quando só uma das duas é plausível;
+    2) documentos indefinidos herdam a escala que deixa a quantidade mais próxima do vizinho já definido;
+    3) saltos de 300x ou mais entre documentos consecutivos sem variação inversa do preço (que indicaria
+       desdobramento/grupamento) são tratados como troca de unidade e corrigidos."""
+    if not tl:
+        return tl
+    todos = px.por_raiz.get(raiz, [])
+    for e in tl:
+        p = px.ultimo(todos, e["data"])
+        e["preco"] = p[2] if p else np.nan
+        tot, pl = e["on"] + e["pn"], pl_em(e["data"])
+        def plaus(sc):
+            if not tot or pd.isna(e["preco"]):
+                return None
+            vm = tot * sc * e["preco"] / 1e6
+            if pd.notna(pl) and pl > 0:
+                return 0.05 <= vm / pl <= 100
+            return 20 <= vm <= 3e6
+        a1, a1000 = plaus(1), plaus(1000)
+        e["escala"] = 1 if (a1 and not a1000) else 1000 if (a1000 and not a1) else None
+        e["nota"] = ""
+    definidos = [i for i, e in enumerate(tl) if e["escala"]]
+    for i, e in enumerate(tl):
+        if e["escala"] is None:
+            if not definidos:
+                e["escala"] = 1
+                continue
+            j = min(definidos, key=lambda k: (abs(k - i), k > i))
+            ref = (tl[j]["on"] + tl[j]["pn"]) * tl[j]["escala"]
+            tot = e["on"] + e["pn"]
+            e["escala"] = 1000 if abs(np.log10(tot * 1000 / ref)) < abs(np.log10(tot / ref)) else 1
+    for i in range(1, len(tl)):
+        a, b = tl[i - 1], tl[i]
+        ta, tb = (a["on"] + a["pn"]) * a["escala"], (b["on"] + b["pn"]) * b["escala"]
+        r = tb / ta
+        if r > 300 or r < 1 / 300:
+            pr = b["preco"] / a["preco"] if pd.notna(a["preco"]) and pd.notna(b["preco"]) and a["preco"] else np.nan
+            if pd.notna(pr) and abs(np.log10(r * pr)) < 0.5:
+                b["nota"] = "variação grande na quantidade de ações acompanhada pelo preço (evento corporativo)"
+                continue
+            alt = 1 if b["escala"] == 1000 else 1000
+            r2 = (b["on"] + b["pn"]) * alt / ta
+            if abs(np.log10(r2)) < abs(np.log10(r)):
+                b["escala"] = alt
+                b["nota"] = "unidade das ações ajustada para manter a série contínua (salto sem mudança de preço)"
+            else:
+                b["nota"] = "salto na quantidade de ações sem mudança de preço: conferir"
+    for e in tl:
+        if e["escala"] == 1000:
+            e["nota"] = "; ".join(x for x in ["quantidade informada em milhares na CVM: multiplicada por 1.000",
+                                              e["nota"]] if x)
+    return tl
+
+
+def acoes_da_serie(tl: list[dict], dt_fim) -> tuple:
+    """Ações vigentes na data: documento da própria data; senão o último anterior; senão o primeiro até 1 ano depois."""
+    d = pd.Timestamp(dt_fim)
+    if not tl:
+        return None, "sem composição do capital"
+    escolhido, nota = None, ""
+    exato = [e for e in tl if e["data"] == d]
+    if exato:
+        escolhido = exato[0]
+    else:
+        ant = [e for e in tl if e["data"] <= d]
+        if ant:
+            escolhido = ant[-1]
+            nota = f"ações de {escolhido['fonte']}"
+        else:
+            depois = [e for e in tl if d < e["data"] <= d + pd.Timedelta(days=366)]
+            if depois:
+                escolhido = depois[0]
+                nota = f"ações de {escolhido['fonte']} (documento posterior)"
+    if escolhido is None:
+        return None, "sem composição do capital"
+    if escolhido["fonte"].startswith("FRE"):
+        nota = f"ações do Formulário de Referência ({escolhido['fonte']}; sem desconto de tesouraria)"
+    f = escolhido["escala"]
+    notas = "; ".join(x for x in (nota, escolhido.get("nota", "")) if x)
+    return (escolhido["on"] * f, escolhido["pn"] * f), notas
 
 
 def _acoes_fre(cnpjs, dt_fim, fre):
@@ -203,7 +320,7 @@ def _acoes_em(cnpj, dt_fim, compos, fre=None):
     return _acoes_fre([cnpj], dt_fim, fre or {})
 
 
-def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px, fre=None) -> list[dict]:
+def _financeiras(fin: pd.DataFrame, raiz_de: dict, acoes_fn, px) -> list[dict]:
     """Bancos e seguradoras (base anual da DFP): P/VPA, P/L, dividend yield e ROE no fim do exercício.
     EV/EBITDA não se aplica a instituições financeiras."""
     linhas = []
@@ -215,15 +332,10 @@ def _financeiras(fin: pd.DataFrame, raiz_de: dict, compos: dict, px, fre=None) -
                 "subsetor": g["subsetor"].iloc[0], "segmento": g["segmento"].iloc[0]}
         for _, r in g.iterrows():
             dfim = pd.Timestamp(r["dt_fim"])
-            qt, nota = _acoes_em(cnpj, dfim, compos, fre)
+            qt, nota = acoes_fn(cnpj, dfim)
             if qt is None:
                 continue
             vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], dfim)
-            f = _escala_acoes(vm, r.get("pl_controladores"))
-            qt = (qt[0] * f, qt[1] * f)
-            if f != 1:
-                vm = vm * f
-                notas = notas + ["quantidade de ações informada em milhares na CVM: multiplicada por 1.000"]
             div_ = r.get("dividendos_pagos")
             linhas.append({**meta, "tipo": "anual", "data": dfim.date(), "periodo_base": str(r["exercicio"]),
                            "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
@@ -262,23 +374,48 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
     if not datas_tri or datas_tri[-1] < ultimo_pregao:
         datas_tri.append(ultimo_pregao)  # ponto mais recente ("hoje")
 
+    # PL dos controladores por data (para checar a unidade das ações) e série de ações por empresa
+    pl_series = {}
+    for cnpj_, g_ in b[b["tipo"].isin(["trimestral", "anual"])].groupby("cnpj"):
+        pl_series[cnpj_] = g_[["dt_fim", "pl_controladores"]].dropna().sort_values("dt_fim")
+    if fin is not None and len(fin):
+        for cnpj_, g_ in fin.groupby("cnpj"):
+            pl_series[cnpj_] = g_.assign(dt_fim=pd.to_datetime(g_["dt_fim"]))[["dt_fim", "pl_controladores"]] \
+                .dropna().sort_values("dt_fim")
+
+    def pl_em(cnpj_):
+        s_ = pl_series.get(cnpj_)
+        def f(d):
+            if s_ is None or s_.empty:
+                return np.nan
+            k = (s_["dt_fim"] - d).abs().idxmin()
+            return s_.loc[k, "pl_controladores"] if abs((s_.loc[k, "dt_fim"] - d).days) <= 200 else np.nan
+        return f
+
+    series_acoes = {}
+    DIAG_ACOES.clear()
+
+    def serie_de(cnpj_, raiz_):
+        if cnpj_ not in series_acoes:
+            cands_ = [cnpj_] + list(suc.get(cnpj_, []))
+            tl = normalizar_serie_acoes(montar_serie_acoes(cands_, compos, fre or {}), px, raiz_, pl_em(cnpj_))
+            series_acoes[cnpj_] = tl
+            DIAG_ACOES.extend({"cnpj": cnpj_, "raiz": raiz_, "data": e["data"].date(), "fonte": e["fonte"],
+                               "acoes_on_informadas": e["on"], "acoes_pn_informadas": e["pn"], "escala": e["escala"],
+                               "preco_ref": e["preco"], "nota": e["nota"]} for e in tl)
+        return series_acoes[cnpj_]
+
     linhas = []
     for cnpj, g in b.groupby("cnpj"):
         raiz = raiz_de.get(cnpj, "")
         if not raiz or raiz not in px.por_raiz:
             continue
         cands = [cnpj] + list(suc.get(cnpj, []))
+        tl_emp = serie_de(cnpj, raiz)
         meta = {k: g[k].iloc[0] for k in ("cnpj", "empresa", "ticker", "setor", "subsetor", "segmento")}
 
-        def acoes(dt_fim):
-            k = str(pd.Timestamp(dt_fim).date())
-            for c in cands:
-                if (c, k) in compos:
-                    return compos[(c, k)], ""
-            ant = sorted((kk[1], v) for c in cands for kk, v in compos.items() if kk[0] == c and kk[1] <= k)
-            if ant:
-                return ant[-1][1], f"ações do documento de {ant[-1][0]} (sem composição em {k})"
-            return _acoes_fre(cands, dt_fim, fre or {})
+        def acoes(dt_fim, tl_emp=tl_emp):
+            return acoes_da_serie(tl_emp, dt_fim)
 
         def divulgado(dt_fim):
             k = str(pd.Timestamp(dt_fim).date())
@@ -318,14 +455,16 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
                 nota_flu = ""
             else:
                 flu, nota_flu = {}, "sem LTM para o último documento divulgado"
-            qt, nota_qt = acoes(dfim)
+            # ações vigentes na data da cotação (a quantidade é um fato da data, divulgado por fato relevante),
+            # e não as do documento usado para os fundamentos: evita misturar preço pós-desdobramento com ações antigas
+            qt, nota_qt = acoes(d)
             if qt is None:
                 continue
             row = _linha(meta, "trimestral", d, fund, flu, qt[0], qt[1], px, raiz, [nota_disp, nota_flu, nota_qt])
             row["periodo_base"] = fund.get("periodo")
             linhas.append(row)
     if fin is not None and len(fin):
-        linhas += _financeiras(fin, raiz_de, compos, px, fre)
+        linhas += _financeiras(fin, raiz_de, lambda c, d: acoes_da_serie(serie_de(c, raiz_de.get(c, "")), d), px)
     out = pd.DataFrame(linhas)
     if len(out):
         out = out.sort_values(["cnpj", "tipo", "data"])
