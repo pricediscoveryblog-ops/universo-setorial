@@ -479,6 +479,11 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         if len(mult):
             mult.to_csv(SAIDA / "multiplos.csv.gz", index=False, compression="gzip")
             print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
+        if multiplos.DIAG_ACOES:
+            da = pd.DataFrame(multiplos.DIAG_ACOES)
+            da.to_csv(SAIDA / "diagnostico_acoes.csv.gz", index=False, compression="gzip")
+            print(f"  -> diagnostico_acoes.csv.gz ({len(da)} documentos; {int((da['escala'] == 1000).sum())} em milhares; "
+                  f"{int(da['nota'].str.contains('salto|evento', na=False).sum())} saltos tratados)")
     except Exception as e:  # noqa: BLE001 — múltiplos não podem derrubar a base
         print(f"  ! múltiplos não calculados: {e}")
     meta = {"gerado_em": datetime.now().isoformat(timespec="minutes"), "empresas": len(univ),
