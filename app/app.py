@@ -53,6 +53,14 @@ METRICAS = {
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
+    # crescimento contra o mesmo período do ano anterior (anual: ano anterior; LTM e trimestral: 4 trimestres antes)
+    "cresc_receita": ("Crescimento da receita líquida (a/a)", "pct", "Crescimento"),
+    "cresc_lucro_bruto": ("Crescimento do lucro bruto (a/a)", "pct", "Crescimento"),
+    "cresc_ebitda": ("Crescimento do EBITDA (a/a)", "pct", "Crescimento"),
+    "cresc_ebit": ("Crescimento do EBIT (a/a)", "pct", "Crescimento"),
+    "cresc_lucro_liquido": ("Crescimento do lucro líquido (a/a)", "pct", "Crescimento"),
+    "cresc_ativo_total": ("Crescimento do ativo total (a/a)", "pct", "Crescimento"),
+    "cresc_patrimonio_liquido": ("Crescimento do patrimônio líquido (a/a)", "pct", "Crescimento"),
     # prazos médios (dias) e ciclos — capital de giro operacional
     "pmr": ("Prazo médio de recebimento", "d", "Prazos médios"),
     "pme": ("Prazo médio de estocagem/venda", "d", "Prazos médios"),
@@ -137,6 +145,7 @@ def carregar(versao: tuple = ()):
     base["giro_ativo"] = base["receita"] / base["ativo_total"].where(base["ativo_total"] > 0)
     base["alavancagem_ativo_pl"] = base["ativo_total"] / base["patrimonio_liquido"].where(base["patrimonio_liquido"] > 0)
     base = calc_prazos(base)
+    base = calc_crescimento(base)
     # conversão do EBITDA em caixa: FCO ÷ EBITDA IFRS 16 (sob IFRS 16 o arrendamento pago sai do FCO e vai para o
     # financiamento, então FCO e EBITDA IFRS 16 estão no mesmo critério). Vazio com EBITDA ≤ 0.
     base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
@@ -270,6 +279,41 @@ def curva_juros(pj: pd.DataFrame, d, tipo_c: str, anos) -> np.ndarray:
     if tipo_c == "ipca":
         return taxa("IPCA")
     return (1 + taxa("PREFIXADOS")) / (1 + taxa("IPCA")) - 1
+
+
+CRESC_BASE = ["receita", "lucro_bruto", "ebitda", "ebit", "lucro_liquido", "ativo_total", "patrimonio_liquido"]
+
+
+def calc_crescimento(b: pd.DataFrame) -> pd.DataFrame:
+    """Crescimento a/a de cada linha absoluta, guardando também o valor do ano anterior (<col>_ant), usado no
+    agregado do setor (Σ atual ÷ Σ anterior − 1, só com empresas que têm os dois valores e base positiva).
+    Vazio quando a base anterior é ≤ 0."""
+    partes = []
+    for tp in ("anual", "ltm", "trimestral"):
+        x = b[b["tipo"] == tp].dropna(subset=["dt_fim"]).sort_values("dt_fim")
+        if x.empty:
+            continue
+        cols = [c for c in CRESC_BASE if c in x.columns]
+        ant = x[["cnpj", "dt_fim"] + cols].copy()
+        ant["dt_fim"] = ant["dt_fim"] + pd.DateOffset(years=1)
+        x = pd.merge_asof(x, ant.sort_values("dt_fim"), on="dt_fim", by="cnpj", suffixes=("", "_ant"),
+                          tolerance=pd.Timedelta(days=20), direction="nearest")
+        for c in cols:
+            x["cresc_" + c] = np.where(x[c + "_ant"] > 0, x[c] / x[c + "_ant"].where(x[c + "_ant"] > 0) - 1, np.nan)
+        partes.append(x)
+    resto = b[~b["tipo"].isin(["anual", "ltm", "trimestral"])]
+    return pd.concat(partes + [resto], ignore_index=True)
+
+
+def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
+    """Índice base 100 encadeando a variação entre períodos consecutivos da soma dos níveis (só empresas com valor
+    positivo nos dois períodos de cada passo: amostra casada, sem viés de entrada/saída de empresas)."""
+    cols = list(niveis.columns)
+    idx = [100.0]
+    for a, b_ in zip(cols[:-1], cols[1:]):
+        ok = (niveis[a] > 0) & (niveis[b_] > 0)
+        idx.append(idx[-1] * (niveis.loc[ok, b_].sum() / niveis.loc[ok, a].sum()) if ok.any() else np.nan)
+    return pd.Series(idx, index=cols)
 
 
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
@@ -469,6 +513,7 @@ def serie_anual_ou_ltm(rotulo: str) -> tuple[pd.DataFrame, str]:
 def crescimento(d: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     """Variação contra o mesmo período do ano anterior (anual: ano anterior; LTM: 4 trimestres antes).
     Vazio quando a base anterior é ≤ 0 (crescimento sobre base negativa não tem leitura)."""
+    d = d.drop(columns=[c + "_ant" for c in cols if c + "_ant" in d.columns])
     ant = d.copy()
     ant["dt_fim"] = ant["dt_fim"] + pd.DateOffset(years=1)
     j = pd.merge_asof(d.sort_values("dt_fim"), ant[["dt_fim"] + cols].sort_values("dt_fim"), on="dt_fim",
@@ -585,6 +630,11 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
     d = df.assign(_c=col_periodo(df))
     if METRICAS[m][1] == "mm":
         return d.groupby("_c")[m].sum(min_count=1)
+    if m.startswith("cresc_") and m[6:] + "_ant" in d.columns:
+        c = m[6:]
+        ok = d[(d[c + "_ant"] > 0) & d[c].notna()]
+        g = ok.groupby("_c")[[c, c + "_ant"]].sum()
+        return (g[c] / g[c + "_ant"] - 1).astype(float)
     if m in AGREG:
         if tipo == "trimestral" and m in ("roe_pl_final", "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16"):
             return pd.Series(dtype=float)
@@ -678,6 +728,56 @@ with aba_setor:
             if not sel_emp and len(tab) > 10:
                 st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
                            "Selecione empresas na barra lateral para vê-las isoladamente.")
+        elif ind.startswith("cresc_"):
+            # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
+            col = ind[6:]
+            niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
+            por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
+            linhas_idx = {}
+            if por_setor:
+                mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
+                for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
+                    if str(st_nome).strip():
+                        linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+            else:
+                vis_rot = tab.index if sel_emp else niv.index
+                for r in vis_rot:
+                    v = niv.loc[r]
+                    ini = v.first_valid_index()
+                    if ini is None or v[ini] <= 0:
+                        continue
+                    idx = 100 * v / v[ini]
+                    neg = idx[idx <= 0].index
+                    if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
+                        idx[idx.index >= neg[0]] = np.nan
+                    linhas_idx[r] = idx
+                linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
+            nomes = list(linhas_idx)
+            if por_setor:
+                padrao_l = nomes
+            else:
+                ult_p = ult[0] if ult else periodos[-1]
+                tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
+                padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
+            chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
+                                                                  tuple(sel_emp)))))
+            sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
+                                   help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+            fig = go.Figure()
+            for nome in sel_l:
+                y = linhas_idx[nome]
+                fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                         name=nome.split(" — ")[0] if " — " in nome else nome,
+                                         line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
+            fig.add_hline(y=100, line_dash="dot", line_color="gray")
+            fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
+                              title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
+            st.plotly_chart(fig, width="stretch")
+            st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
+                        "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
+                        "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
+                        "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
+                       + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
         else:
             fig = go.Figure()
             for r in tab.index[:10]:
