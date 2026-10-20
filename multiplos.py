@@ -219,8 +219,9 @@ def normalizar_serie_acoes(tl: list[dict], px, raiz: str, pl_em) -> list[dict]:
     1) em cada documento, escolhe a escala (1 ou 1.000) que dá P/VPA plausível (0,05x a 100x) — ou, sem PL
        positivo, valor de mercado entre R$ 20 mi e R$ 3 tri — quando só uma das duas é plausível;
     2) documentos indefinidos herdam a escala que deixa a quantidade mais próxima do vizinho já definido;
-    3) saltos de 300x ou mais entre documentos consecutivos sem variação inversa do preço (que indicaria
-       desdobramento/grupamento) são tratados como troca de unidade e corrigidos."""
+    3) de trás para frente, a partir do documento mais recente: quantidade que difere dos documentos seguintes
+       por ~10x, 100x ou 1.000x (para cima ou para baixo) sem variação inversa do preço é reescalada; com o preço
+       acompanhando (desdobramento/grupamento), fica como está."""
     if not tl:
         return tl
     todos = px.por_raiz.get(raiz, [])
@@ -248,26 +249,32 @@ def normalizar_serie_acoes(tl: list[dict], px, raiz: str, pl_em) -> list[dict]:
             ref = (tl[j]["on"] + tl[j]["pn"]) * tl[j]["escala"]
             tot = e["on"] + e["pn"]
             e["escala"] = 1000 if abs(np.log10(tot * 1000 / ref)) < abs(np.log10(tot / ref)) else 1
-    for i in range(1, len(tl)):
-        a, b = tl[i - 1], tl[i]
-        ta, tb = (a["on"] + a["pn"]) * a["escala"], (b["on"] + b["pn"]) * b["escala"]
-        r = tb / ta
-        if r > 300 or r < 1 / 300:
-            pr = b["preco"] / a["preco"] if pd.notna(a["preco"]) and pd.notna(b["preco"]) and a["preco"] else np.nan
-            if pd.notna(pr) and abs(np.log10(r * pr)) < 0.5:
-                b["nota"] = "variação grande na quantidade de ações acompanhada pelo preço (evento corporativo)"
-                continue
-            alt = 1 if b["escala"] == 1000 else 1000
-            r2 = (b["on"] + b["pn"]) * alt / ta
-            if abs(np.log10(r2)) < abs(np.log10(r)):
-                b["escala"] = alt
-                b["nota"] = "unidade das ações ajustada para manter a série contínua (salto sem mudança de preço)"
-            else:
-                b["nota"] = "salto na quantidade de ações sem mudança de preço: conferir"
+    # 3) continuidade da série (de trás para frente, ancorada no documento mais recente): quantidade que difere
+    #    da do documento seguinte (já tratado) por um fator próximo de uma potência
+    #    de 10 (10x, 100x, 1.000x, para cima ou para baixo) sem variação inversa do preço é erro de unidade e é
+    #    reescalada; se o preço se moveu na proporção inversa, é desdobramento/grupamento e fica como está.
+    tot_aj = lambda e: (e["on"] + e["pn"]) * e["escala"]
+    for i in range(len(tl) - 2, -1, -1):
+        e = tl[i]
+        ref = tot_aj(tl[i + 1])                        # documento seguinte, já tratado (a série é corrigida de trás
+        preco_ref = tl[i + 1]["preco"]                 # para frente, então a referência não atravessa eventos)
+        t = tot_aj(e)
+        if t <= 0 or ref <= 0:
+            continue
+        lq = np.log10(t / ref)
+        k = int(round(lq))
+        if k == 0 or abs(lq - k) > 0.15:
+            continue                                   # diferença que não é potência de 10: emissão/recompra real
+        pr = e["preco"] / preco_ref if pd.notna(e["preco"]) and pd.notna(preco_ref) and preco_ref else np.nan
+        if pd.notna(pr) and abs(np.log10((t / ref) * pr)) < 0.3:
+            e["nota"] = "variação de 10x ou mais na quantidade acompanhada pelo preço (desdobramento/grupamento)"
+            continue
+        e["escala"] = e["escala"] / (10 ** k)
+        e["nota"] = (f"quantidade {10 ** abs(k):,.0f}x {'maior' if k > 0 else 'menor'} que a dos documentos "
+                     f"seguintes sem mudança de preço: ajustada (÷{10 ** k:g})").replace(",", ".")
     for e in tl:
-        if e["escala"] == 1000:
-            e["nota"] = "; ".join(x for x in ["quantidade informada em milhares na CVM: multiplicada por 1.000",
-                                              e["nota"]] if x)
+        if e["escala"] == 1000 and not e["nota"]:
+            e["nota"] = "quantidade informada em milhares na CVM: multiplicada por 1.000"
     return tl
 
 
