@@ -441,7 +441,7 @@ def empresa_financeira():
     dm = mult[(mult["cnpj"] == cnpj_f) & (mult["tipo"] == "anual")].sort_values("data") if not mult.empty else pd.DataFrame()
     if dm.empty:
         st.info("Múltiplos de bancos e seguradoras ainda não gerados: aparecem depois da próxima execução do coletor.")
-        return
+        return emp_f, d, seg_f
     st.caption("Anual: preço do último pregão do exercício com lucro e PL dos controladores do exercício. "
                "EV/EBITDA não se aplica a instituições financeiras.")
     pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == "anual")]
@@ -467,6 +467,133 @@ def empresa_financeira():
                   "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
         tab_m = dm[[c for c in cols_m if c in dm.columns]].assign(data=dm["data"].dt.date)
         st.dataframe(tab_m, hide_index=True, width="stretch")
+    return emp_f, d, seg_f
+
+
+IND_FIN_EXTRA = {"p_vpa": ("P/VPA", "x"), "dividend_yield": ("Dividend yield", "pct")}
+
+
+def serie_financeira(rot: str) -> pd.DataFrame:
+    """Indicadores anuais de um banco/seguradora + múltiplos de mercado do fim de cada exercício."""
+    d = fin[fin["rotulo"] == rot].sort_values("exercicio").copy()
+    if not mult.empty and len(d):
+        cn = str(d["cnpj"].iloc[0]).zfill(14)
+        m = mult[(mult["cnpj"] == cn) & (mult["tipo"] == "anual")].assign(exercicio=lambda x: x["data"].dt.year)
+        d = d.drop(columns=[c for c in IND_FIN_EXTRA if c in d.columns]).merge(
+            m[["exercicio"] + list(IND_FIN_EXTRA)].drop_duplicates("exercicio"), on="exercicio", how="left")
+    return d
+
+
+def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
+    """Aluguel de ações e gráficos sobrepostos para bancos e seguradoras (mesma lógica das demais empresas)."""
+    # ---- aluguel de ações
+    st.subheader("Aluguel de ações (custo do short)")
+    alug = carregar_aluguel(versao_arquivos(DADOS.parent / "aluguel" / "resumo.csv.gz"))
+    raiz_e = str(d["ticker"].iloc[0])[:4]
+    a_emp = alug[alug["ticker"].str[:4] == raiz_e] if not alug.empty else pd.DataFrame()
+    if alug.empty:
+        st.info("Dados de aluguel ainda não disponíveis (saidas/aluguel/resumo.csv.gz).")
+    elif a_emp.empty:
+        st.info(f"Sem registros de aluguel para os papéis {raiz_e}*.")
+    else:
+        tks = a_emp.groupby("ticker")["saldo_alugado_qtd"].mean().sort_values(ascending=False).index.tolist()
+        tk = st.selectbox("Papel", tks, key="alug_tk_fin")
+        at = a_emp[a_emp["ticker"] == tk].sort_values("data")
+        grupo = fin[fin["segmento"] == seg_f][["cnpj", "ticker"]].drop_duplicates("cnpj")
+        raiz_cnpj = dict(zip(grupo["ticker"].astype(str).str[:4], grupo["cnpj"].astype(str).str.zfill(14)))
+        ag = alug[alug["ticker"].str[:4].isin(raiz_cnpj)]
+        princ = (ag.groupby("ticker")["saldo_alugado_qtd"].mean().reset_index()
+                 .assign(r=lambda x: x["ticker"].str[:4]).sort_values("saldo_alugado_qtd").groupby("r").tail(1)["ticker"])
+        med_tx = ag[ag["ticker"].isin(princ)].groupby("data")["taxa_tomador_media"].median()
+        a1, a2 = st.columns(2)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_tomador_media"], mode="lines", name=f"Tomador {tk}"))
+        fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_doador_media"], mode="lines", name=f"Doador {tk}"))
+        mt = med_tx.reindex(at["data"])
+        fig.add_trace(go.Scatter(x=at["data"], y=mt, mode="lines", line=dict(dash="dash"), name=f"Mediana tomador {seg_f}"))
+        add_medias(fig, at["data"], at["taxa_tomador_media"], mt, "tomador")
+        fig.update_layout(title="Taxa de aluguel (média ponderada do dia, % a.a.)", height=360, yaxis_tickformat=".2%",
+                          legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+        a1.plotly_chart(fig, width="stretch")
+        # ações em circulação: última composição disponível (bancos têm múltiplos anuais)
+        if not mult.empty:
+            ult_m = mult.sort_values("data").groupby("cnpj").tail(1)
+            acoes = (ult_m["acoes_on"].fillna(0) + ult_m["acoes_pn"].fillna(0)).where(lambda x: x > 0)
+            acoes_por_cnpj = dict(zip(ult_m["cnpj"], acoes))
+        else:
+            acoes_por_cnpj = {}
+
+        def pct_alugado(df_r, cnpj_):
+            q = acoes_por_cnpj.get(cnpj_)
+            serie = df_r.groupby("data")["saldo_alugado_qtd"].sum(min_count=1)
+            return serie / q if q else serie * np.nan
+        p_emp = pct_alugado(a_emp, str(d["cnpj"].iloc[0]).zfill(14))
+        pares_pct = [pct_alugado(ag[ag["ticker"].str[:4] == r], c).rename(r) for r, c in raiz_cnpj.items()]
+        med_pct = pd.concat(pares_pct, axis=1).median(axis=1) if pares_pct else pd.Series(dtype=float)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=p_emp.index, y=p_emp.values, mode="lines", name=f"{raiz_e} (todas as classes)"))
+        mp = med_pct.reindex(p_emp.index)
+        fig.add_trace(go.Scatter(x=p_emp.index, y=mp.values, mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        add_medias(fig, p_emp.index, p_emp.values, mp.values)
+        fig.update_layout(title="Saldo alugado (% das ações em circulação)", height=360, yaxis_tickformat=".1%",
+                          legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+        a2.plotly_chart(fig, width="stretch")
+        st.caption(f"Fonte: B3 (empréstimo de ativos), via coletor-aluguel-b3; série desde {alug['data'].min().date()}. "
+                   "Taxas ao ano (a B3 informa em fração), média ponderada pela quantidade contratada no dia. Saldo "
+                   "alugado ÷ ações em circulação (total menos tesouraria) da última composição do capital. "
+                   f"Comparáveis: o papel com maior saldo alugado de cada instituição do segmento {seg_f}.")
+
+    # ---- gráficos sobrepostos
+    st.subheader("Gráficos sobrepostos")
+    ind_ov = {**{k: (v[0], v[1]) for k, v in FIN.items()}, **IND_FIN_EXTRA}
+    se = serie_financeira(emp_f)
+    cand = [k for k in ind_ov if k in se.columns and se[k].notna().any()]
+    o1, o2 = st.columns([3, 2])
+    sel_ov = o1.multiselect("Linhas da instituição", cand, default=[k for k in ("valor_mercado",) if k in cand],
+                            format_func=lambda k: ind_ov[k][0], key="ov_ind_fin")
+    outras = o1.multiselect("Outras instituições (opcional)", sorted(r for r in fin["rotulo"].unique() if r != emp_f),
+                            key="ov_emp_fin")
+    ind_outras = o1.selectbox("Indicador das outras instituições", cand or list(ind_ov),
+                              index=(cand.index("valor_mercado") if "valor_mercado" in cand else 0),
+                              format_func=lambda k: ind_ov[k][0], key="ov_ind_outras_fin") if outras else None
+    escala = o2.radio("Escala", ["Base 100 (primeiro ponto)", "Valores (dois eixos)"], key="ov_esc_fin")
+    series_ov = [(f"{ind_ov[k][0]} {emp_f.split(' — ')[0]}", se["exercicio"], se[k], ind_ov[k][1]) for k in sel_ov]
+    for o in outras:
+        so = serie_financeira(o)
+        if ind_outras in so.columns:
+            series_ov.append((f"{ind_ov[ind_outras][0]} {o.split(' — ')[0]}", so["exercicio"], so[ind_outras],
+                              ind_ov[ind_outras][1]))
+    if not series_ov:
+        st.info("Escolha ao menos uma linha.")
+        return
+    fig = go.Figure()
+    ignoradas = []
+    for nome, x, y, f in series_ov:
+        y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
+        x = pd.Series(list(x))
+        if escala.startswith("Base 100"):
+            validos = y[y.notna()]
+            if validos.empty or validos.iloc[0] <= 0:
+                ignoradas.append(nome)
+                continue
+            fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+        else:
+            fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
+                                     name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
+                                     yaxis="y" if f == "mm" else "y2"))
+    if escala.startswith("Base 100"):
+        fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
+        fig.add_hline(y=100, line_dash="dot", line_color="gray")
+    else:
+        fig.update_layout(yaxis=dict(title="R$ mm"),
+                          yaxis2=dict(title="Múltiplos (x) e %", overlaying="y", side="right", showgrid=False))
+    fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), margin=dict(t=30, b=20, l=10, r=10))
+    st.plotly_chart(fig, width="stretch")
+    if ignoradas:
+        st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
+                   ". Use a escala de valores para vê-las.")
+    st.caption("Série anual (DFP). Base 100 compara o comportamento relativo desde o primeiro exercício; em valores, "
+               "R$ mm à esquerda e múltiplos/% à direita.")
 
 
 def add_medias(fig, x, y, ym=None, rotulo=""):
@@ -827,7 +954,9 @@ with aba_emp:
     grupo_e = (st.radio("Grupo de empresas", ["Não financeiras", "Bancos e seguradoras"], horizontal=True,
                         key="grupo_emp") if not fin.empty else "Não financeiras")
     if grupo_e == "Bancos e seguradoras":
-        empresa_financeira()
+        ctx_f = empresa_financeira()
+        if ctx_f:
+            extras_financeira(*ctx_f)
     elif filtrado.empty:
         st.info("Nenhum dado para o filtro.")
     else:
