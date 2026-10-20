@@ -61,6 +61,7 @@ METRICAS = {
     "cresc_lucro_liquido": ("Crescimento do lucro líquido (a/a)", "pct", "Crescimento"),
     "cresc_ativo_total": ("Crescimento do ativo total (a/a)", "pct", "Crescimento"),
     "cresc_patrimonio_liquido": ("Crescimento do patrimônio líquido (a/a)", "pct", "Crescimento"),
+    "cresc_capex_organico": ("Crescimento do capex orgânico (a/a)", "pct", "Crescimento"),
     # prazos médios (dias) e ciclos — capital de giro operacional
     "pmr": ("Prazo médio de recebimento", "d", "Prazos médios"),
     "pme": ("Prazo médio de estocagem/venda", "d", "Prazos médios"),
@@ -281,7 +282,8 @@ def curva_juros(pj: pd.DataFrame, d, tipo_c: str, anos) -> np.ndarray:
     return (1 + taxa("PREFIXADOS")) / (1 + taxa("IPCA")) - 1
 
 
-CRESC_BASE = ["receita", "lucro_bruto", "ebitda", "ebit", "lucro_liquido", "ativo_total", "patrimonio_liquido"]
+CRESC_BASE = ["receita", "lucro_bruto", "ebitda", "ebit", "lucro_liquido", "ativo_total", "patrimonio_liquido",
+              "capex_organico"]
 
 
 def calc_crescimento(b: pd.DataFrame) -> pd.DataFrame:
