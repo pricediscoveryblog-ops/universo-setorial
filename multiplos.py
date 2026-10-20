@@ -219,12 +219,24 @@ def normalizar_serie_acoes(tl: list[dict], px, raiz: str, pl_em) -> list[dict]:
     1) em cada documento, escolhe a escala (1 ou 1.000) que dá P/VPA plausível (0,05x a 100x) — ou, sem PL
        positivo, valor de mercado entre R$ 20 mi e R$ 3 tri — quando só uma das duas é plausível;
     2) documentos indefinidos herdam a escala que deixa a quantidade mais próxima do vizinho já definido;
-    3) de trás para frente, a partir do documento mais recente: quantidade que difere dos documentos seguintes
-       por ~10x, 100x ou 1.000x (para cima ou para baixo) sem variação inversa do preço é reescalada; com o preço
-       acompanhando (desdobramento/grupamento), fica como está."""
+    3) saltos de ~10x, 100x ou 1.000x entre documentos sem variação inversa do preço são erro de contagem: os
+       blocos errados são reescalados para o nível da maioria dos documentos; com o preço acompanhando
+       (desdobramento/grupamento), a mudança é real e fica como está."""
     if not tl:
         return tl
     todos = px.por_raiz.get(raiz, [])
+    # 0) PN informada por engano: a empresa não tem papel PN negociado na B3 (nunca teve) e a quantidade de PN é
+    #    igual à de ON, ou aparece de repente depois de uma série sem PN. Nesses casos a PN é desconsiderada.
+    #    Empresas com PN real não listada (quantidade própria e estável) continuam com a PN, precificada pela ON.
+    tem_pn_b3 = bool(px.classe(raiz, "PN"))
+    for i, e in enumerate(tl):
+        e.setdefault("nota_pn", "")
+        if e["pn"] > 0 and not tem_pn_b3:
+            sem_pn_antes = i > 0 and all(x["pn"] == 0 for x in tl[:i])
+            if e["pn"] == e["on"] or sem_pn_antes:
+                e["pn"] = 0.0
+                e["nota_pn"] = ("ações PN informadas desconsideradas: a empresa não tem PN na B3 e a quantidade "
+                                "repete a de ON ou surge de repente")
     for e in tl:
         p = px.ultimo(todos, e["data"])
         e["preco"] = p[2] if p else np.nan
@@ -249,32 +261,43 @@ def normalizar_serie_acoes(tl: list[dict], px, raiz: str, pl_em) -> list[dict]:
             ref = (tl[j]["on"] + tl[j]["pn"]) * tl[j]["escala"]
             tot = e["on"] + e["pn"]
             e["escala"] = 1000 if abs(np.log10(tot * 1000 / ref)) < abs(np.log10(tot / ref)) else 1
-    # 3) continuidade da série (de trás para frente, ancorada no documento mais recente): quantidade que difere
-    #    da do documento seguinte (já tratado) por um fator próximo de uma potência
-    #    de 10 (10x, 100x, 1.000x, para cima ou para baixo) sem variação inversa do preço é erro de unidade e é
-    #    reescalada; se o preço se moveu na proporção inversa, é desdobramento/grupamento e fica como está.
+    # 3) continuidade da série por blocos: documentos consecutivos com variação próxima de 10x, 100x ou 1.000x
+    #    marcam uma fronteira. Se o preço se moveu na proporção inversa, é desdobramento/grupamento (fronteira
+    #    real, sem ajuste); se não, é erro de contagem. A referência é o nível com mais documentos (empate: o mais
+    #    recente), e os blocos com erro são reescalados para ele — assim um documento recente errado não
+    #    contamina o histórico, e um bloco antigo errado é corrigido pelos documentos certos.
     tot_aj = lambda e: (e["on"] + e["pn"]) * e["escala"]
-    for i in range(len(tl) - 2, -1, -1):
-        e = tl[i]
-        ref = tot_aj(tl[i + 1])                        # documento seguinte, já tratado (a série é corrigida de trás
-        preco_ref = tl[i + 1]["preco"]                 # para frente, então a referência não atravessa eventos)
-        t = tot_aj(e)
-        if t <= 0 or ref <= 0:
-            continue
-        lq = np.log10(t / ref)
-        k = int(round(lq))
-        if k == 0 or abs(lq - k) > 0.15:
-            continue                                   # diferença que não é potência de 10: emissão/recompra real
-        pr = e["preco"] / preco_ref if pd.notna(e["preco"]) and pd.notna(preco_ref) and preco_ref else np.nan
-        if pd.notna(pr) and abs(np.log10((t / ref) * pr)) < 0.3:
-            e["nota"] = "variação de 10x ou mais na quantidade acompanhada pelo preço (desdobramento/grupamento)"
-            continue
-        e["escala"] = e["escala"] / (10 ** k)
-        e["nota"] = (f"quantidade {10 ** abs(k):,.0f}x {'maior' if k > 0 else 'menor'} que a dos documentos "
-                     f"seguintes sem mudança de preço: ajustada (÷{10 ** k:g})").replace(",", ".")
+    desloc, atual = [0], 0
+    for i in range(1, len(tl)):
+        a_, b_ = tl[i - 1], tl[i]
+        ta, tb = tot_aj(a_), tot_aj(b_)
+        k = 0
+        if ta > 0 and tb > 0:
+            lq = np.log10(tb / ta)
+            kk = int(round(lq))
+            if kk != 0 and abs(lq - kk) <= 0.15:
+                pr = b_["preco"] / a_["preco"] if pd.notna(a_["preco"]) and pd.notna(b_["preco"]) and a_["preco"] else np.nan
+                if pd.notna(pr) and abs(np.log10((tb / ta) * pr)) < 0.3:
+                    b_["nota"] = "variação de 10x ou mais na quantidade acompanhada pelo preço (desdobramento/grupamento)"
+                else:
+                    k = kk
+        atual += k
+        desloc.append(atual)
+    contagem = {}
+    for i, d_ in enumerate(desloc):
+        contagem[d_] = contagem.get(d_, 0) + 1
+    ref = max(contagem, key=lambda d_: (contagem[d_], max(i for i, x in enumerate(desloc) if x == d_)))
+    for e, d_ in zip(tl, desloc):
+        k = d_ - ref
+        if k:
+            e["escala"] = e["escala"] / (10 ** k)
+            e["nota"] = (f"quantidade {10 ** abs(k):,.0f}x {'maior' if k > 0 else 'menor'} que a da maioria dos "
+                         f"documentos, sem mudança de preço: ajustada (÷{10 ** k:g})").replace(",", ".")
     for e in tl:
         if e["escala"] == 1000 and not e["nota"]:
             e["nota"] = "quantidade informada em milhares na CVM: multiplicada por 1.000"
+        if e.get("nota_pn"):
+            e["nota"] = "; ".join(x for x in (e["nota_pn"], e["nota"]) if x)
     return tl
 
 
