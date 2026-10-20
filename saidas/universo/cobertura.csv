@@ -305,7 +305,7 @@ cnpj,empresa,ticker,setor,subsetor,segmento,anos_anuais,inicio_anual,fim_anual,t
 60894730000105,USIMINAS,USIM3,Materiais Básicos,Siderurgia e Metalurgia,Siderurgia,10,2016.0,2025.0,42,2T26,janela completa,
 61022042000118,CONST A LIND,CALI11,Consumo Cíclico,Construção Civil,Incorporações,10,2016.0,2025.0,42,2T26,janela completa,
 61065298000102,MANGELS INDL,MGEL3,Materiais Básicos,Siderurgia e Metalurgia,Artefatos de Ferro e Aço,10,2016.0,2025.0,42,2T26,janela completa,
-61065751000180,ROSSI RESID,RSID3,Consumo Cíclico,Construção Civil,Incorporações,10,2016.0,2025.0,40,4T25,janela completa,
+61065751000180,ROSSI RESID,RSID3,Consumo Cíclico,Construção Civil,Incorporações,10,2016.0,2025.0,42,2T26,janela completa,
 61079117000105,ALPARGATAS,ALPA3,Consumo Cíclico,Tecidos. Vestuário e Calçados,Calçados,10,2016.0,2025.0,42,2T26,janela completa,
 61082004000150,ESTRELA,ESTR3,Consumo Cíclico,Viagens e Lazer,Brinquedos e Jogos,10,2016.0,2025.0,40,4T25,janela completa,
 61088894000108,CAMBUCI,CAMB3,Consumo Cíclico,Tecidos. Vestuário e Calçados,Calçados,10,2016.0,2025.0,42,2T26,janela completa,
@@ -325,7 +325,7 @@ cnpj,empresa,ticker,setor,subsetor,segmento,anos_anuais,inicio_anual,fim_anual,t
 61856571000117,COMGAS,CGAS3,Utilidade Pública,Gás,Gás,10,2016.0,2025.0,42,2T26,janela completa,
 62002886000160,SPTURIS,AHEB3,Consumo Cíclico,Viagens e Lazer,Produção de Eventos e Shows,10,2016.0,2025.0,42,2T26,janela completa,
 62984091000102,CRUZEIRO EDU,CSED3,Consumo Cíclico,Diversos,Serviços Educacionais,8,2018.0,2025.0,27,2T26,registro na CVM em 2021-02-09,
-64904295000103,CAMIL,CAML3,Consumo não Cíclico,Alimentos Processados,Alimentos Diversos,10,2017.0,2026.0,38,1T27,janela completa,exercício social termina no mês [2]
+64904295000103,CAMIL,CAML3,Consumo não Cíclico,Alimentos Processados,Alimentos Diversos,10,2017.0,2026.0,39,2T27,janela completa,exercício social termina no mês [2]
 67010660000124,RNI,RDNI,Consumo Cíclico,Construção Civil,Incorporações,10,2015.0,2025.0,41,2T26,janela completa,
 67571414000141,VIVER,VIVR11,Consumo Cíclico,Construção Civil,Incorporações,10,2016.0,2025.0,42,2T26,janela completa,
 67620377000114,MINERVA,BEEF11,Consumo não Cíclico,Alimentos Processados,Carnes e Derivados,10,2016.0,2025.0,42,2T26,janela completa,
