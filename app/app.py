@@ -62,6 +62,11 @@ METRICAS = {
     "cresc_ativo_total": ("Crescimento do ativo total (a/a)", "pct", "Crescimento"),
     "cresc_patrimonio_liquido": ("Crescimento do patrimônio líquido (a/a)", "pct", "Crescimento"),
     "cresc_capex_organico": ("Crescimento do capex orgânico (a/a)", "pct", "Crescimento"),
+    # graus de alavancagem (a partir das variações a/a): GAO = Δ% EBIT ÷ Δ% receita; GAF = Δ% lucro ÷ Δ% EBIT;
+    # GAT = Δ% lucro ÷ Δ% receita (= GAO × GAF)
+    "gao": ("Grau de alavancagem operacional (GAO)", "x", "Graus de alavancagem"),
+    "gaf": ("Grau de alavancagem financeira (GAF)", "x", "Graus de alavancagem"),
+    "gat": ("Grau de alavancagem total (GAT)", "x", "Graus de alavancagem"),
     # prazos médios (dias) e ciclos — capital de giro operacional
     "pmr": ("Prazo médio de recebimento", "d", "Prazos médios"),
     "pme": ("Prazo médio de estocagem/venda", "d", "Prazos médios"),
@@ -147,6 +152,12 @@ def carregar(versao: tuple = ()):
     base["alavancagem_ativo_pl"] = base["ativo_total"] / base["patrimonio_liquido"].where(base["patrimonio_liquido"] > 0)
     base = calc_prazos(base)
     base = calc_crescimento(base)
+    # graus de alavancagem: vazios quando o denominador varia menos de 1% (o índice explode sem significado)
+    def _grau(a, b):
+        return a / b.where(b.abs() >= 0.01)
+    base["gao"] = _grau(base["cresc_ebit"], base["cresc_receita"])
+    base["gaf"] = _grau(base["cresc_lucro_liquido"], base["cresc_ebit"])
+    base["gat"] = _grau(base["cresc_lucro_liquido"], base["cresc_receita"])
     # conversão do EBITDA em caixa: FCO ÷ EBITDA IFRS 16 (sob IFRS 16 o arrendamento pago sai do FCO e vai para o
     # financiamento, então FCO e EBITDA IFRS 16 estão no mesmo critério). Vazio com EBITDA ≤ 0.
     base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
@@ -759,6 +770,11 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
     d = df.assign(_c=col_periodo(df))
     if METRICAS[m][1] == "mm":
         return d.groupby("_c")[m].sum(min_count=1)
+    if m in ("gao", "gaf", "gat"):
+        num, den = {"gao": ("cresc_ebit", "cresc_receita"), "gaf": ("cresc_lucro_liquido", "cresc_ebit"),
+                    "gat": ("cresc_lucro_liquido", "cresc_receita")}[m]
+        a_, b_ = agregado_setor(df, num), agregado_setor(df, den)
+        return (a_ / b_.where(b_.abs() >= 0.01)).astype(float)
     if m.startswith("cresc_") and m[6:] + "_ant" in d.columns:
         c = m[6:]
         ok = d[(d[c + "_ant"] > 0) & d[c].notna()]
@@ -907,6 +923,27 @@ with aba_setor:
                         "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
                         "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
                        + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
+        elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
+            # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
+            linhas_g = {}
+            for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
+                linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
+            linhas_g["Todas as empresas"] = total
+            sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
+                                   key=f"graus_linhas_{ind}_{tipo}",
+                                   help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+            fig = go.Figure()
+            for nome in sel_g:
+                y = linhas_g[nome]
+                fig.add_trace(go.Scatter(x=periodos, y=y.values, mode="lines+markers", name=nome,
+                                         line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
+            fig.add_hline(y=1, line_dash="dot", line_color="gray")
+            fig.update_layout(height=480, legend_title_text="", yaxis_ticksuffix="x",
+                              title=f"{ROT[ind]} por setor")
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
+                       "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
+                       "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
         else:
             fig = go.Figure()
             for r in tab.index[:10]:
@@ -1637,6 +1674,7 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
 - Conversão de caixa = FCO ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
+- Graus de alavancagem também na visão do setor (por empresa e, sem recorte, por setor sobre os agregados).
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
   GAF = Δ% lucro líquido ÷ Δ% EBIT; GAT = GAO × GAF. Vazios quando o denominador varia menos de 1%.
 
