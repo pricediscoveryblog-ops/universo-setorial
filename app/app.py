@@ -757,7 +757,13 @@ aba_setor, aba_emp, aba_rank, aba_scr, aba_fin, aba_jur, aba_dados, aba_cob, aba
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
-    return df["exercicio"].astype("Int64").astype(str) if tipo == "anual" else df["periodo"]
+    """Rótulo comum de período para comparar empresas. Trimestral e LTM: trimestre CIVIL da data de fim (ex.: 2T26 =
+    junho/2026). O rótulo do ITR segue o exercício social da empresa, e companhias com exercício encerrado em março
+    chamariam junho/2026 de 1T27 — misturando datas diferentes na mesma coluna e bagunçando a ordem."""
+    if tipo == "anual":
+        return df["exercicio"].astype("Int64").astype(str)
+    dt = pd.to_datetime(df["dt_fim"])
+    return dt.dt.quarter.astype("Int64").astype(str) + "T" + (dt.dt.year % 100).astype("Int64").astype(str).str.zfill(2)
 
 
 def ordem_periodos(df: pd.DataFrame) -> list:
@@ -1408,9 +1414,10 @@ with aba_rank:
             per = c2.selectbox("Exercício", sorted(filtrado["exercicio"].dropna().astype(int).unique(), reverse=True), key="rk_ano")
             d = filtrado[filtrado["exercicio"] == per]
         else:
-            per = c2.selectbox("Período", sorted(filtrado["periodo"].unique(),
-                               key=lambda p: filtrado.loc[filtrado["periodo"] == p, "dt_fim"].max(), reverse=True), key="rk_per")
-            d = filtrado[filtrado["periodo"] == per]
+            rot_rk = col_periodo(filtrado)
+            per = c2.selectbox("Período", sorted(rot_rk.unique(),
+                               key=lambda p: filtrado.loc[rot_rk == p, "dt_fim"].max(), reverse=True), key="rk_per")
+            d = filtrado[rot_rk == per]
         n = c3.slider("Quantas empresas", 5, 50, 20)
         ordem = st.radio("Ordem", ["Maiores", "Menores"], horizontal=True)
         d = d.dropna(subset=[met]).sort_values(met, ascending=(ordem == "Menores")).head(n)
