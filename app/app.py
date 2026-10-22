@@ -329,6 +329,27 @@ def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
     return pd.Series(idx, index=cols)
 
 
+@st.cache_data(show_spinner=False)
+def carregar_dividas(versao: tuple = ()) -> pd.DataFrame:
+    arq = DADOS.parent / "dividas" / "debentures.csv.gz"
+    if not arq.exists():
+        return pd.DataFrame()
+    d = pd.read_csv(arq, dtype={"cnpj_grupo": str, "cnpj_emissor": str},
+                    parse_dates=["data_emissao", "vencimento"])
+    d["cnpj_grupo"] = d["cnpj_grupo"].str.zfill(14)
+    return d
+
+
+def rotulo_remuneracao(r) -> str:
+    """Remuneração de emissão: '105% DI', 'DI + 1,6%', 'IPCA + 6,5%' ou o índice."""
+    ind, pct, tx = str(r.get("indice") or "").strip(), r.get("percentual_indice"), r.get("taxa_emissao")
+    if ind.upper().startswith("DI") and pd.notna(pct) and pct not in (0, 100) and (pd.isna(tx) or tx == 0):
+        return f"{pct:g}% DI"
+    if pd.notna(tx) and tx != 0:
+        return f"{ind} + {tx:g}%".replace(".", ",")
+    return ind or "-"
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -1186,6 +1207,70 @@ with aba_emp:
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
+        # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço
+        st.subheader("Dívida em debêntures × dívida do balanço")
+        dvs = carregar_dividas(versao_arquivos(DADOS.parent / "dividas" / "debentures.csv.gz"))
+        cn_e = str(linha_e["cnpj"]).zfill(14)
+        dd = dvs[dvs["cnpj_grupo"] == cn_e].copy() if not dvs.empty else pd.DataFrame()
+        ult_bal = base[(base["cnpj"] == cn_e) & base["tipo"].isin(["trimestral", "anual"])].sort_values("dt_fim").tail(1)
+        if dvs.empty:
+            st.info("Base de debêntures ainda não coletada (saidas/dividas/). Rode o workflow dividas-debentures.")
+        elif dd.empty:
+            st.info("Nenhuma debênture ativa encontrada para a empresa ou suas controladas no SND.")
+        else:
+            dt_bal = ult_bal["dt_fim"].iloc[0] if len(ult_bal) else pd.NaT
+            div_bal = ult_bal["divida_bruta_ex_arrend"].iloc[0] if len(ult_bal) else np.nan
+            dd["remuneracao"] = dd.apply(rotulo_remuneracao, axis=1)
+            dd["premio_mercado"] = dd["taxa_indicativa"] - dd["taxa_emissao"].where(dd["taxa_emissao"] != 0)
+            na_data = dd[dd["data_emissao"] <= dt_bal] if pd.notna(dt_bal) else dd
+            tot_deb = na_data["saldo_rs_mm"].sum()
+            w = dd["saldo_rs_mm"].where(dd["duration_anos"].notna())
+            dur = (dd["duration_anos"] * w).sum() / w.sum() if w.sum() > 0 else np.nan
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"Dívida bruta no balanço ({dt_bal.strftime('%d/%m/%Y') if pd.notna(dt_bal) else '-'})",
+                      f"R$ {div_bal:,.0f} mi".replace(",", ".") if pd.notna(div_bal) else "-")
+            m2.metric("Debêntures (saldo estimado)", f"R$ {tot_deb:,.0f} mi".replace(",", "."),
+                      f"{tot_deb / div_bal:.0%} da dívida" if pd.notna(div_bal) and div_bal > 0 else None,
+                      delta_color="off")
+            dif = div_bal - tot_deb if pd.notna(div_bal) else np.nan
+            m3.metric("Dívida comercial/bancária (diferença)", f"R$ {dif:,.0f} mi".replace(",", ".") if pd.notna(dif) else "-",
+                      f"{dif / div_bal:.0%} da dívida" if pd.notna(dif) and div_bal > 0 else None, delta_color="off")
+            m4.metric("Duration média ponderada", f"{dur:.1f} anos" if pd.notna(dur) else "-")
+            if pd.notna(dif) and dif < 0:
+                st.caption("⚠️ Debêntures acima da dívida do balanço: pode haver debênture de controlada não consolidada, "
+                           "amortização recente não refletida no SND, ou diferença entre saldo estimado e valor contábil.")
+            cols_d = ["codigo", "emissor", "via_controlada", "data_emissao", "vencimento", "remuneracao", "taxa_indicativa",
+                      "premio_mercado", "pct_pu_par", "duration_anos", "saldo_rs_mm", "incentivada"]
+            tab_d = dd[[c for c in cols_d if c in dd.columns]].sort_values("vencimento").assign(
+                data_emissao=lambda x: x["data_emissao"].dt.date, vencimento=lambda x: x["vencimento"].dt.date)
+            st.dataframe(tab_d, hide_index=True, width="stretch", column_config={
+                "codigo": "Código", "emissor": "Emissor", "via_controlada": st.column_config.CheckboxColumn("Controlada"),
+                "data_emissao": "Emissão", "vencimento": "Vencimento", "remuneracao": "Remuneração (emissão)",
+                "taxa_indicativa": st.column_config.NumberColumn("Taxa indicativa ANBIMA", format="%.2f"),
+                "premio_mercado": st.column_config.NumberColumn("Mercado − emissão (p.p.)", format="%+.2f"),
+                "pct_pu_par": st.column_config.NumberColumn("% PU par", format="%.1f"),
+                "duration_anos": st.column_config.NumberColumn("Duration (anos)", format="%.1f"),
+                "saldo_rs_mm": st.column_config.NumberColumn("Saldo (R$ mm)", format="%,.1f"),
+                "incentivada": st.column_config.CheckboxColumn("Incentivada (12.431)")})
+            g1, g2 = st.columns(2)
+            venc = dd.assign(ano=dd["vencimento"].dt.year).groupby(["ano", "indice"])["saldo_rs_mm"].sum().reset_index()
+            fig = px.bar(venc, x="ano", y="saldo_rs_mm", color="indice", labels={"saldo_rs_mm": "R$ mm", "ano": "",
+                                                                                "indice": "Indexador"})
+            fig.update_layout(title="Cronograma de vencimentos (saldo atual)", height=340, margin=dict(t=40, b=20, l=10, r=10))
+            g1.plotly_chart(fig, width="stretch")
+            comp = pd.DataFrame({"Origem": ["Debêntures", "Comercial/bancária"],
+                                 "R$ mm": [tot_deb, max(dif, 0) if pd.notna(dif) else np.nan]})
+            fig = px.pie(comp, names="Origem", values="R$ mm", hole=0.5)
+            fig.update_layout(title="Composição da dívida bruta", height=340, margin=dict(t=40, b=20, l=10, r=10))
+            g2.plotly_chart(fig, width="stretch")
+            st.caption("Fontes: SND/debentures.com.br (debêntures ativas, emissão, vencimento, quantidade em mercado, VNA, "
+                       "remuneração e CNPJ do emissor), ANBIMA (mercado secundário: taxa indicativa, PU, % do PU par e "
+                       "duration em dias úteis ÷ 252) e CVM/FRE item 9.1.c (controladas). Saldo estimado = quantidade em "
+                       "mercado × PU par (ou VNA, sem preço ANBIMA) na data mais recente, não na data do balanço. "
+                       "Na comparação com o balanço entram só debêntures emitidas até a data dele. A diferença inclui "
+                       "empréstimos bancários, BNDES, CCB, notas comerciais, dívida externa e a diferença entre o saldo "
+                       "estimado e o valor contábil (custo amortizado).")
 
         # ---- aluguel de ações (custo do short)
         st.subheader("Aluguel de ações (custo do short)")
