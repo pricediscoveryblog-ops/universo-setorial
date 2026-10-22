@@ -189,6 +189,9 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
             "p_l": _div(vm, flu.get("lucro_controladores")),
             "ev_ebitda_ifrs16": _div(ev_c, flu.get("ebitda")),
             "ev_ebitda_pre_ifrs16": _div(ev_s, flu.get("ebitda_pre_ifrs16")),
+            "receita_12m": flu.get("receita"),
+            "ev_receita_com_arrend": _div(ev_c, flu.get("receita")),
+            "ev_receita_sem_arrend": _div(ev_s, flu.get("receita")),
             "dividendos_12m": flu.get("dividendos_pagos"),
             "dividend_yield": (flu.get("dividendos_pagos") / vm) if pd.notna(vm) and vm > 0
                               and pd.notna(flu.get("dividendos_pagos")) else np.nan,
