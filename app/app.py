@@ -1147,6 +1147,24 @@ with aba_emp:
             if dm.empty:
                 st.info("Sem múltiplos para esta empresa (sem cotação ou sem composição do capital).")
             else:
+                hoje_m = mult[(mult["cnpj"] == cnpj_e) & (mult["tipo"] == "trimestral")].sort_values("data").tail(1)
+                if len(hoje_m):
+                    h = hoje_m.iloc[0]
+                    fmt_mm = lambda v: f"R$ {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
+                    fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
+                    st.markdown(f"**Na cotação de {pd.Timestamp(h['data']).strftime('%d/%m/%Y')}** "
+                                f"(PL, dívida e lucro/EBITDA 12m do último documento divulgado: {h.get('periodo_base', '')})")
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Valor de mercado", fmt_mm(h.get("valor_mercado")))
+                    k2.metric("EV c/ arrendamento", fmt_mm(h.get("ev_com_arrend")))
+                    k3.metric("EV s/ arrendamento", fmt_mm(h.get("ev_sem_arrend")))
+                    k4, k5, k6, k7 = st.columns(4)
+                    k4.metric("P/VPA", fmt_x(h.get("p_vpa")))
+                    k5.metric("P/L", fmt_x(h.get("p_l")))
+                    k6.metric("EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
+                    k7.metric("EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
+                    if str(h.get("notas") or ""):
+                        st.caption("Notas do cálculo: " + str(h.get("notas")))
                 st.caption("Anual: preço do último pregão do exercício com os números do exercício. "
                            if tipo_m == "anual" else
                            "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
@@ -1342,28 +1360,50 @@ with aba_emp:
         outras = o1.multiselect("Valor de mercado de outras empresas (opcional)",
                                 sorted(r for r in base["rotulo"].unique() if r != emp), key="ov_emp")
         escala = o2.radio("Escala", ["Base 100 (primeiro ponto do período)", "Valores (dois eixos)"], key="ov_esc")
-        series_ov = [(ROT[k], d_emp[ex_], d_emp[k], METRICAS[k][1]) for k in sel_ov]
+        series_ov = [(ROT[k], d_emp[ex_], d_emp[k], METRICAS[k][1], k, linha_e["cnpj"]) for k in sel_ov]
         for o in outras:
             dd = base[(base["rotulo"] == o) & (base["tipo"] == tipo) & base[ex_].isin(d_emp[ex_])].sort_values(ex_)
-            series_ov.append((f"Valor de mercado {o.split(' — ')[0]}", dd[ex_], dd["valor_mercado"], "mm"))
+            series_ov.append((f"Valor de mercado {o.split(' — ')[0]}", dd[ex_], dd["valor_mercado"], "mm",
+                              "valor_mercado", dd["cnpj"].iloc[0] if len(dd) else None))
         if not series_ov:
             st.info("Escolha ao menos uma linha.")
         else:
             fig = go.Figure()
             ignoradas = []
-            for nome, x, y, f in series_ov:
+            DE_MERCADO = {"valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
+                          "ev_ebitda_pre_ifrs16", "dividend_yield"}
+            for nome, x, y, f, chave, cn_s in series_ov:
                 y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
                 x = pd.Series(list(x))
+                # valor na cotação do dia (último pregão), para indicadores que dependem de preço
+                ponto = None
+                if chave in DE_MERCADO and not mult.empty and cn_s is not None:
+                    hm = mult[(mult["cnpj"] == str(cn_s).zfill(14)) & (mult["tipo"] == "trimestral")].sort_values("data")
+                    if len(hm) and pd.notna(hm[chave].iloc[-1]):
+                        dh = pd.Timestamp(hm["data"].iloc[-1])
+                        xh = dh.year + (dh.dayofyear - 1) / 366 if tipo == "anual" else dh
+                        ponto = (xh, float(hm[chave].iloc[-1]), dh)
                 if escala.startswith("Base 100"):
                     validos = y[y.notna()]
                     if validos.empty or validos.iloc[0] <= 0:
                         ignoradas.append(nome)
                         continue
                     fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+                    if ponto:
+                        fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
+                                                 marker=dict(symbol="star", size=16, color="crimson",
+                                                             line=dict(width=1, color="white")),
+                                                 name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
                 else:
+                    eixo = "y" if f == "mm" else "y2"
                     fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
                                              name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
-                                             yaxis="y" if f == "mm" else "y2"))
+                                             yaxis=eixo))
+                    if ponto:
+                        fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
+                                                 marker=dict(symbol="star", size=16, color="crimson",
+                                                             line=dict(width=1, color="white")), yaxis=eixo,
+                                                 name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
             if escala.startswith("Base 100"):
                 fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
                 fig.add_hline(y=100, line_dash="dot", line_color="gray")
@@ -1376,7 +1416,8 @@ with aba_emp:
                 st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
                            ". Use a escala de valores para vê-las.")
             st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
-                       "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita.")
+                       "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita. "
+                       "★ em vermelho = indicador de mercado calculado com o preço do último pregão.")
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
