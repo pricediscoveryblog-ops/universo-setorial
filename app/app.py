@@ -81,6 +81,8 @@ METRICAS = {
     "p_l": ("P/L", "x", "Mercado"),
     "ev_ebitda_ifrs16": ("EV/EBITDA IFRS 16 (c/ arrend.)", "x", "Mercado"),
     "ev_ebitda_pre_ifrs16": ("EV/EBITDA pré-IFRS 16 (s/ arrend.)", "x", "Mercado"),
+    "ev_receita_com_arrend": ("EV/Receita líquida (EV c/ arrend.)", "x", "Mercado"),
+    "ev_receita_sem_arrend": ("EV/Receita líquida (EV s/ arrend.)", "x", "Mercado"),
     "dividend_yield": ("Dividend yield", "pct", "Mercado"),
 }
 ROT = {k: v[0] for k, v in METRICAS.items()}
@@ -95,6 +97,7 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          # múltiplos do setor = Σ valor de mercado (ou EV) ÷ Σ fundamento, na mesma data
          "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
          "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
+         "ev_receita_com_arrend": ("ev_com_arrend", "m_receita_12m"), "ev_receita_sem_arrend": ("ev_sem_arrend", "m_receita_12m"),
          "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
@@ -180,7 +183,8 @@ def carregar(versao: tuple = ()):
         # colunas que podem faltar em bases geradas por versões anteriores do coletor
         for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
                   "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l", "ebitda_12m",
-                  "ebitda_pre_ifrs16_12m", "valor_mercado"):
+                  "ebitda_pre_ifrs16_12m", "valor_mercado", "receita_12m", "ev_receita_com_arrend",
+                  "ev_receita_sem_arrend"):
             if c not in mult.columns:
                 mult[c] = np.nan
         # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
@@ -190,9 +194,9 @@ def carregar(versao: tuple = ()):
         # trimestral e LTM na data de fim do trimestre (ponto no tempo: documentos já divulgados até ali)
         ren = {"pl_controladores": "m_pl_controladores", "lucro_controladores_12m": "m_lucro_12m",
                "ebitda_12m": "m_ebitda_12m", "ebitda_pre_ifrs16_12m": "m_ebitda_pre_12m",
-               "dividendos_12m": "m_dividendos_12m"}
+               "dividendos_12m": "m_dividendos_12m", "receita_12m": "m_receita_12m"}
         cm = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
-              "ev_ebitda_pre_ifrs16", "dividend_yield"] + list(ren)
+              "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"] + list(ren)
         mm = mult[["cnpj", "tipo", "data"] + cm].rename(columns=ren).drop_duplicates(["cnpj", "tipo", "data"])
         partes = []
         for tipos, tm in ((["anual"], "anual"), (["trimestral", "ltm"], "trimestral")):
@@ -208,7 +212,8 @@ def carregar(versao: tuple = ()):
             fin = fin.drop(columns=[c for c in ("valor_mercado", "p_l") if c in fin.columns]) \
                      .merge(mf, left_on=["cnpj", "_dt"], right_on=["cnpj", "data"], how="left").drop(columns=["data", "_dt"])
     for c in [k for k in METRICAS if k not in base.columns] + list(
-            {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m"} - set(base.columns)):
+            {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m",
+             "m_receita_12m"} - set(base.columns)):
         base[c] = np.nan
     if not fin.empty:
         for k in FIN:
@@ -1163,6 +1168,9 @@ with aba_emp:
                     k5.metric("P/L", fmt_x(h.get("p_l")))
                     k6.metric("EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
                     k7.metric("EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
+                    k8, k9, _k10, _k11 = st.columns(4)
+                    k8.metric("EV/Receita (EV c/ arrend.)", fmt_x(h.get("ev_receita_com_arrend")))
+                    k9.metric("EV/Receita (EV s/ arrend.)", fmt_x(h.get("ev_receita_sem_arrend")))
                     if str(h.get("notas") or ""):
                         st.caption("Notas do cálculo: " + str(h.get("notas")))
                 st.caption("Anual: preço do último pregão do exercício com os números do exercício. "
@@ -1171,7 +1179,8 @@ with aba_emp:
                            "data; lucro e EBITDA dos 12 meses desse documento. O último ponto é o pregão mais recente. ")
                 pares_m = cmp(mult[mult["tipo"] == tipo_m])
                 med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
-                                                    "dividend_yield"]].median()
+                                                    "dividend_yield", "ev_receita_com_arrend",
+                                                    "ev_receita_sem_arrend"]].median()
                 med_m = med_m[med_m.index.isin(dm["data"])]
                 graficos = [("P/VPA (valor de mercado ÷ PL dos controladores)", [("p_vpa", "P/VPA")]),
                             ("P/L (valor de mercado ÷ lucro 12m dos controladores)", [("p_l", "P/L")]),
@@ -1179,6 +1188,10 @@ with aba_emp:
                              [("ev_ebitda_ifrs16", "EV/EBITDA IFRS 16")]),
                             ("EV/EBITDA pré-IFRS 16 (EV s/ arrendamento ÷ EBITDA pré-IFRS 16)",
                              [("ev_ebitda_pre_ifrs16", "EV/EBITDA pré-IFRS 16")]),
+                            ("EV/Receita líquida (EV c/ arrendamento ÷ receita 12m)",
+                             [("ev_receita_com_arrend", "EV/Receita c/ arrendamento")]),
+                            ("EV/Receita líquida (EV s/ arrendamento ÷ receita 12m)",
+                             [("ev_receita_sem_arrend", "EV/Receita s/ arrendamento")]),
                             ("ROE (lucro 12m ÷ PL dos controladores)", [("roe", "ROE")]),
                             ("Dividend yield (dividendos + JCP pagos em 12m ÷ valor de mercado)",
                              [("dividend_yield", "Dividend yield")])]
@@ -1209,8 +1222,8 @@ with aba_emp:
                 with st.expander("Valor de mercado, EV, preços, ações e notas"):
                     cols_m = ["data", "periodo_base", "valor_mercado", "ev_com_arrend", "ev_sem_arrend", "ticker_on", "preco_on",
                               "data_preco_on", "acoes_on", "ticker_pn", "preco_pn", "data_preco_pn", "acoes_pn",
-                              "p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
-                              "dividendos_12m", "dividend_yield", "notas"]
+                              "p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend",
+                              "ev_receita_sem_arrend", "roe", "dividendos_12m", "dividend_yield", "notas"]
                     tab_m = dm[cols_m].assign(data=dm["data"].dt.date)
                     st.dataframe(tab_m, hide_index=True, width="stretch", column_config={
                         "valor_mercado": st.column_config.NumberColumn("Valor de mercado (R$ mm)", format="%,.1f"),
@@ -1219,7 +1232,8 @@ with aba_emp:
                         "acoes_on": st.column_config.NumberColumn("Ações ON", format="%,.0f"),
                         "acoes_pn": st.column_config.NumberColumn("Ações PN", format="%,.0f"),
                         **{k: st.column_config.NumberColumn(k, format="%.2fx") for k in
-                           ("p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16")},
+                           ("p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend",
+                            "ev_receita_sem_arrend")},
                         "roe": st.column_config.NumberColumn("ROE", format="percent"),
                         "dividendos_12m": st.column_config.NumberColumn("Dividendos + JCP 12m (R$ mm)", format="%,.1f"),
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
@@ -1371,7 +1385,7 @@ with aba_emp:
             fig = go.Figure()
             ignoradas = []
             DE_MERCADO = {"valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
-                          "ev_ebitda_pre_ifrs16", "dividend_yield"}
+                          "ev_ebitda_pre_ifrs16", "dividend_yield", "ev_receita_com_arrend", "ev_receita_sem_arrend"}
             for nome, x, y, f, chave, cn_s in series_ov:
                 y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
                 x = pd.Series(list(x))
@@ -1421,7 +1435,7 @@ with aba_emp:
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
-               "ev_ebitda_pre_ifrs16", "dividend_yield"]
+               "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"]
 EXTRA_SCR = {"cresc_receita_12m": ("Crescimento da receita 12m (a/a)", "pct"),
              "cresc_ebitda_12m": ("Crescimento do EBITDA 12m (a/a)", "pct"),
              "cresc_lucro_12m": ("Crescimento do lucro 12m (a/a)", "pct")}
