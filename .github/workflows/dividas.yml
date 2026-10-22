@@ -1,0 +1,41 @@
+name: dividas-debentures
+
+on:
+  workflow_dispatch:
+  schedule:
+    # dias úteis às 23h30 de Brasília (02:30 UTC, terça a sábado): depois do arquivo diário da ANBIMA
+    - cron: "30 2 * * 2-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dividas-debentures
+  cancel-in-progress: false
+
+jobs:
+  dividas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas numpy requests
+      - name: Cache do Formulário de Referência
+        uses: actions/cache@v4
+        with:
+          path: cache_cvm
+          key: fre-${{ github.run_id }}
+          restore-keys: fre-
+      - name: Debêntures (SND + ANBIMA + controladas do FRE)
+        run: python dividas.py
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/dividas
+          git diff --cached --quiet || git commit -m "dividas: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
