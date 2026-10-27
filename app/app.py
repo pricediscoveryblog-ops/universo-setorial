@@ -368,8 +368,21 @@ def painel_mercado(cnpj: str):
     fmt_mm = lambda v: f"R$ {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
     fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
     fmt_p = lambda v: f"{v:.1%}".replace(".", ",") if pd.notna(v) else "-"
+    per = str(h.get("periodo_base") or "")
+    d_bal = pd.to_datetime(h.get("dt_fim_base"), errors="coerce")
+    if pd.isna(d_bal) and per:                 # bases antigas não traziam a data: busca pelo período
+        for df_ in (base, fin):
+            if not df_.empty and {"cnpj", "periodo", "dt_fim"} <= set(df_.columns):
+                m_ = df_[(df_["cnpj"].astype(str).str.zfill(14) == str(cnpj).zfill(14)) & (df_["periodo"] == per)]
+                if len(m_):
+                    d_bal = pd.to_datetime(m_["dt_fim"].iloc[0], errors="coerce")
+                    break
+    atraso = (pd.Timestamp(h["data"]) - d_bal).days if pd.notna(d_bal) else np.nan
+    aviso = (f" ⚠️ balanço com {atraso // 30} meses: a companhia não entregou ITRs mais recentes à CVM"
+             if pd.notna(atraso) and atraso > 200 else "")
     st.markdown(f"**Na cotação de {pd.Timestamp(h['data']).strftime('%d/%m/%Y')}** — balanço: "
-                f"{h.get('periodo_base', '') or 'último documento divulgado'}")
+                f"{h.get('periodo_base', '') or 'último documento divulgado'}"
+                + (f" (até {d_bal.strftime('%d/%m/%Y')})" if pd.notna(d_bal) else "") + aviso)
     k1, k2, k3 = st.columns(3)
     k1.metric("Valor de mercado", fmt_mm(h.get("valor_mercado")))
     k2.metric("EV c/ arrendamento", fmt_mm(h.get("ev_com_arrend")))
