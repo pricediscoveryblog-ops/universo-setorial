@@ -355,6 +355,49 @@ def rotulo_remuneracao(r) -> str:
     return ind or "-"
 
 
+def painel_mercado(cnpj: str):
+    """Valores e múltiplos de mercado na cotação mais recente (último pregão)."""
+    if mult.empty:
+        return
+    h = mult[(mult["cnpj"] == str(cnpj).zfill(14)) & (mult["tipo"] == "trimestral")].sort_values("data").tail(1)
+    if h.empty:
+        h = mult[mult["cnpj"] == str(cnpj).zfill(14)].sort_values("data").tail(1)
+    if h.empty:
+        return
+    h = h.iloc[0]
+    fmt_mm = lambda v: f"R$ {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
+    fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
+    fmt_p = lambda v: f"{v:.1%}".replace(".", ",") if pd.notna(v) else "-"
+    st.markdown(f"**Na cotação de {pd.Timestamp(h['data']).strftime('%d/%m/%Y')}** — balanço: "
+                f"{h.get('periodo_base', '') or 'último documento divulgado'}")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Valor de mercado", fmt_mm(h.get("valor_mercado")))
+    k2.metric("EV c/ arrendamento", fmt_mm(h.get("ev_com_arrend")))
+    k3.metric("EV s/ arrendamento", fmt_mm(h.get("ev_sem_arrend")))
+    k4, k5, k6, k7 = st.columns(4)
+    k4.metric("P/VPA", fmt_x(h.get("p_vpa")))
+    k5.metric("P/L", fmt_x(h.get("p_l")))
+    k6.metric("EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
+    k7.metric("EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
+    k8, k9, k10, k11 = st.columns(4)
+    k8.metric("EV/Receita (EV c/ arrend.)", fmt_x(h.get("ev_receita_com_arrend")))
+    k9.metric("EV/Receita (EV s/ arrend.)", fmt_x(h.get("ev_receita_sem_arrend")))
+    k10.metric("ROE (12m)", fmt_p(h.get("roe")))
+    k11.metric("Dividend yield (12m)", fmt_p(h.get("dividend_yield")))
+    if str(h.get("notas") or ""):
+        st.caption("Notas do cálculo: " + str(h.get("notas")))
+
+
+@st.cache_data(show_spinner=False)
+def carregar_vm_diario(versao: tuple = ()) -> pd.DataFrame:
+    arq = DADOS / "valor_mercado_diario.csv.gz"
+    if not arq.exists():
+        return pd.DataFrame()
+    v = pd.read_csv(arq, dtype={"cnpj": str}, parse_dates=["data"])
+    v["cnpj"] = v["cnpj"].str.zfill(14)
+    return v
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -479,6 +522,7 @@ def empresa_financeira():
     if dm.empty:
         st.info("Múltiplos de bancos e seguradoras ainda não gerados: aparecem depois da próxima execução do coletor.")
         return emp_f, d, seg_f
+    painel_mercado(d["cnpj"].iloc[0])
     st.caption("Anual: preço do último pregão do exercício com lucro e PL dos controladores do exercício. "
                "EV/EBITDA não se aplica a instituições financeiras.")
     pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == "anual")]
@@ -777,9 +821,9 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_scr, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
-    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Financeiro (bancos e seguradoras)",
-     "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
+aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
+    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas",
+     "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
@@ -1152,27 +1196,7 @@ with aba_emp:
             if dm.empty:
                 st.info("Sem múltiplos para esta empresa (sem cotação ou sem composição do capital).")
             else:
-                hoje_m = mult[(mult["cnpj"] == cnpj_e) & (mult["tipo"] == "trimestral")].sort_values("data").tail(1)
-                if len(hoje_m):
-                    h = hoje_m.iloc[0]
-                    fmt_mm = lambda v: f"R$ {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
-                    fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
-                    st.markdown(f"**Na cotação de {pd.Timestamp(h['data']).strftime('%d/%m/%Y')}** "
-                                f"(PL, dívida e lucro/EBITDA 12m do último documento divulgado: {h.get('periodo_base', '')})")
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("Valor de mercado", fmt_mm(h.get("valor_mercado")))
-                    k2.metric("EV c/ arrendamento", fmt_mm(h.get("ev_com_arrend")))
-                    k3.metric("EV s/ arrendamento", fmt_mm(h.get("ev_sem_arrend")))
-                    k4, k5, k6, k7 = st.columns(4)
-                    k4.metric("P/VPA", fmt_x(h.get("p_vpa")))
-                    k5.metric("P/L", fmt_x(h.get("p_l")))
-                    k6.metric("EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
-                    k7.metric("EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
-                    k8, k9, _k10, _k11 = st.columns(4)
-                    k8.metric("EV/Receita (EV c/ arrend.)", fmt_x(h.get("ev_receita_com_arrend")))
-                    k9.metric("EV/Receita (EV s/ arrend.)", fmt_x(h.get("ev_receita_sem_arrend")))
-                    if str(h.get("notas") or ""):
-                        st.caption("Notas do cálculo: " + str(h.get("notas")))
+                painel_mercado(cnpj_e)
                 st.caption("Anual: preço do último pregão do exercício com os números do exercício. "
                            if tipo_m == "anual" else
                            "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
@@ -1405,8 +1429,8 @@ with aba_emp:
                     fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
                     if ponto:
                         fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
-                                                 marker=dict(symbol="star", size=16, color="crimson",
-                                                             line=dict(width=1, color="white")),
+                                                 marker=dict(symbol="circle-open-dot", size=18, color="#16a34a",
+                                                             line=dict(width=3, color="#16a34a")),
                                                  name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
                 else:
                     eixo = "y" if f == "mm" else "y2"
@@ -1415,8 +1439,8 @@ with aba_emp:
                                              yaxis=eixo))
                     if ponto:
                         fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
-                                                 marker=dict(symbol="star", size=16, color="crimson",
-                                                             line=dict(width=1, color="white")), yaxis=eixo,
+                                                 marker=dict(symbol="circle-open-dot", size=18, color="#16a34a",
+                                                             line=dict(width=3, color="#16a34a")), yaxis=eixo,
                                                  name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
             if escala.startswith("Base 100"):
                 fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
@@ -1431,7 +1455,7 @@ with aba_emp:
                            ". Use a escala de valores para vê-las.")
             st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
                        "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita. "
-                       "★ em vermelho = indicador de mercado calculado com o preço do último pregão.")
+                       "◎ verde = indicador de mercado calculado com o preço do último pregão.")
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
@@ -1566,6 +1590,75 @@ with aba_rank:
         if METRICAS[met][1] == "pct":
             fig.update_xaxes(tickformat=".0%")
         st.plotly_chart(fig, width="stretch")
+
+# -------- Altas e baixas (variação do valor de mercado)
+JANELAS = {"Diária": ("D", 1), "Semanal": ("D", 7), "Mensal": ("M", 1), "Trimestral": ("M", 3),
+           "Semestral": ("M", 6), "Anual": ("M", 12), "2 anos": ("M", 24), "3 anos": ("M", 36),
+           "5 anos": ("M", 60)}
+
+with aba_var:
+    vmd = carregar_vm_diario(versao_arquivos(DADOS / "valor_mercado_diario.csv.gz"))
+    if vmd.empty:
+        st.info("Série diária de valor de mercado ainda não gerada: aparece depois da próxima execução do coletor.")
+    else:
+        d_fim = vmd["data"].max()
+        c1, c2, c3 = st.columns([1.4, 1.4, 2])
+        jan = c1.selectbox("Período", list(JANELAS), index=2, key="var_jan")
+        n_top = c2.slider("Quantas de cada lado", 5, 50, 30, 5, key="var_n")
+        unidade, passo = JANELAS[jan]
+        alvo = d_fim - (pd.Timedelta(days=passo) if unidade == "D" else pd.DateOffset(months=passo))
+        tol = 3 if unidade == "D" else 20       # tolerância em dias para achar o pregão de referência
+        fim = vmd[vmd["data"] == d_fim][["cnpj", "valor_mercado"]].rename(columns={"valor_mercado": "vm_fim"})
+        ant = vmd[vmd["data"] <= alvo].sort_values("data").groupby("cnpj").tail(1)
+        ant = ant[(alvo - ant["data"]).dt.days <= tol][["cnpj", "data", "valor_mercado"]].rename(
+            columns={"data": "data_ini", "valor_mercado": "vm_ini"})
+        v = fim.merge(ant, on="cnpj").assign(variacao=lambda x: x["vm_fim"] / x["vm_ini"] - 1)
+        info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]
+        if not fin.empty:
+            f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
+            for c in ("rotulo", "setor", "subsetor", "segmento"):
+                if c not in f_i.columns:
+                    f_i[c] = "Financeiro" if c == "setor" else np.nan
+            info = pd.concat([info, f_i[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]])
+        v = v.merge(info.drop_duplicates("cnpj"), on="cnpj", how="left")
+        set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
+        if set_f:
+            v = v[v["setor"].isin(set_f)]
+        vm_min = st.slider("Valor de mercado mínimo (R$ mi)", 0, 20000, 500, 250, key="var_vmmin",
+                           help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
+        v = v[(v["vm_fim"] >= vm_min) & v["variacao"].notna()]
+        st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
+                   f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. O valor de mercado "
+                   "usa as ações vigentes em cada data, então desdobramentos e grupamentos não viram variação; "
+                   "emissões e recompras, sim. Não inclui dividendos (é variação de preço, não retorno total).")
+        cfg_v = {"rotulo": "Empresa", "setor": "Setor", "variacao": st.column_config.NumberColumn("Variação", format="percent"),
+                 "vm_fim": st.column_config.NumberColumn("Valor de mercado (R$ mi)", format="%,.0f"),
+                 "data_ini": "Pregão inicial"}
+        cols_v = ["rotulo", "setor", "variacao", "vm_fim", "data_ini"]
+        altas = v.nlargest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
+        baixas = v.nsmallest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
+        t1, t2 = st.columns(2)
+        t1.markdown(f"**{n_top} maiores altas**")
+        t1.dataframe(altas, hide_index=True, width="stretch", column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+        t2.markdown(f"**{n_top} maiores baixas**")
+        t2.dataframe(baixas, hide_index=True, width="stretch", column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+        st.subheader("Variação por setor")
+        por_setor = v.groupby("setor").apply(
+            lambda g: pd.Series({"Mediana": g["variacao"].median(),
+                                 "Ponderada pelo valor de mercado": g["vm_fim"].sum() / (g["vm_fim"] / (1 + g["variacao"])).sum() - 1,
+                                 "Empresas": len(g)}), include_groups=False).sort_values("Ponderada pelo valor de mercado")
+        fig = go.Figure()
+        for c, cor in (("Mediana", None), ("Ponderada pelo valor de mercado", "#16a34a")):
+            fig.add_trace(go.Bar(y=por_setor.index, x=por_setor[c], orientation="h", name=c, marker_color=cor))
+        fig.add_vline(x=0, line_color="gray")
+        fig.update_layout(height=max(360, 26 * len(por_setor)), barmode="group", xaxis_tickformat=".1%",
+                          legend=dict(orientation="h", y=-0.15), margin=dict(t=20, b=20, l=10, r=10))
+        st.plotly_chart(fig, width="stretch")
+        exp_v = v[cols_v + ["subsetor", "segmento", "vm_ini"]].sort_values("variacao", ascending=False)
+        st.download_button("⬇️ Todas as empresas (CSV)",
+                           exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                           file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
+
 
 # -------- Financeiro: bancos e seguradoras (plano de contas próprio, base separada)
 with aba_fin:
