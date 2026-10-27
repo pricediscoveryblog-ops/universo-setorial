@@ -578,6 +578,17 @@ def serie_financeira(rot: str) -> pd.DataFrame:
     return d
 
 
+def ponto_atual_fin(cnpj: str, chave: str):
+    """Último ponto de mercado da instituição (pregão mais recente), para marcar no gráfico."""
+    if mult.empty:
+        return None
+    hm = mult[mult["cnpj"] == str(cnpj).zfill(14)].sort_values("data")
+    if hm.empty or chave not in hm.columns or pd.isna(hm[chave].iloc[-1]):
+        return None
+    dh = pd.Timestamp(hm["data"].iloc[-1])
+    return dh.year + (dh.dayofyear - 1) / 366, float(hm[chave].iloc[-1]), dh
+
+
 def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
     """Aluguel de ações e gráficos sobrepostos para bancos e seguradoras (mesma lógica das demais empresas)."""
     # ---- aluguel de ações
@@ -671,12 +682,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
         y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
         x = pd.Series(list(x))
         # valor no último pregão, para indicadores que dependem de preço
-        ponto = None
-        if chave in DE_MERCADO_FIN and not mult.empty:
-            hm = mult[mult["cnpj"] == cn_s].sort_values("data")
-            if len(hm) and chave in hm.columns and pd.notna(hm[chave].iloc[-1]):
-                dh = pd.Timestamp(hm["data"].iloc[-1])
-                ponto = (dh.year + (dh.dayofyear - 1) / 366, float(hm[chave].iloc[-1]), dh)
+        ponto = ponto_atual_fin(cn_s, chave) if chave in DE_MERCADO_FIN else None
         if escala.startswith("Base 100"):
             validos = y[y.notna()]
             if validos.empty or validos.iloc[0] <= 0:
