@@ -115,6 +115,16 @@ class Precos:
             tot += self.vol_acum[t][i] - self.vol_acum[t][j]
         return tot
 
+    def diario(self, tickers: list[str], desde: pd.Timestamp) -> pd.DataFrame:
+        """Preço de fechamento por pregão de cada papel, a partir de `desde`."""
+        partes = []
+        for t in tickers:
+            datas, precos = self.serie.get(t, ([], []))
+            i = bisect_right(datas, desde)
+            if i < len(datas):
+                partes.append(pd.DataFrame({"data": datas[i:], "ticker": t, "preco": precos[i:]}))
+        return pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=["data", "ticker", "preco"])
+
     def ultimo(self, tickers: list[str], d: pd.Timestamp):
         """Último preço até a data d entre os papéis da classe: o de negócio mais recente
         (em empate, o mais líquido). Assim o código novo de um papel renomeado prevalece sobre o antigo."""
@@ -199,6 +209,7 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
 
 
 DIAG_ACOES: list[dict] = []   # diagnóstico da série de ações (gravado pelo universo)
+SERIE_VM: list[pd.DataFrame] = []   # valor de mercado por pregão e empresa (gravado pelo universo)
 
 
 def montar_serie_acoes(cands, compos: dict, fre: dict) -> list[dict]:
@@ -427,6 +438,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
 
     series_acoes = {}
     DIAG_ACOES.clear()
+    SERIE_VM.clear()
 
     def serie_de(cnpj_, raiz_):
         if cnpj_ not in series_acoes:
@@ -498,6 +510,33 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             linhas.append(row)
     if fin is not None and len(fin):
         linhas += _financeiras(fin, raiz_de, lambda c, d: acoes_da_serie(serie_de(c, raiz_de.get(c, "")), d), px)
+    # ---- valor de mercado por pregão (base das variações de preço no app).
+    # Usa as ações vigentes em cada data: desdobramentos e grupamentos não aparecem como variação, porque o
+    # preço cai (ou sobe) e a quantidade muda na mesma proporção. Emissões e recompras aparecem, como devem.
+    ini_vm = hoje - pd.DateOffset(years=min(n_anos, 6))
+    for cnpj, raiz in raiz_de.items():
+        tl = series_acoes.get(cnpj)
+        if not tl or raiz not in px.por_raiz:
+            continue
+        d_px = px.diario(px.por_raiz[raiz], ini_vm)
+        if d_px.empty:
+            continue
+        cls = {t: ("PN" if t in px.classe(raiz, "PN") else "ON") for t in d_px["ticker"].unique()}
+        d_px["classe"] = d_px["ticker"].map(cls)
+        # uma cotação por classe e dia (papel mais negociado da classe já vem priorizado em px.classe)
+        d_px = d_px.sort_values(["data", "classe", "ticker"]).drop_duplicates(["data", "classe"])
+        pr = d_px.pivot(index="data", columns="classe", values="preco").sort_index().ffill()
+        datas_tl = [e["data"] for e in tl]
+        idx = np.searchsorted(datas_tl, pr.index.to_numpy(), side="right") - 1
+        on = np.array([tl[i]["on"] * tl[i]["escala"] if i >= 0 else np.nan for i in idx])
+        pn = np.array([tl[i]["pn"] * tl[i]["escala"] if i >= 0 else np.nan for i in idx])
+        p_on = pr["ON"].to_numpy() if "ON" in pr else np.full(len(pr), np.nan)
+        p_pn = pr["PN"].to_numpy() if "PN" in pr else np.full(len(pr), np.nan)
+        p_on = np.where(np.isnan(p_on), p_pn, p_on)
+        p_pn = np.where(np.isnan(p_pn), p_on, p_pn)
+        vm = (np.nan_to_num(on * p_on) + np.nan_to_num(pn * p_pn)) / 1e6
+        SERIE_VM.append(pd.DataFrame({"data": pr.index, "cnpj": cnpj, "raiz": raiz,
+                                      "valor_mercado": np.where(vm > 0, vm, np.nan)}))
     out = pd.DataFrame(linhas)
     if len(out):
         out = out.sort_values(["cnpj", "tipo", "data"])
