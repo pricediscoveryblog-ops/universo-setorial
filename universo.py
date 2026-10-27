@@ -479,6 +479,11 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         if len(mult):
             mult.to_csv(SAIDA / "multiplos.csv.gz", index=False, compression="gzip")
             print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
+        if multiplos.SERIE_VM:
+            vm = pd.concat(multiplos.SERIE_VM, ignore_index=True).dropna(subset=["valor_mercado"])
+            vm.to_csv(SAIDA / "valor_mercado_diario.csv.gz", index=False, compression="gzip", date_format="%Y-%m-%d")
+            print(f"  -> valor_mercado_diario.csv.gz ({len(vm)} linhas, {vm['cnpj'].nunique()} empresas, "
+                  f"{vm['data'].min()} a {vm['data'].max()})")
         if multiplos.DIAG_ACOES:
             da = pd.DataFrame(multiplos.DIAG_ACOES)
             da.to_csv(SAIDA / "diagnostico_acoes.csv.gz", index=False, compression="gzip")
