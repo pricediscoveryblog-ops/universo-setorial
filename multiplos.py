@@ -557,7 +557,23 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
         # uma cotação por classe e dia (papel mais negociado da classe já vem priorizado em px.classe)
         d_px = d_px.sort_values(["data", "classe", "ticker"]).drop_duplicates(["data", "classe"])
         pr = d_px.pivot(index="data", columns="classe", values="preco").sort_index().ffill()
+        # A quantidade de ações só muda no documento que a informa, mas o desdobramento/grupamento muda o preço no
+        # dia do evento. Entre dois documentos com razão de ações relevante, procura o pregão com salto de preço na
+        # proporção inversa e antecipa a troca de quantidade para esse dia; sem salto, mantém a data do documento.
         datas_tl = [e["data"] for e in tl]
+        p_ref = pr["ON"] if "ON" in pr else pr[pr.columns[0]]
+        var_log = np.log(p_ref / p_ref.shift(1)).fillna(0)
+        for i in range(1, len(tl)):
+            qa = (tl[i - 1]["on"] + tl[i - 1]["pn"]) * tl[i - 1]["escala"]
+            qb = (tl[i]["on"] + tl[i]["pn"]) * tl[i]["escala"]
+            if qa <= 0 or qb <= 0 or abs(np.log10(qb / qa)) < np.log10(1.8):
+                continue                       # variação pequena: emissão/recompra, não evento de desdobramento
+            jan = var_log[(var_log.index > datas_tl[i - 1]) & (var_log.index <= datas_tl[i])]
+            if jan.empty:
+                continue
+            desvio = (jan + np.log(qb / qa)).abs()   # preço deve mover no inverso da quantidade
+            if desvio.min() < 0.12 and abs(jan[desvio.idxmin()]) > np.log(1.5):
+                datas_tl[i] = desvio.idxmin()        # troca a quantidade no dia do evento
         idx = np.searchsorted(datas_tl, pr.index.to_numpy(), side="right") - 1
         on = np.array([tl[i]["on"] * tl[i]["escala"] if i >= 0 else np.nan for i in idx])
         pn = np.array([tl[i]["pn"] * tl[i]["escala"] if i >= 0 else np.nan for i in idx])
