@@ -651,30 +651,51 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
                               index=(cand.index("valor_mercado") if "valor_mercado" in cand else 0),
                               format_func=lambda k: ind_ov[k][0], key="ov_ind_outras_fin") if outras else None
     escala = o2.radio("Escala", ["Base 100 (primeiro ponto)", "Valores (dois eixos)"], key="ov_esc_fin")
-    series_ov = [(f"{ind_ov[k][0]} {emp_f.split(' — ')[0]}", se["exercicio"], se[k], ind_ov[k][1]) for k in sel_ov]
+    cn_f = str(d["cnpj"].iloc[0]).zfill(14)
+    series_ov = [(f"{ind_ov[k][0]} {emp_f.split(' — ')[0]}", se["exercicio"], se[k], ind_ov[k][1], k, cn_f)
+                 for k in sel_ov]
     for o in outras:
         so = serie_financeira(o)
         if ind_outras in so.columns:
             series_ov.append((f"{ind_ov[ind_outras][0]} {o.split(' — ')[0]}", so["exercicio"], so[ind_outras],
-                              ind_ov[ind_outras][1]))
+                              ind_ov[ind_outras][1], ind_outras,
+                              str(fin[fin["rotulo"] == o]["cnpj"].iloc[0]).zfill(14)))
     if not series_ov:
         st.info("Escolha ao menos uma linha.")
         return
     fig = go.Figure()
     ignoradas = []
-    for nome, x, y, f in series_ov:
+    DE_MERCADO_FIN = {"valor_mercado", "p_l", "p_vpa", "dividend_yield"}
+    alvo_verde = dict(symbol="circle-open-dot", size=18, color="#16a34a", line=dict(width=3, color="#16a34a"))
+    for nome, x, y, f, chave, cn_s in series_ov:
         y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
         x = pd.Series(list(x))
+        # valor no último pregão, para indicadores que dependem de preço
+        ponto = None
+        if chave in DE_MERCADO_FIN and not mult.empty:
+            hm = mult[mult["cnpj"] == cn_s].sort_values("data")
+            if len(hm) and chave in hm.columns and pd.notna(hm[chave].iloc[-1]):
+                dh = pd.Timestamp(hm["data"].iloc[-1])
+                ponto = (dh.year + (dh.dayofyear - 1) / 366, float(hm[chave].iloc[-1]), dh)
         if escala.startswith("Base 100"):
             validos = y[y.notna()]
             if validos.empty or validos.iloc[0] <= 0:
                 ignoradas.append(nome)
                 continue
             fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+            if ponto:
+                fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
+                                         marker=alvo_verde,
+                                         name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
         else:
+            eixo = "y" if f == "mm" else "y2"
             fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
                                      name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
-                                     yaxis="y" if f == "mm" else "y2"))
+                                     yaxis=eixo))
+            if ponto:
+                fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
+                                         marker=alvo_verde, yaxis=eixo,
+                                         name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
     if escala.startswith("Base 100"):
         fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
         fig.add_hline(y=100, line_dash="dot", line_color="gray")
@@ -687,7 +708,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
         st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
                    ". Use a escala de valores para vê-las.")
     st.caption("Série anual (DFP). Base 100 compara o comportamento relativo desde o primeiro exercício; em valores, "
-               "R$ mm à esquerda e múltiplos/% à direita.")
+               "R$ mm à esquerda e múltiplos/% à direita. ◎ verde = valor calculado com o preço do último pregão.")
 
 
 def add_medias(fig, x, y, ym=None, rotulo=""):
