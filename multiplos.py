@@ -395,6 +395,37 @@ def _financeiras(fin: pd.DataFrame, raiz_de: dict, acoes_fn, px) -> list[dict]:
                            "dividendos_12m": div_,
                            "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
                            "notas": "; ".join(n for n in [nota] + notas if n)})
+        # pontos trimestrais entre o último exercício e hoje, com o preço de cada data e os fundamentos do último
+        # exercício divulgado (bancos e seguradoras só têm base anual); o último ponto é o pregão mais recente
+        ult = g.sort_values("dt_fim").iloc[-1]
+        d0 = pd.Timestamp(ult["dt_fim"])
+        datas_tri = list(pd.date_range(d0, pd.Timestamp.today().normalize(), freq="QE")[1:])
+        datas_tri.append(pd.Timestamp.today().normalize())
+        for d in datas_tri:
+            qt, nota = acoes_fn(cnpj, d)
+            if qt is None:
+                continue
+            vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], d)
+            if pd.isna(vm):
+                continue
+            div_ = ult.get("dividendos_pagos")
+            linhas.append({**meta, "tipo": "trimestral", "data": d.date(), "periodo_base": str(ult["exercicio"]),
+                           "dt_fim_base": d0.date(),
+                           "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
+                           "data_preco_on": p_on[1].date() if p_on else None,
+                           "ticker_pn": p_pn[0] if p_pn else None, "preco_pn": p_pn[2] if p_pn else np.nan,
+                           "data_preco_pn": p_pn[1].date() if p_pn else None,
+                           "acoes_on": qt[0], "acoes_pn": qt[1], "valor_mercado": vm,
+                           "ev_com_arrend": np.nan, "ev_sem_arrend": np.nan,
+                           "pl_controladores": ult.get("pl_controladores"),
+                           "lucro_controladores_12m": ult.get("lucro_controladores"),
+                           "p_vpa": _div(vm, ult.get("pl_controladores")),
+                           "p_l": _div(vm, ult.get("lucro_controladores")),
+                           "ev_ebitda_ifrs16": np.nan, "ev_ebitda_pre_ifrs16": np.nan,
+                           "dividendos_12m": div_,
+                           "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
+                           "notas": "; ".join(n for n in [nota, f"fundamentos do exercício {ult['exercicio']}"]
+                                              + notas if n)})
     return linhas
 
 
