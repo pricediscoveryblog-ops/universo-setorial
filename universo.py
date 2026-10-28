@@ -28,6 +28,7 @@ URL_DOC_DIR = {"DFP": f"{cs.BASE}/DOC/DFP/DADOS/", "ITR": f"{cs.BASE}/DOC/ITR/DA
 # preenchidos por ler_doc: data de divulgação (recebimento na CVM) e número de ações por documento
 DISPONIB: dict[tuple, str] = {}   # (cnpj, DT_REFER) -> menor DT_RECEB
 COMPOS: dict[tuple, tuple] = {}   # (cnpj, DT_REFER) -> (ações ON, ações PN) em circulação (sem tesouraria)
+ENTREGAS: dict[tuple, tuple] = {}  # (cnpj, documento, DT_REFER) -> (primeira DT_RECEB, link do documento)
 SAIDA = cs.SAIDAS / "universo"
 
 FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "cpv", "da", "ebitda",
@@ -97,9 +98,15 @@ def _ler_disponib_e_capital(z, nomes, doc, ano, cnpjs):
     if idx in nomes:
         try:
             ix = pd.read_csv(z.open(idx), sep=";", encoding="latin-1", dtype=str,
-                             usecols=lambda c: c in ("CNPJ_CIA", "DT_REFER", "DT_RECEB"))
+                             usecols=lambda c: c in ("CNPJ_CIA", "DT_REFER", "DT_RECEB", "LINK_DOC"))
             ix["c"] = ix["CNPJ_CIA"].map(cs.so_digitos)
             ix = ix[ix["c"].isin(cnpjs)]
+            # calendário de resultados: primeira entrega de cada documento (a versão original, não reapresentações)
+            for _, lin in ix.sort_values("DT_RECEB").drop_duplicates(["c", "DT_REFER"]).iterrows():
+                k = (lin["c"], doc.upper(), str(lin["DT_REFER"])[:10])
+                dr = str(lin["DT_RECEB"])[:19]
+                if k not in ENTREGAS or dr < ENTREGAS[k][0]:
+                    ENTREGAS[k] = (dr, lin.get("LINK_DOC", "") or "")
             for (c, r), dr in ix.groupby(["c", "DT_REFER"])["DT_RECEB"].min().items():
                 k = (c, str(r)[:10])
                 DISPONIB[k] = min(DISPONIB.get(k, str(dr)[:10]), str(dr)[:10])
@@ -484,6 +491,11 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             vm.to_csv(SAIDA / "valor_mercado_diario.csv.gz", index=False, compression="gzip", date_format="%Y-%m-%d")
             print(f"  -> valor_mercado_diario.csv.gz ({len(vm)} linhas, {vm['cnpj'].nunique()} empresas, "
                   f"{vm['data'].min()} a {vm['data'].max()})")
+        if ENTREGAS:
+            en = pd.DataFrame([(c, d, r, rb, lk) for (c, d, r), (rb, lk) in ENTREGAS.items()],
+                              columns=["cnpj", "documento", "dt_refer", "dt_receb", "link"])
+            en.to_csv(SAIDA / "entregas.csv.gz", index=False, compression="gzip")
+            print(f"  -> entregas.csv.gz ({len(en)} documentos, {en['cnpj'].nunique()} empresas)")
         if multiplos.DIAG_ACOES:
             da = pd.DataFrame(multiplos.DIAG_ACOES)
             da.to_csv(SAIDA / "diagnostico_acoes.csv.gz", index=False, compression="gzip")
