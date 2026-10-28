@@ -569,8 +569,14 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             if not np.isfinite(r_) or r_ <= 0 or abs(np.log(r_)) < np.log(1.8):
                 continue
             cand = r_ if r_ > 1 else 1 / r_
-            inteiro = round(cand)
-            if 2 <= inteiro <= 1000 and abs(cand / inteiro - 1) <= 0.02:
+            # fatores usuais de desdobramento/grupamento na B3; o mais próximo do salto observado
+            inteiro = min((2, 3, 4, 5, 8, 10, 20, 25, 30, 40, 50, 100, 200, 250, 500, 1000),
+                          key=lambda f_: abs(np.log(cand / f_)))
+            # tolerância: o pregão do evento também tem a oscilação normal do dia (ex.: grupamento 10:1 com
+            # alta de 3% no dia dá fator 10,3). Fatores de 5 ou mais admitem 15%; fatores de 2 a 4, mais
+            # parecidos com movimentos reais de mercado, só 3%.
+            tol_f = 0.15 if inteiro >= 5 else 0.03
+            if abs(np.log(cand / inteiro)) <= tol_f:
                 fator[k] = inteiro if r_ > 1 else 1 / inteiro
         cum = np.cumprod(fator)                # fator acumulado de eventos até cada pregão
         datas_tl = [e["data"] for e in tl]
