@@ -1641,14 +1641,21 @@ with aba_var:
     if vmd.empty:
         st.info("Série diária de valor de mercado ainda não gerada: aparece depois da próxima execução do coletor.")
     else:
-        d_fim = vmd["data"].max()
-        c1, c2, c3 = st.columns([1.4, 1.4, 2])
+        pregoes = sorted(vmd["data"].unique())
+        c0, c1, c2 = st.columns([1.4, 1.4, 1.4])
+        d_fim = c0.selectbox("Data final (pregão)", pregoes[::-1],
+                             format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="var_dfim")
+        d_fim = pd.Timestamp(d_fim)
         jan = c1.selectbox("Período", list(JANELAS), index=2, key="var_jan")
         n_top = c2.slider("Quantas de cada lado", 5, 50, 30, 5, key="var_n")
+        c3 = st.container()
         unidade, passo = JANELAS[jan]
         alvo = d_fim - (pd.Timedelta(days=passo) if unidade == "D" else pd.DateOffset(months=passo))
         tol = 3 if unidade == "D" else 20       # tolerância em dias para achar o pregão de referência
         fim = vmd[vmd["data"] == d_fim][["cnpj", "valor_mercado"]].rename(columns={"valor_mercado": "vm_fim"})
+        if jan == "Diária":                    # diária: pregão imediatamente anterior ao escolhido
+            anteriores = [d for d in pregoes if d < d_fim]
+            alvo = pd.Timestamp(anteriores[-1]) if anteriores else alvo
         ant = vmd[vmd["data"] <= alvo].sort_values("data").groupby("cnpj").tail(1)
         ant = ant[(alvo - ant["data"]).dt.days <= tol][["cnpj", "data", "valor_mercado"]].rename(
             columns={"data": "data_ini", "valor_mercado": "vm_ini"})
