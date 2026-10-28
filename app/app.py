@@ -1664,17 +1664,18 @@ with aba_var:
         set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
         if set_f:
             v = v[v["setor"].isin(set_f)]
-        vm_min = st.slider("Valor de mercado mínimo (R$ mi)", 0, 20000, 500, 250, key="var_vmmin",
+        vm_min = st.slider("Valor de mercado mínimo (R$ bi)", 0.0, 20.0, 0.5, 0.25, key="var_vmmin",
                            help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
-        v = v[(v["vm_fim"] >= vm_min) & v["variacao"].notna()]
+        v = v[(v["vm_fim"] >= vm_min * 1000) & v["variacao"].notna()]
+        v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em R$ milhões
         st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
                    f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. O valor de mercado "
                    "usa as ações vigentes em cada data, então desdobramentos e grupamentos não viram variação; "
                    "emissões e recompras, sim. Não inclui dividendos (é variação de preço, não retorno total).")
         cfg_v = {"rotulo": "Empresa", "setor": "Setor", "variacao": st.column_config.NumberColumn("Variação", format="percent"),
-                 "vm_fim": st.column_config.NumberColumn("Valor de mercado (R$ mi)", format="%,.0f"),
+                 "vm_bi": st.column_config.NumberColumn("Valor de mercado (R$ bi)", format="%,.1f"),
                  "data_ini": "Pregão inicial"}
-        cols_v = ["rotulo", "setor", "variacao", "vm_fim", "data_ini"]
+        cols_v = ["rotulo", "setor", "variacao", "vm_bi", "data_ini"]
         altas = v.nlargest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
         baixas = v.nsmallest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
         t1, t2 = st.columns(2)
@@ -1694,7 +1695,7 @@ with aba_var:
         fig.update_layout(height=max(360, 26 * len(por_setor)), barmode="group", xaxis_tickformat=".1%",
                           legend=dict(orientation="h", y=-0.15), margin=dict(t=20, b=20, l=10, r=10))
         st.plotly_chart(fig, width="stretch")
-        exp_v = v[cols_v + ["subsetor", "segmento", "vm_ini"]].sort_values("variacao", ascending=False)
+        exp_v = v[cols_v + ["subsetor", "segmento", "vm_fim", "vm_ini"]].sort_values("variacao", ascending=False)
         st.download_button("⬇️ Todas as empresas (CSV)",
                            exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                            file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
