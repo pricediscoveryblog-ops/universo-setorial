@@ -1,0 +1,35 @@
+name: entregas-rad
+
+on:
+  workflow_dispatch:
+  schedule:
+    # a cada 2 horas, das 8h às 22h de Brasília (11h às 01h UTC), todos os dias: entregas de ITR/DFP quase em tempo real
+    - cron: "5 11-23/2,1 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: entregas-rad
+  cancel-in-progress: false
+
+jobs:
+  entregas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas requests
+      - name: Entregas de ITR/DFP (consulta pública da CVM)
+        run: python entregas_rad.py
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/universo/entregas_rad.csv.gz
+          git diff --cached --quiet || git commit -m "entregas: $(date +%Y-%m-%d\ %H:%M)"
+          git pull --rebase --autostash || true
+          git push
