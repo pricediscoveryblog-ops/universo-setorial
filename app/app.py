@@ -1771,6 +1771,13 @@ with aba_cal:
         m2.metric("Pendentes", f"{len(pend)}")
         m3.metric("Passaram do prazo legal", f"{len(atrasadas)}")
 
+        st.subheader("Já divulgaram")
+        div = t[divulgou].sort_values("dt_receb", ascending=False)
+        st.dataframe(div[["rotulo", "setor", "documento", "dt_receb"]].assign(
+            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), hide_index=True, width="stretch",
+            height=min(600, 38 + 35 * len(div)), column_config={
+                "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em"})
+
         st.subheader("Ainda não divulgaram")
         st.caption("⚠️ **Data estimada** com base na data em que a empresa entregou o mesmo trimestre no ano anterior "
                    "(mesmo dia da semana, 52 semanas depois). Não é a data anunciada pela companhia: confira o "
@@ -1787,14 +1794,6 @@ with aba_cal:
                 "data_estimada": "Data estimada (pela entrega do ano anterior)",
                 "receb_ant": f"Entregou {(ant_ref.month - 1) // 3 + 1}T{str(ant_ref.year)[2:]} em",
                 "prazo_legal": "Prazo legal", "situacao": "Situação"})
-
-        st.subheader("Já divulgaram")
-        div = t[divulgou].sort_values("dt_receb", ascending=False)
-        st.dataframe(div[["rotulo", "setor", "documento", "dt_receb", "link"]].assign(
-            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), hide_index=True, width="stretch",
-            height=min(600, 38 + 35 * len(div)), column_config={
-                "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em",
-                "link": st.column_config.LinkColumn("Documento na CVM", display_text="abrir")})
 
         # calendário: entregas realizadas e estimadas por dia
         cal_r = div.assign(dia=div["dt_receb"].dt.normalize()).groupby("dia").size().rename("Divulgadas")
