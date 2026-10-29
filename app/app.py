@@ -1711,18 +1711,21 @@ with aba_var:
 # -------- Calendário de resultados (entregas de ITR/DFP à CVM)
 @st.cache_data(show_spinner=False)
 def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
-    arq = DADOS / "entregas.csv.gz"
-    if not arq.exists():
+    """Dados Abertos da CVM (histórico, com ~1 semana de defasagem) + consulta pública ENET (quase tempo real)."""
+    partes = [pd.read_csv(DADOS / n, dtype={"cnpj": str}) for n in ("entregas.csv.gz", "entregas_rad.csv.gz")
+              if (DADOS / n).exists()]
+    if not partes:
         return pd.DataFrame()
-    e = pd.read_csv(arq, dtype={"cnpj": str})
-    e["cnpj"] = e["cnpj"].str.zfill(14)
+    e = pd.concat(partes, ignore_index=True)
+    e["cnpj"] = e["cnpj"].astype(str).str.zfill(14)
     e["dt_refer"] = pd.to_datetime(e["dt_refer"], errors="coerce")
     e["dt_receb"] = pd.to_datetime(e["dt_receb"], errors="coerce")
-    return e.dropna(subset=["dt_refer", "dt_receb"])
+    e = e.dropna(subset=["dt_refer", "dt_receb"]).sort_values("dt_receb")
+    return e.drop_duplicates(["cnpj", "documento", "dt_refer"])     # primeira entrega de cada documento
 
 
 with aba_cal:
-    ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz"))
+    ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
     if ent.empty:
         st.info("Datas de entrega ainda não geradas: aparecem depois da próxima execução do coletor.")
     else:
@@ -1806,7 +1809,8 @@ with aba_cal:
             fig.update_layout(barmode="stack", height=340, title="Divulgações por dia", yaxis_title="Empresas",
                               legend=dict(orientation="h", y=-0.2), margin=dict(t=40, b=20, l=10, r=10))
             st.plotly_chart(fig, width="stretch")
-        st.caption("Fonte: índices de documentos entregues à CVM (ITR e DFP), atualizados pelo coletor diário das 23h. "
+        st.caption("Fonte: consulta pública de documentos da CVM (ENET), atualizada a cada 2 horas, e índices de "
+                   "Dados Abertos da CVM (histórico). "
                    "Data de divulgação = data de recebimento da primeira versão do documento pela CVM. Prazo legal: "
                    "ITR até 45 dias após o fim do trimestre; DFP até 3 meses após o fim do exercício.")
 
