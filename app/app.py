@@ -861,8 +861,8 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
-    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas",
+aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
+    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
      "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
@@ -1706,6 +1706,109 @@ with aba_var:
         st.download_button("⬇️ Todas as empresas (CSV)",
                            exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                            file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
+
+
+# -------- Calendário de resultados (entregas de ITR/DFP à CVM)
+@st.cache_data(show_spinner=False)
+def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
+    arq = DADOS / "entregas.csv.gz"
+    if not arq.exists():
+        return pd.DataFrame()
+    e = pd.read_csv(arq, dtype={"cnpj": str})
+    e["cnpj"] = e["cnpj"].str.zfill(14)
+    e["dt_refer"] = pd.to_datetime(e["dt_refer"], errors="coerce")
+    e["dt_receb"] = pd.to_datetime(e["dt_receb"], errors="coerce")
+    return e.dropna(subset=["dt_refer", "dt_receb"])
+
+
+with aba_cal:
+    ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz"))
+    if ent.empty:
+        st.info("Datas de entrega ainda não geradas: aparecem depois da próxima execução do coletor.")
+    else:
+        hoje = pd.Timestamp.today().normalize()
+        refs = sorted(d for d in ent["dt_refer"].unique() if pd.Timestamp(d).month in (3, 6, 9, 12))
+        fins_tri = [pd.Timestamp(d) for d in pd.date_range(end=hoje, periods=2, freq="QE")]
+        padrao = fins_tri[-1] if fins_tri[-1] <= hoje else fins_tri[0]
+        opcoes = sorted(set(pd.Timestamp(d) for d in refs[-12:]) | {padrao}, reverse=True)
+        k1, k2 = st.columns([1.3, 2])
+        ref = k1.selectbox("Trimestre de referência", opcoes, index=opcoes.index(padrao),
+                           format_func=lambda d: f"{(d.month - 1) // 3 + 1}T{str(d.year)[2:]} (encerrado em "
+                                                 f"{d.strftime('%d/%m/%Y')})", key="cal_ref")
+        ref = pd.Timestamp(ref)
+        ant_ref = ref - pd.DateOffset(years=1)
+        # universo: empresas da base (e financeiras) que entregaram algum documento nos 15 meses anteriores
+        info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor"]]
+        if not fin.empty:
+            f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
+            f_i["setor"] = f_i["setor"] if "setor" in f_i.columns else "Financeiro"
+            info = pd.concat([info, f_i[["cnpj", "rotulo", "setor"]]]).drop_duplicates("cnpj")
+        ativas = ent[(ent["dt_refer"] < ref) & (ent["dt_refer"] >= ref - pd.DateOffset(months=15))]["cnpj"].unique()
+        univ_c = info[info["cnpj"].isin(ativas)].copy()
+        setores_c = k2.multiselect("Setores (vazio = todos)", sorted(univ_c["setor"].dropna().unique()), key="cal_set")
+        if setores_c:
+            univ_c = univ_c[univ_c["setor"].isin(setores_c)]
+        atual = ent[ent["dt_refer"] == ref].sort_values("dt_receb").drop_duplicates("cnpj")
+        passado = ent[ent["dt_refer"] == ant_ref].sort_values("dt_receb").drop_duplicates("cnpj")
+        t = univ_c.merge(atual[["cnpj", "documento", "dt_receb", "link"]], on="cnpj", how="left").merge(
+            passado[["cnpj", "documento", "dt_receb"]].rename(columns={"documento": "doc_ant", "dt_receb": "receb_ant"}),
+            on="cnpj", how="left")
+        # prazo legal: ITR 45 dias após o fim do trimestre; DFP 3 meses após o fim do exercício
+        doc_esp = t["documento"].fillna(t["doc_ant"]).fillna("DFP" if ref.month == 12 else "ITR")
+        t["prazo_legal"] = np.where(doc_esp == "DFP", ref + pd.DateOffset(months=3), ref + pd.Timedelta(days=45))
+        t["prazo_legal"] = pd.to_datetime(t["prazo_legal"])
+        # data estimada: entrega do mesmo trimestre do ano anterior + 364 dias (mesmo dia da semana)
+        t["data_estimada"] = t["receb_ant"].dt.normalize() + pd.Timedelta(days=364)
+        divulgou = t["dt_receb"].notna()
+        n_tot, n_div = len(t), int(divulgou.sum())
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Já divulgaram", f"{n_div} de {n_tot}", f"{n_div / n_tot:.0%}" if n_tot else None, delta_color="off")
+        pend = t[~divulgou].copy()
+        atrasadas = pend[hoje > pend["prazo_legal"]]
+        m2.metric("Pendentes", f"{len(pend)}")
+        m3.metric("Passaram do prazo legal", f"{len(atrasadas)}")
+
+        st.subheader("Ainda não divulgaram")
+        st.caption("⚠️ **Data estimada** com base na data em que a empresa entregou o mesmo trimestre no ano anterior "
+                   "(mesmo dia da semana, 52 semanas depois). Não é a data anunciada pela companhia: confira o "
+                   "calendário de eventos corporativos dela para a data oficial.")
+        pend["situacao"] = np.select(
+            [hoje > pend["prazo_legal"], pend["data_estimada"].isna(), pend["data_estimada"] < hoje],
+            ["Passou do prazo legal", "Sem histórico: usar o prazo legal", "Estimativa já passou"], "No prazo")
+        pend = pend.sort_values(["data_estimada", "prazo_legal"], na_position="last")
+        st.dataframe(pend[["rotulo", "setor", "data_estimada", "receb_ant", "prazo_legal", "situacao"]].assign(
+            data_estimada=lambda x: x["data_estimada"].dt.date, receb_ant=lambda x: x["receb_ant"].dt.date,
+            prazo_legal=lambda x: x["prazo_legal"].dt.date), hide_index=True, width="stretch",
+            height=min(600, 38 + 35 * len(pend)), column_config={
+                "rotulo": "Empresa", "setor": "Setor",
+                "data_estimada": "Data estimada (pela entrega do ano anterior)",
+                "receb_ant": f"Entregou {(ant_ref.month - 1) // 3 + 1}T{str(ant_ref.year)[2:]} em",
+                "prazo_legal": "Prazo legal", "situacao": "Situação"})
+
+        st.subheader("Já divulgaram")
+        div = t[divulgou].sort_values("dt_receb", ascending=False)
+        st.dataframe(div[["rotulo", "setor", "documento", "dt_receb", "link"]].assign(
+            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), hide_index=True, width="stretch",
+            height=min(600, 38 + 35 * len(div)), column_config={
+                "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em",
+                "link": st.column_config.LinkColumn("Documento na CVM", display_text="abrir")})
+
+        # calendário: entregas realizadas e estimadas por dia
+        cal_r = div.assign(dia=div["dt_receb"].dt.normalize()).groupby("dia").size().rename("Divulgadas")
+        cal_e = pend.dropna(subset=["data_estimada"]).groupby("data_estimada").size().rename("Estimadas")
+        cal = pd.concat([cal_r, cal_e], axis=1, sort=True).fillna(0)
+        if len(cal):
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=cal.index, y=cal["Divulgadas"], name="Já divulgadas", marker_color="#16a34a"))
+            fig.add_trace(go.Bar(x=cal.index, y=cal["Estimadas"], name="Estimadas (pelo ano anterior)",
+                                 marker_color="#9ca3af"))
+            fig.add_vline(x=hoje, line_dash="dot", line_color="gray")
+            fig.update_layout(barmode="stack", height=340, title="Divulgações por dia", yaxis_title="Empresas",
+                              legend=dict(orientation="h", y=-0.2), margin=dict(t=40, b=20, l=10, r=10))
+            st.plotly_chart(fig, width="stretch")
+        st.caption("Fonte: índices de documentos entregues à CVM (ITR e DFP), atualizados pelo coletor diário das 23h. "
+                   "Data de divulgação = data de recebimento da primeira versão do documento pela CVM. Prazo legal: "
+                   "ITR até 45 dias após o fim do trimestre; DFP até 3 meses após o fim do exercício.")
 
 
 # -------- Financeiro: bancos e seguradoras (plano de contas próprio, base separada)
