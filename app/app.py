@@ -355,6 +355,15 @@ def rotulo_remuneracao(r) -> str:
     return ind or "-"
 
 
+PALETA_OV = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
+             "#17becf"]
+
+
+def alvo(cor: str) -> dict:
+    """Marcador do valor no último pregão: alvo (círculo com ponto) na mesma cor da curva."""
+    return dict(symbol="circle-open-dot", size=18, color=cor, line=dict(width=3, color=cor))
+
+
 def painel_mercado(cnpj: str):
     """Valores e múltiplos de mercado na cotação mais recente (último pregão)."""
     if mult.empty:
@@ -677,8 +686,8 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
     fig = go.Figure()
     ignoradas = []
     DE_MERCADO_FIN = {"valor_mercado", "p_l", "p_vpa", "dividend_yield"}
-    alvo_verde = dict(symbol="circle-open-dot", size=18, color="#16a34a", line=dict(width=3, color="#16a34a"))
-    for nome, x, y, f, chave, cn_s in series_ov:
+    for i_s, (nome, x, y, f, chave, cn_s) in enumerate(series_ov):
+        cor = PALETA_OV[i_s % len(PALETA_OV)]
         y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
         x = pd.Series(list(x))
         # valor no último pregão, para indicadores que dependem de preço
@@ -688,19 +697,20 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
             if validos.empty or validos.iloc[0] <= 0:
                 ignoradas.append(nome)
                 continue
-            fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+            fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome,
+                                     line=dict(color=cor), marker=dict(color=cor)))
             if ponto:
                 fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
-                                         marker=alvo_verde,
+                                         marker=alvo(cor),
                                          name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
         else:
             eixo = "y" if f == "mm" else "y2"
             fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
                                      name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
-                                     yaxis=eixo))
+                                     yaxis=eixo, line=dict(color=cor), marker=dict(color=cor)))
             if ponto:
                 fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
-                                         marker=alvo_verde, yaxis=eixo,
+                                         marker=alvo(cor), yaxis=eixo,
                                          name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
     if escala.startswith("Base 100"):
         fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
@@ -714,7 +724,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
         st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
                    ". Use a escala de valores para vê-las.")
     st.caption("Série anual (DFP). Base 100 compara o comportamento relativo desde o primeiro exercício; em valores, "
-               "R$ mm à esquerda e múltiplos/% à direita. ◎ verde = valor calculado com o preço do último pregão.")
+               "R$ mm à esquerda e múltiplos/% à direita. ◎ = valor calculado com o preço do último pregão, na cor da curva.")
 
 
 def add_medias(fig, x, y, ym=None, rotulo=""):
@@ -1450,7 +1460,8 @@ with aba_emp:
             ignoradas = []
             DE_MERCADO = {"valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
                           "ev_ebitda_pre_ifrs16", "dividend_yield", "ev_receita_com_arrend", "ev_receita_sem_arrend"}
-            for nome, x, y, f, chave, cn_s in series_ov:
+            for i_s, (nome, x, y, f, chave, cn_s) in enumerate(series_ov):
+                cor = PALETA_OV[i_s % len(PALETA_OV)]
                 y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
                 x = pd.Series(list(x))
                 # valor na cotação do dia (último pregão), para indicadores que dependem de preço
@@ -1466,21 +1477,20 @@ with aba_emp:
                     if validos.empty or validos.iloc[0] <= 0:
                         ignoradas.append(nome)
                         continue
-                    fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome))
+                    fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome,
+                                             line=dict(color=cor), marker=dict(color=cor)))
                     if ponto:
                         fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
-                                                 marker=dict(symbol="circle-open-dot", size=18, color="#16a34a",
-                                                             line=dict(width=3, color="#16a34a")),
+                                                 marker=alvo(cor),
                                                  name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
                 else:
                     eixo = "y" if f == "mm" else "y2"
                     fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
                                              name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
-                                             yaxis=eixo))
+                                             yaxis=eixo, line=dict(color=cor), marker=dict(color=cor)))
                     if ponto:
                         fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
-                                                 marker=dict(symbol="circle-open-dot", size=18, color="#16a34a",
-                                                             line=dict(width=3, color="#16a34a")), yaxis=eixo,
+                                                 marker=alvo(cor), yaxis=eixo,
                                                  name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
             if escala.startswith("Base 100"):
                 fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
@@ -1495,7 +1505,7 @@ with aba_emp:
                            ". Use a escala de valores para vê-las.")
             st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
                        "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita. "
-                       "◎ verde = indicador de mercado calculado com o preço do último pregão.")
+                       "◎ = indicador de mercado calculado com o preço do último pregão, na cor da curva correspondente.")
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
