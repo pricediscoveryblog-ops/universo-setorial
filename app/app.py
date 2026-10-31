@@ -462,6 +462,34 @@ except FileNotFoundError:
     st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
     st.stop()
 
+# ------------------------------------------------------------------ navegação: clique numa empresa -> aba Empresa
+_dest = st.session_state.pop("_ir_empresa", None)
+if _dest:
+    if not fin.empty and _dest in set(fin["rotulo"]):
+        st.session_state["grupo_emp"] = "Bancos e seguradoras"
+        st.session_state["emp_fin"] = _dest
+    else:
+        st.session_state["grupo_emp"] = "Não financeiras"
+        st.session_state["emp_sel"] = _dest
+    st.session_state["_abrir_aba_empresa"] = True
+
+
+def ir_para_empresa(rotulo, chave: str):
+    """Guarda a empresa clicada, limpa a seleção da tabela/gráfico e recarrega já na aba Empresa."""
+    if isinstance(rotulo, str) and " — " in rotulo:
+        st.session_state["_ir_empresa"] = rotulo
+        st.session_state.pop(chave, None)
+        st.rerun()
+
+
+def tabela_clicavel(dados: pd.DataFrame, rotulos, chave: str, alvo=None, **kw):
+    """st.dataframe com seleção de linha: clicar numa empresa abre a aba Empresa com ela."""
+    ev = (alvo or st).dataframe(dados, on_select="rerun", selection_mode="single-row", key=chave, **kw)
+    linhas = list(getattr(getattr(ev, "selection", None), "rows", []) or [])
+    if linhas:
+        ir_para_empresa(list(rotulos)[linhas[0]], chave)
+
+
 # ------------------------------------------------------------------ barra lateral
 st.sidebar.title("📊 Universo setorial")
 if meta is not None:
@@ -874,6 +902,16 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
     ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
      "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
+if st.session_state.pop("_abrir_aba_empresa", False):
+    st.html("""<script>
+      const doc = (window.parent || window).document;
+      const abrir = () => {
+        const aba = [...doc.querySelectorAll('button[role="tab"]')].find(t => t.innerText.trim() === "Empresa");
+        if (aba) { aba.click(); window.parent.scrollTo({top: 0}); } else { setTimeout(abrir, 150); }
+      };
+      abrir();
+    </script>""", unsafe_allow_javascript=True)
+st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
 def col_periodo(df: pd.DataFrame) -> pd.Series:
@@ -972,7 +1010,7 @@ with aba_setor:
         else:
             cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
             vis = tab_full
-        st.dataframe(vis, column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
+        tabela_clicavel(vis, vis.index, "clk_setor", column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
         st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
                    ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
         if fmt == "mm" and (setor_f[ind] < 0).any():
@@ -1123,8 +1161,13 @@ with aba_emp:
     elif filtrado.empty:
         st.info("Nenhum dado para o filtro.")
     else:
-        emp = st.selectbox("Empresa", sorted(filtrado["rotulo"].unique()))
-        d_emp = filtrado[filtrado["rotulo"] == emp].sort_values(eixo_x(tipo))
+        opts_emp = sorted(filtrado["rotulo"].unique())
+        alvo_e = st.session_state.get("emp_sel")
+        if alvo_e and alvo_e not in opts_emp and alvo_e in set(df_t["rotulo"]):
+            opts_emp = sorted(set(opts_emp) | {alvo_e})      # empresa clicada fora do filtro da barra lateral
+        emp = st.selectbox("Empresa", opts_emp, key="emp_sel")
+        fonte_e = filtrado if emp in set(filtrado["rotulo"]) else df_t
+        d_emp = fonte_e[fonte_e["rotulo"] == emp].sort_values(eixo_x(tipo))
         seg = d_emp["segmento"].iloc[0]
         st.caption(f"{d_emp['setor'].iloc[0]} / {d_emp['subsetor'].iloc[0]} / **{seg}** · base {d_emp['fonte'].iloc[-1]}")
         linha_e = d_emp.iloc[-1]
@@ -1607,8 +1650,9 @@ with aba_scr:
             cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (dias)", format="%.0f")
         else:
             cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (R$ mm)", format="%,.0f")
-    st.dataframe(vis_r.sort_values(mostrar[0] if mostrar else "rotulo"), column_config=cfg, hide_index=True,
-                 width="stretch", height=min(700, 38 + 35 * len(vis_r)))
+    vis_r = vis_r.sort_values(mostrar[0] if mostrar else "rotulo")
+    tabela_clicavel(vis_r, vis_r["rotulo"], "clk_scr", column_config=cfg, hide_index=True,
+                    width="stretch", height=min(700, 38 + 35 * len(vis_r)))
     st.caption("Clique no cabeçalho para ordenar. Múltiplos vazios = denominador ≤ 0 ou sem cotação.")
     exp_r = tab_r.rename(columns={k: rot_scr[k] for k in mostrar})
     d1, d2 = st.columns(2)
@@ -1639,7 +1683,10 @@ with aba_rank:
         fig.update_layout(height=max(350, 28 * len(d)), yaxis=dict(autorange="reversed"), legend_title_text="Segmento")
         if METRICAS[met][1] == "pct":
             fig.update_xaxes(tickformat=".0%")
-        st.plotly_chart(fig, width="stretch")
+        ev_rk = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points", key="clk_rank")
+        pts = list(getattr(getattr(ev_rk, "selection", None), "points", []) or [])
+        if pts:
+            ir_para_empresa(pts[0].get("y"), "clk_rank")
 
 # -------- Altas e baixas (variação do valor de mercado)
 JANELAS = {"Diária": ("D", 1), "Semanal": ("D", 7), "Mensal": ("M", 1), "Trimestral": ("M", 3),
@@ -1697,9 +1744,11 @@ with aba_var:
         baixas = v.nsmallest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
         t1, t2 = st.columns(2)
         t1.markdown(f"**{n_top} maiores altas**")
-        t1.dataframe(altas, hide_index=True, width="stretch", column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+        tabela_clicavel(altas, altas["rotulo"], "clk_altas", alvo=t1, hide_index=True, width="stretch",
+                        column_config=cfg_v, height=min(900, 38 + 35 * n_top))
         t2.markdown(f"**{n_top} maiores baixas**")
-        t2.dataframe(baixas, hide_index=True, width="stretch", column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+        tabela_clicavel(baixas, baixas["rotulo"], "clk_baixas", alvo=t2, hide_index=True, width="stretch",
+                        column_config=cfg_v, height=min(900, 38 + 35 * n_top))
         st.subheader("Variação por setor")
         por_setor = v.groupby("setor").apply(
             lambda g: pd.Series({"Mediana": g["variacao"].median(),
@@ -1783,9 +1832,9 @@ with aba_cal:
 
         st.subheader("Já divulgaram")
         div = t[divulgou].sort_values("dt_receb", ascending=False)
-        st.dataframe(div[["rotulo", "setor", "documento", "dt_receb"]].assign(
-            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), hide_index=True, width="stretch",
-            height=min(600, 38 + 35 * len(div)), column_config={
+        tabela_clicavel(div[["rotulo", "setor", "documento", "dt_receb"]].assign(
+            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), div["rotulo"], "clk_cal_div",
+            hide_index=True, width="stretch", height=min(600, 38 + 35 * len(div)), column_config={
                 "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em"})
 
         st.subheader("Ainda não divulgaram")
@@ -1796,9 +1845,9 @@ with aba_cal:
             [hoje > pend["prazo_legal"], pend["data_estimada"].isna(), pend["data_estimada"] < hoje],
             ["Passou do prazo legal", "Sem histórico: usar o prazo legal", "Estimativa já passou"], "No prazo")
         pend = pend.sort_values(["data_estimada", "prazo_legal"], na_position="last")
-        st.dataframe(pend[["rotulo", "setor", "data_estimada", "receb_ant", "prazo_legal", "situacao"]].assign(
+        tabela_clicavel(pend[["rotulo", "setor", "data_estimada", "receb_ant", "prazo_legal", "situacao"]].assign(
             data_estimada=lambda x: x["data_estimada"].dt.date, receb_ant=lambda x: x["receb_ant"].dt.date,
-            prazo_legal=lambda x: x["prazo_legal"].dt.date), hide_index=True, width="stretch",
+            prazo_legal=lambda x: x["prazo_legal"].dt.date), pend["rotulo"], "clk_cal_pend", hide_index=True, width="stretch",
             height=min(600, 38 + 35 * len(pend)), column_config={
                 "rotulo": "Empresa", "setor": "Setor",
                 "data_estimada": "Data estimada (pela entrega do ano anterior)",
@@ -1888,7 +1937,8 @@ with aba_fin:
         else:
             cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
             vis_tab = full_f
-        st.dataframe(vis_tab, column_config=cfg_f, width="stretch", height=min(650, 38 + 35 * len(vis_tab)))
+        tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
+                        height=min(650, 38 + 35 * len(vis_tab)))
         if fmt_f != "mm" and isinstance(agg_f, tuple):
             st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
         notas_fin = {
