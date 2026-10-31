@@ -141,7 +141,7 @@ def versao_arquivos(*arqs) -> tuple:
     return tuple(a.stat().st_mtime if a.exists() else 0 for a in arqs)
 
 
-@st.cache_data(show_spinner="Carregando a base…")
+@st.cache_data(max_entries=1, show_spinner="Carregando a base…")
 def carregar(versao: tuple = ()):
     base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
     base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
@@ -222,7 +222,7 @@ def carregar(versao: tuple = ()):
     return base, cob, meta, fin, mult
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(max_entries=1, show_spinner=False)
 def carregar_aluguel(versao: tuple = ()) -> pd.DataFrame:
     arq = DADOS.parent / "aluguel" / "resumo.csv.gz"
     if not arq.exists():
@@ -267,7 +267,7 @@ def calc_prazos(b: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(partes + [resto], ignore_index=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(max_entries=1, show_spinner=False)
 def carregar_juros(versao: tuple = ()) -> tuple[pd.DataFrame, pd.DataFrame]:
     pasta = DADOS.parent / "juros"
     p = pd.read_csv(pasta / "parametros.csv", parse_dates=["data"]) if (pasta / "parametros.csv").exists() else pd.DataFrame()
@@ -334,7 +334,7 @@ def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
     return pd.Series(idx, index=cols)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(max_entries=1, show_spinner=False)
 def carregar_dividas(versao: tuple = ()) -> pd.DataFrame:
     arq = DADOS.parent / "dividas" / "debentures.csv.gz"
     if not arq.exists():
@@ -410,7 +410,7 @@ def painel_mercado(cnpj: str):
         st.caption("Notas do cálculo: " + str(h.get("notas")))
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(max_entries=1, show_spinner=False)
 def carregar_vm_diario(versao: tuple = ()) -> pd.DataFrame:
     arq = DADOS / "valor_mercado_diario.csv.gz"
     if not arq.exists():
@@ -1760,7 +1760,7 @@ with aba_var:
 
 
 # -------- Calendário de resultados (entregas de ITR/DFP à CVM)
-@st.cache_data(show_spinner=False)
+@st.cache_data(max_entries=1, show_spinner=False)
 def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
     """Dados Abertos da CVM (histórico, com ~1 semana de defasagem) + consulta pública ENET (quase tempo real)."""
     partes = [pd.read_csv(DADOS / n, dtype={"cnpj": str}) for n in ("entregas.csv.gz", "entregas_rad.csv.gz")
