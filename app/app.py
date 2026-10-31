@@ -471,7 +471,7 @@ if _dest:
     else:
         st.session_state["grupo_emp"] = "Não financeiras"
         st.session_state["emp_sel"] = _dest
-    st.session_state["_abrir_aba_empresa"] = True
+    st.session_state["aba_principal"] = "Empresa"           # abre a aba Empresa (st.tabs com chave)
 
 
 def ir_para_empresa(rotulo, chave: str):
@@ -901,16 +901,8 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 # ------------------------------------------------------------------ abas
 aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
     ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
-     "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"])
-if st.session_state.pop("_abrir_aba_empresa", False):
-    st.html("""<script>
-      const doc = (window.parent || window).document;
-      const abrir = () => {
-        const aba = [...doc.querySelectorAll('button[role="tab"]')].find(t => t.innerText.trim() === "Empresa");
-        if (aba) { aba.click(); window.parent.scrollTo({top: 0}); } else { setTimeout(abrir, 150); }
-      };
-      abrir();
-    </script>""", unsafe_allow_javascript=True)
+     "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"],
+    key="aba_principal")
 st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
