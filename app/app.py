@@ -902,7 +902,7 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
     ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
      "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"],
-    key="aba_principal")
+    key="aba_principal", on_change="rerun")
 st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
