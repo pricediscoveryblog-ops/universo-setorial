@@ -36,7 +36,8 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
           "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
-          "fcl_pos_arrend", "dividendos_pagos"]
+          "fcl_pos_arrend", "dividendos_pagos", "resultado_financeiro", "receitas_financeiras",
+          "despesas_financeiras", "ir_csll_pagos", "juros_pagos", "principal_pago", "servico_divida_pago"]
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
@@ -246,7 +247,11 @@ def _linha(s: dict, tipo: str, m: dict, periodo: str, fonte: str, notas: list) -
 
 DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta", "margem_ebitda",
              "margem_ebitda_pre_ifrs16", "margem_liquida", "capex_org_receita", "capex_org_da",
-             "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16", "roe_pl_final"]
+             "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16", "roe_pl_final",
+             # cobertura da dívida (bases e índices; ver cs.derivadas)
+             "desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex",
+             "ebitda_ir_capex", "servico_divida_c_arrend", "cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda",
+             "dscr_pos_capex", "dscr_capex_arrend_den"]
 
 
 def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
