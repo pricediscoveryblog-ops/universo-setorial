@@ -423,6 +423,10 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     m["receita"] = conta(sub, "DRE", "3.01")
     m["lucro_bruto"] = conta(sub, "DRE", "3.03")
     m["ebit"] = conta(sub, "DRE", "3.05")
+    # resultado financeiro (DRE 3.06) e aberturas: receitas (3.06.01) e despesas (3.06.02, com sinal negativo)
+    m["resultado_financeiro"] = conta(sub, "DRE", "3.06")
+    m["receitas_financeiras"] = conta(sub, "DRE", "3.06.01")
+    m["despesas_financeiras"] = conta(sub, "DRE", "3.06.02")
     m["lucro_liquido"] = conta(sub, "DRE", "3.11")
     # lucro atribuído aos controladores (abertura da 3.11); sem abertura, vale o lucro total
     ctrl = sub[(sub["DEMO"] == "DRE") & sub["CD_CONTA"].str.startswith("3.11.") &
