@@ -24,6 +24,7 @@ METRICAS = {
     "ebitda": ("EBITDA (IFRS 16)", "mm", "Resultado"),
     "ebitda_pre_ifrs16": ("EBITDA pré-IFRS 16", "mm", "Resultado"),
     "lucro_liquido": ("Lucro líquido", "mm", "Resultado"),
+    "resultado_financeiro": ("Resultado financeiro líquido", "mm", "Resultado"),
     "fco": ("Fluxo de caixa operacional", "mm", "Caixa e investimento"),
     "capex_organico": ("Capex orgânico", "mm", "Caixa e investimento"),
     "capex_organico_liquido": ("Capex orgânico líq. de vendas", "mm", "Caixa e investimento"),
@@ -33,6 +34,10 @@ METRICAS = {
     "pagamento_arrendamento": ("Pagamentos de arrendamento", "mm", "Caixa e investimento"),
     "fcl_pos_arrend": ("FCL pós-arrendamento", "mm", "Caixa e investimento"),
     "dividendos_pagos": ("Dividendos + JCP pagos", "mm", "Caixa e investimento"),
+    "ir_csll_pagos": ("IR + CSLL pagos", "mm", "Caixa e investimento"),
+    "juros_pagos": ("Juros pagos da dívida (ex-arrend.)", "mm", "Caixa e investimento"),
+    "principal_pago": ("Principal amortizado (ex-arrend.)", "mm", "Caixa e investimento"),
+    "servico_divida_pago": ("Serviço da dívida pago (juros + principal)", "mm", "Caixa e investimento"),
     "caixa": ("Caixa + aplicações CP", "mm", "Balanço e dívida"),
     "divida_bruta_ex_arrend": ("Dívida bruta ex-arrendamento", "mm", "Balanço e dívida"),
     "passivo_arrendamento": ("Passivo de arrendamento", "mm", "Balanço e dívida"),
@@ -53,6 +58,12 @@ METRICAS = {
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_ifrs16": ("DL c/ arrend. / EBITDA IFRS 16", "x", "Alavancagem e múltiplos"),
     "div_liq_ebitda_pre_ifrs16": ("DL s/ arrend. / EBITDA pré-IFRS 16", "x", "Alavancagem e múltiplos"),
+    # cobertura da dívida (DFC; IR = IR + CSLL pagos; arrend. = principal + juros de arrendamento pagos)
+    "cob_ebit_res_fin": ("EBIT ÷ resultado financeiro líquido", "x", "Cobertura da dívida"),
+    "cob_juros_caixa": ("(EBITDA − IR − arrend.) ÷ juros pagos", "x", "Cobertura da dívida"),
+    "dscr_ebitda": ("(EBITDA − IR − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
+    "dscr_pos_capex": ("(EBITDA − IR − capex org. − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
+    "dscr_capex_arrend_den": ("(EBITDA − IR − capex org.) ÷ (juros + principal + arrend.)", "x", "Cobertura da dívida"),
     # crescimento contra o mesmo período do ano anterior (anual: ano anterior; LTM e trimestral: 4 trimestres antes)
     "cresc_receita": ("Crescimento da receita líquida (a/a)", "pct", "Crescimento"),
     "cresc_lucro_bruto": ("Crescimento do lucro bruto (a/a)", "pct", "Crescimento"),
@@ -94,11 +105,20 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16"),
          "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido"),
          "conversao_fco_ebitda": ("fco", "ebitda"),
+         # cobertura da dívida do setor = Σ geração de caixa ÷ Σ obrigação (só empresas com denominador > 0)
+         "cob_ebit_res_fin": ("ebit", "desp_fin_liquida"), "cob_juros_caixa": ("caixa_servico_divida", "juros_pagos"),
+         "dscr_ebitda": ("caixa_servico_divida", "servico_divida_pago"),
+         "dscr_pos_capex": ("caixa_servico_pos_capex", "servico_divida_pago"),
+         "dscr_capex_arrend_den": ("ebitda_ir_capex", "servico_divida_c_arrend"),
          # múltiplos do setor = Σ valor de mercado (ou EV) ÷ Σ fundamento, na mesma data
          "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
          "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
          "ev_receita_com_arrend": ("ev_com_arrend", "m_receita_12m"), "ev_receita_sem_arrend": ("ev_sem_arrend", "m_receita_12m"),
          "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
+# bases dos índices de cobertura (não aparecem como métrica; usadas no agregado do setor)
+AUX_COB = ["desp_fin_liquida", "caixa_servico_divida", "caixa_servico_pos_capex", "ebitda_ir_capex",
+           "servico_divida_c_arrend"]
+AGREG_DEN_POS = {"cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda", "dscr_pos_capex", "dscr_capex_arrend_den"}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -213,7 +233,7 @@ def carregar(versao: tuple = ()):
                      .merge(mf, left_on=["cnpj", "_dt"], right_on=["cnpj", "data"], how="left").drop(columns=["data", "_dt"])
     for c in [k for k in METRICAS if k not in base.columns] + list(
             {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m",
-             "m_receita_12m"} - set(base.columns)):
+             "m_receita_12m"} - set(base.columns)) + [c for c in AUX_COB if c not in base.columns]:
         base[c] = np.nan
     if not fin.empty:
         for k in FIN:
@@ -941,6 +961,8 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
             return pd.Series(dtype=float)
         n, dn = AGREG[m]
         ok = d.dropna(subset=[n, dn])
+        if m in AGREG_DEN_POS:
+            ok = ok[ok[dn] > 0]
         g = ok.groupby("_c")[[n, dn]].sum()
         return (g[n] / g[dn].where(g[dn] != 0)).astype(float)
     return pd.Series(dtype=float)
@@ -2119,6 +2141,14 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   Setor agregado: Σ valor de mercado (ou EV) ÷ Σ PL, lucro 12m ou EBITDA 12m das empresas com os dois dados.
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
 - Conversão de caixa = FCO ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
+- Cobertura da dívida (fluxos do mesmo período; IR = IR + CSLL **pagos** na DFC; arrend. = principal + juros de
+  arrendamento pagos; juros e principal = dívida ex-arrendamento, pagos na DFC; capex = capex orgânico):
+  EBIT ÷ resultado financeiro líquido (vazio se o resultado financeiro for ≥ 0);
+  (EBITDA − IR − arrend.) ÷ juros; (EBITDA − IR − arrend.) ÷ (juros + principal);
+  (EBITDA − IR − capex − arrend.) ÷ (juros + principal); (EBITDA − IR − capex) ÷ (juros + principal + arrend.).
+  Vazios com denominador ≤ 0 (empresa sem dívida paga no período). Linha da DFC que junta principal e juros
+  entra só no serviço total: o índice só de juros fica vazio. Juros capitalizados no investimento (6.02) ficam
+  fora. IR, juros e principal não identificados na DFC = 0 (com nota). Setor = Σ numerador ÷ Σ denominador.
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
 - Graus de alavancagem também na visão do setor (por empresa e, sem recorte, por setor sobre os agregados).
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
