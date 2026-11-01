@@ -391,6 +391,14 @@ RX_AQUIS = re.compile(r"controlad|coligad|participac|investida|joint|empreendime
 RX_VENDA = re.compile(r"venda|aliena|recebimento")
 RX_VENDA_ATIVO = re.compile(r"imobilizad|intangive|ativos? permanente|ativos? de longo prazo|bens do ativo|propriedades? (?:para|de) investimento")
 RX_AQUIS_EXC = re.compile(r"aplicac\w* financ|titulo|fundo|mutuo|emprestimo")
+# IR/CSLL pagos e serviço da dívida (DFC)
+RX_IR = re.compile(r"imposto de renda|contribuicao social|\bcsll\b|\birpj\b|\bir\b|(?:tributos|impostos) sobre (?:o )?lucro")
+RX_IR_EXC = re.compile(r"a pagar|a recolher|diferid|retid|receb|restitu|compensa|parcelament|\bpis\b|cofins|icms|\biss\b|inss|previd|faturament")
+RX_JUROS = re.compile(r"juro|encargos? (?:financeir|da divida|de emprestim|sobre (?:emprestim|financ|debent))")
+RX_DIVIDA = re.compile(r"emprestim|financiament|debent|divida|notas? comercia|notas? promissori|\bbonds?\b|\bnotes\b|eurobond|\bcri\b|\bcra\b|\bccb\b|capital de giro|finame|bndes|cedulas? de credito|titulos? de divida|pre-?pagamento de export|\bppe\b|\bacc\b|\bace\b|finimp")
+RX_SD_VERBO = re.compile(r"amortiz|pag|liquid|quitac|resgat|recompra|reembols|devoluc")
+RX_SD_EXC = re.compile(r"capital proprio|\bjcp\b|dividend|receb|a pagar|a recolher|apropriad|provis|incorrid|derivativ|swap|hedge|capta|ingress|obtenc|acoes|tesouraria|risco sacado|convenio|forfait|custo")
+RX_SD_MISTO = re.compile(r"principal|(?:emprestim|financiament|debent|divida)\w* e (?:juro|encargo)|juros e (?:amortiz|principal)")
 
 
 def topo(rows: pd.DataFrame) -> pd.DataFrame:
@@ -617,6 +625,47 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
         if not len(dv):
             notas.append("nenhum pagamento de dividendos/JCP identificado na DFC (assumido 0)")
 
+    # IR e CSLL pagos (positivo = pago): linhas de pagamento na DFC, fora dos ajustes não-caixa (6.01.01)
+    # e do investimento (6.02). Exclui variação de saldos "a pagar/a recolher", diferidos, retidos e
+    # parcelamentos (que costumam misturar outros tributos).
+    tx = dfc[~dfc["CD_CONTA"].str.match(r"^6\.01\.01|^6\.02") & (dfc["VL"] < 0)]
+    tx = topo(tx[tx["DESC"].str.contains(RX_IR) & tx["DESC"].str.contains(r"pag|recolhid|liquid")
+                 & ~tx["DESC"].str.contains(RX_IR_EXC)])
+    registrar(tx, "ir_csll_pagos")
+    if dfc.empty:
+        m["ir_csll_pagos"] = np.nan
+    else:
+        m["ir_csll_pagos"] = float(-tx["VL"].sum()) if len(tx) else 0.0
+        if not len(tx):
+            notas.append("IR/CSLL pagos não identificados na DFC (assumido 0)")
+
+    # Serviço da dívida pago, ex-arrendamento (positivo = pago): juros (operacional ou financiamento)
+    # e amortização de principal (financiamento). Linha que junta principal e juros entra só no total.
+    sdv = dfc[dfc["CD_CONTA"].str.match(r"^6\.0[13]\.") & ~dfc["CD_CONTA"].str.startswith("6.01.01")
+              & (dfc["VL"] < 0)]
+    sdv = sdv[~sdv["DESC"].str.contains(RX_ARR) & ~sdv["DESC"].str.contains(RX_SD_EXC)]
+    no_fin = sdv["CD_CONTA"].str.startswith("6.03")
+    e_jur = sdv["DESC"].str.contains(RX_JUROS) & (sdv["DESC"].str.contains(RX_SD_VERBO) | no_fin)
+    e_pri = no_fin & sdv["DESC"].str.contains(RX_DIVIDA) & sdv["DESC"].str.contains(RX_SD_VERBO) \
+        & ~sdv["DESC"].str.contains(RX_JUROS)
+    sdv = topo(sdv[e_jur | e_pri]).copy()
+    if dfc.empty:
+        m["juros_pagos"] = m["principal_pago"] = m["servico_divida_pago"] = np.nan
+    else:
+        sdv["classe"] = np.where(~sdv["DESC"].str.contains(RX_JUROS), "principal",
+                                 np.where(sdv["DESC"].str.contains(RX_SD_MISTO), "misto", "juros"))
+        for c in ("juros", "principal", "misto"):
+            registrar(sdv[sdv["classe"] == c], f"servico_divida:{c}")
+        m["servico_divida_pago"] = float(-sdv["VL"].sum()) if len(sdv) else 0.0
+        if (sdv["classe"] == "misto").any():
+            m["juros_pagos"] = m["principal_pago"] = np.nan
+            notas.append("principal e juros da dívida em linha única: só o serviço total é confiável")
+        else:
+            m["juros_pagos"] = float(-sdv.loc[sdv["classe"] == "juros", "VL"].sum())
+            m["principal_pago"] = float(-sdv.loc[sdv["classe"] == "principal", "VL"].sum())
+        if not len(sdv):
+            notas.append("nenhum pagamento de juros/principal de dívida identificado na DFC (assumido 0)")
+
     # Fluxo de caixa operacional e FCL (definição própria)
     m["fco"] = conta(sub, dfc_demo, "6.01") if not dfc.empty else np.nan
     pag_fora_fco = 0.0
@@ -655,6 +704,29 @@ def derivadas(m: dict, anual: bool = True) -> dict:
     m["margem_liquida"] = _div(m["lucro_liquido"], m["receita"])
     m["capex_org_receita"] = _div(m["capex_organico"], m["receita"])
     m["capex_org_da"] = _div(m["capex_organico"], m["da"])
+    # Cobertura da dívida (fluxos do mesmo período). IR = IR + CSLL pagos (DFC); arrendamento pago =
+    # principal + juros (DFC); sob IAS 17 (antes de 2019) o aluguel já está no EBITDA: não identificado = 0.
+    def _g(k):
+        v = m.get(k)
+        return v if v is not None and pd.notna(v) else np.nan
+
+    def _pos(x):
+        return x if pd.notna(x) and x > 0 else np.nan
+    arr_pg = _g("pagamento_arrendamento")
+    if pd.isna(arr_pg) and m.get("regime_contabil") == "IAS 17":
+        arr_pg = 0.0
+    rf = _g("resultado_financeiro")
+    m["desp_fin_liquida"] = -rf if pd.notna(rf) and rf < 0 else np.nan  # vazio com resultado financeiro >= 0
+    m["ebitda_menos_ir"] = _g("ebitda") - _g("ir_csll_pagos")
+    m["caixa_servico_divida"] = m["ebitda_menos_ir"] - arr_pg
+    m["caixa_servico_pos_capex"] = m["caixa_servico_divida"] - _g("capex_organico")
+    m["ebitda_ir_capex"] = m["ebitda_menos_ir"] - _g("capex_organico")
+    m["servico_divida_c_arrend"] = _g("servico_divida_pago") + arr_pg
+    m["cob_ebit_res_fin"] = _div(_g("ebit"), m["desp_fin_liquida"])
+    m["cob_juros_caixa"] = _div(m["caixa_servico_divida"], _pos(_g("juros_pagos")))
+    m["dscr_ebitda"] = _div(m["caixa_servico_divida"], _pos(_g("servico_divida_pago")))
+    m["dscr_pos_capex"] = _div(m["caixa_servico_pos_capex"], _pos(_g("servico_divida_pago")))
+    m["dscr_capex_arrend_den"] = _div(m["ebitda_ir_capex"], _pos(m["servico_divida_c_arrend"]))
     if anual:
         m["div_liq_ebitda_ifrs16"] = _div(m["div_liq_com_arrend"], m["ebitda"])
         m["div_liq_ebitda_pre_ifrs16"] = _div(m["div_liq_sem_arrend"], m["ebitda_pre_ifrs16"])
@@ -702,6 +774,16 @@ METRICAS = [  # (chave, rótulo, formato)
     ("capex_org_da", "Capex orgânico / D&A", "mult"),
     ("div_liq_ebitda_ifrs16", "DL c/ arrend / EBITDA IFRS 16", "mult"),
     ("div_liq_ebitda_pre_ifrs16", "DL s/ arrend / EBITDA pré-IFRS 16", "mult"),
+    ("resultado_financeiro", "Resultado financeiro líquido (R$ mm)", "num"),
+    ("ir_csll_pagos", "IR + CSLL pagos - DFC (R$ mm)", "num"),
+    ("juros_pagos", "Juros pagos da dívida, ex-arrend. - DFC (R$ mm)", "num"),
+    ("principal_pago", "Principal amortizado, ex-arrend. - DFC (R$ mm)", "num"),
+    ("servico_divida_pago", "Serviço da dívida pago (juros + principal) (R$ mm)", "num"),
+    ("cob_ebit_res_fin", "EBIT / resultado financeiro líquido", "mult"),
+    ("cob_juros_caixa", "(EBITDA - IR - arrend.) / juros pagos", "mult"),
+    ("dscr_ebitda", "(EBITDA - IR - arrend.) / (juros + principal)", "mult"),
+    ("dscr_pos_capex", "(EBITDA - IR - capex org. - arrend.) / (juros + principal)", "mult"),
+    ("dscr_capex_arrend_den", "(EBITDA - IR - capex org.) / (juros + principal + arrend.)", "mult"),
 ]
 
 
