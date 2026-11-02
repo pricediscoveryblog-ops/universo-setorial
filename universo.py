@@ -31,19 +31,21 @@ COMPOS: dict[tuple, tuple] = {}   # (cnpj, DT_REFER) -> (ações ON, ações PN)
 ENTREGAS: dict[tuple, tuple] = {}  # (cnpj, documento, DT_REFER) -> (primeira DT_RECEB, link do documento)
 SAIDA = cs.SAIDAS / "universo"
 
-FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "cpv", "da", "ebitda",
+FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "cpv", "da", "impairment", "ebitda",
           "pagamento_arrendamento", "pag_arrend_juros", "pag_arrend_principal", "ebitda_pre_ifrs16",
           "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
           "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
           "fcl_pos_arrend", "dividendos_pagos", "resultado_financeiro", "receitas_financeiras",
-          "despesas_financeiras", "ir_csll_pagos", "juros_pagos", "principal_pago", "servico_divida_pago"]
+          "despesas_financeiras", "ir_csll_pagos", "juros_pagos", "principal_pago", "servico_divida_pago",
+          "servico_div_arrend_misto", "capex_frota_fco", "baixa_frota_valor_contabil", "capex_frota_liquido"]
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
             "fornecedores"]
 # fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
-CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento"]
+CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento", "ir_csll_pagos", "juros_pagos",
+              "principal_pago", "servico_divida_pago", "servico_div_arrend_misto"]
 
 
 # --------------------------------------------------------------- utilidades
@@ -250,7 +252,7 @@ DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta",
              "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16", "roe_pl_final",
              # cobertura da dívida (bases e índices; ver cs.derivadas)
              "desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex",
-             "ebitda_ir_capex", "servico_divida_c_arrend", "cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda",
+             "ebitda_ir_capex", "servico_divida_c_arrend", "capex_cobertura", "cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda",
              "dscr_pos_capex", "dscr_capex_arrend_den"]
 
 
