@@ -716,8 +716,8 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
         if c_arr.any():
             m["servico_div_arrend_misto"] = total
             m["juros_pagos"] = m["principal_pago"] = m["servico_divida_pago"] = np.nan
-            notas.append("dívida e arrendamento nas mesmas linhas da DFC: só (EBITDA − IR − capex) ÷ "
-                         "(serviço + arrend.) é calculável")
+            notas.append("dívida e arrendamento nas mesmas linhas da DFC: só os índices com arrendamento no "
+                         "denominador são calculáveis")
         else:
             m["servico_divida_pago"] = total
             if (sdv["classe"] == "misto").any():
@@ -797,6 +797,7 @@ def derivadas(m: dict, anual: bool = True) -> dict:
     m["dscr_ebitda"] = _div(m["caixa_servico_divida"], _pos(_g("servico_divida_pago")))
     m["dscr_pos_capex"] = _div(m["caixa_servico_pos_capex"], _pos(_g("servico_divida_pago")))
     m["dscr_capex_arrend_den"] = _div(m["ebitda_ir_capex"], _pos(m["servico_divida_c_arrend"]))
+    m["dscr_ebitda_arrend_den"] = _div(m["ebitda_menos_ir"], _pos(m["servico_divida_c_arrend"]))
     if anual:
         m["div_liq_ebitda_ifrs16"] = _div(m["div_liq_com_arrend"], m["ebitda"])
         m["div_liq_ebitda_pre_ifrs16"] = _div(m["div_liq_sem_arrend"], m["ebitda_pre_ifrs16"])
@@ -856,6 +857,7 @@ METRICAS = [  # (chave, rótulo, formato)
     ("dscr_ebitda", "(EBITDA - IR - arrend.) / (juros + principal)", "mult"),
     ("dscr_pos_capex", "(EBITDA - IR - capex org. - arrend.) / (juros + principal)", "mult"),
     ("dscr_capex_arrend_den", "(EBITDA - IR - capex org.) / (juros + principal + arrend.)", "mult"),
+    ("dscr_ebitda_arrend_den", "(EBITDA - IR) / (juros + principal + arrend.)", "mult"),
 ]
 
 
