@@ -374,7 +374,11 @@ def preparar(df: pd.DataFrame) -> pd.DataFrame:
 
 # ------------------------------------------------------------ regras de busca
 RX_DA = re.compile(r"deprec|amortiz|exaust")
-RX_DA_EXC = re.compile(r"emprest|financ|debent|custo.{0,10}transac|agio|desagio|juro|capta")
+RX_DA_EXC = re.compile(r"emprest|(?<!nao )(?<!nao-)financ|debent|custo.{0,10}transac|agio|desagio|juro|capta")
+# Perda (reversão) por redução ao valor recuperável de ativos não financeiros (impairment, CPC 01)
+RX_IMPAIR = re.compile(r"impairment|valor recuperavel|recuperabilidade")
+RX_IMPAIR_EXC = re.compile(r"receber|clientes|credito|estoque|tributo|imposto|produtos? agricol|biologic|"
+                           r"(?<!nao )(?<!nao-)financeir|atualizacao monetaria|indenizac")
 RX_ARR = re.compile(r"arrendament|leasing|direito de uso")
 RX_ARR_PAG = re.compile(r"pag|amortiz|liquid|quitac|contraprestac|encargo")
 RX_ARR_EXC = re.compile(r"receb|receita|subarrend")
@@ -393,11 +397,23 @@ RX_VENDA_ATIVO = re.compile(r"imobilizad|intangive|ativos? permanente|ativos? de
 RX_AQUIS_EXC = re.compile(r"aplicac\w* financ|titulo|fundo|mutuo|emprestimo")
 # IR/CSLL pagos e serviço da dívida (DFC)
 RX_IR = re.compile(r"imposto de renda|contribuicao social|\bcsll\b|\birpj\b|\bir\b|(?:tributos|impostos) sobre (?:o )?lucro")
-RX_IR_EXC = re.compile(r"a pagar|a recolher|diferid|retid|receb|restitu|compensa|parcelament|\bpis\b|cofins|icms|\biss\b|inss|previd|faturament")
+RX_IR_EXC = re.compile(r"diferid|receb|restitu|compensa|parcelament|\bpis\b|cofins|icms|\biss\b|inss|previd|faturament")
+# variação de saldo ("a pagar", "a recolher") e retenção só ficam fora quando a linha não diz que houve pagamento
+RX_A_PAGAR = re.compile(r"a pagar|a recolher|\bretid")
+RX_PAGO = re.compile(r"\bpag(?:o|os|a|as|amentos?)\b|amortiz|liquidac|quitac")
 RX_JUROS = re.compile(r"juro|encargos? (?:financeir|da divida|de emprestim|sobre (?:emprestim|financ|debent))")
-RX_DIVIDA = re.compile(r"emprestim|financiament|debent|divida|notas? comercia|notas? promissori|\bbonds?\b|\bnotes\b|eurobond|\bcri\b|\bcra\b|\bccb\b|capital de giro|finame|bndes|cedulas? de credito|titulos? de divida|pre-?pagamento de export|\bppe\b|\bacc\b|\bace\b|finimp")
+RX_DIVIDA = re.compile(r"emprestim|financiament|debent|divida|notas? comercia|notas? promissori|\bbonds?\b|\bnotes\b|eurobond|\bcri\b|\bcra\b|\bccb\b|capital de giro|finame|bndes|cedulas? de credito|titulos? de divida|pre-?pagamento de export|\bppe\b|\bacc\b|\bace\b|finimp|"
+                       r"\bempres\w*\.|\bfinanc\w*\.|\bdeben?\w*\.")  # abreviações ("emprés.", "financ.", "debên.")
+# arrendamento dentro de linha de dívida (inclui abreviação "arrends.")
+RX_ARR_SD = re.compile(r"arrendament|leasing|direito de uso|\barrends?\.")
+RX_SACADO = re.compile(r"risco sac|convenio|forfait")
 RX_SD_VERBO = re.compile(r"amortiz|pag|liquid|quitac|resgat|recompra|reembols|devoluc")
-RX_SD_EXC = re.compile(r"capital proprio|\bjcp\b|dividend|receb|a pagar|a recolher|apropriad|provis|incorrid|derivativ|swap|hedge|capta|ingress|obtenc|acoes|tesouraria|risco sacado|convenio|forfait|custo")
+RX_SD_EXC = re.compile(r"capital proprio|\bjcp\b|dividend|receb|apropriad|provis|incorrid|derivativ|swap|hedge|capta|ingress|obtenc|acoes|tesouraria|custo")
+# Locadoras: compra de frota/ativo para locação no FCO e valor contábil dos ativos vendidos (ajuste não-caixa)
+RX_FROTA_VERBO = re.compile(r"compra|aquisi|adic|investimento|renovac")
+RX_FROTA = re.compile(r"imobilizad|veiculo|frota|\bcarros?\b|ativos? (?:operaciona|para loca|de loca)|bens (?:para|de) loca|locac")
+RX_FROTA_EXC = re.compile(r"titulo|aplicac|valores mobiliarios|estoque|venda|aliena|receb|ativos? de contrato|concess|direito de uso|arrend")
+RX_BAIXA_FROTA = re.compile(r"desmobiliz|desativ|seminov|(?:custo|baixa|valor residual|valor contabil).{0,40}(?:veiculo|carro|frota|ativos? (?:operaciona|de loca|para loca))")
 RX_SD_MISTO = re.compile(r"principal|(?:emprestim|financiament|debent|divida)\w* e (?:juro|encargo)|juros e (?:amortiz|principal)")
 
 
@@ -506,10 +522,20 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
         m["da"] = da["VL"].sum() if len(da) else np.nan
         if da.empty:
             notas.append("D&A não identificada na DFC")
+        elif da["DESC"].str.contains(RX_IMPAIR).any():
+            notas.append("D&A e impairment na mesma linha da DFC (impairment incluído na D&A)")
+        # Impairment em linha própria (não-caixa): somado ao EBITDA. Fica fora o que já entrou na D&A e as
+        # perdas de ativos financeiros, recebíveis, estoques, tributos e ativos biológicos.
+        imp = aj[aj["DESC"].str.contains(RX_IMPAIR) & ~aj["DESC"].str.contains(RX_IMPAIR_EXC)
+                 & ~aj["DESC"].str.contains(RX_DA)]
+        imp = topo(imp)
+        registrar(imp, "impairment")
+        m["impairment"] = float(imp["VL"].sum()) if len(imp) else 0.0
     else:
-        m["da"] = np.nan
+        m["da"] = m["impairment"] = np.nan
         notas.append("DFC pelo método direto: D&A indisponível")
-    m["ebitda"] = m["ebit"] + m["da"]
+    # EBITDA = EBIT + D&A + impairment (perda ou reversão ao valor recuperável de ativos não financeiros)
+    m["ebitda"] = m["ebit"] + m["da"] + (m["impairment"] if pd.notna(m["impairment"]) else 0.0)
 
     # Pagamentos de arrendamento — DFC inteira, exceto ajustes não-caixa (6.01.01)
     pg = dfc[~dfc["CD_CONTA"].str.startswith("6.01.01")]
@@ -608,6 +634,27 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     if len(fco_ac):
         notas.append("ativo de contrato no FCO: parte do investimento em concessão pode estar no operacional (não somado ao capex)")
 
+    # Locadoras: compra de frota/ativo para locação classificada no FCO (fora do bloco 6.02), líquida do valor
+    # contábil dos ativos vendidos (ajuste não-caixa, ex.: "custo de venda de ativos desmobilizados"), porque a
+    # receita da venda já está no EBITDA. Entra só no capex dos índices de cobertura (o FCO já a desconta).
+    fr = dfc[dfc["CD_CONTA"].str.match(r"^6\.01\.0[23]\.") & (dfc["VL"] < 0)]
+    fr = topo(fr[fr["DESC"].str.contains(RX_FROTA_VERBO) & fr["DESC"].str.contains(RX_FROTA)
+                 & ~fr["DESC"].str.contains(RX_FROTA_EXC)])
+    registrar(fr, "capex_frota_fco")
+    if dfc.empty:
+        m["capex_frota_fco"] = m["baixa_frota_valor_contabil"] = m["capex_frota_liquido"] = np.nan
+    elif len(fr):
+        bx = dfc[dfc["CD_CONTA"].str.startswith("6.01.01") & (dfc["VL"] > 0)]
+        bx = topo(bx[bx["DESC"].str.contains(RX_BAIXA_FROTA)])
+        registrar(bx, "baixa_frota_valor_contabil")
+        m["capex_frota_fco"] = float(-fr["VL"].sum())
+        m["baixa_frota_valor_contabil"] = float(bx["VL"].sum()) if len(bx) else 0.0
+        m["capex_frota_liquido"] = m["capex_frota_fco"] - m["baixa_frota_valor_contabil"]
+        if not len(bx):
+            notas.append("capex de frota/imobilizado no FCO sem valor contábil vendido identificado (usado bruto)")
+    else:
+        m["capex_frota_fco"] = m["baixa_frota_valor_contabil"] = m["capex_frota_liquido"] = 0.0
+
     # Dividendos e JCP pagos aos acionistas da controladora (saída de caixa; positivo = pago).
     # Exclui ajustes não-caixa, variação de "dividendos a pagar", investimento (dividendos recebidos)
     # e pagamentos a não controladores.
@@ -630,7 +677,8 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     # parcelamentos (que costumam misturar outros tributos).
     tx = dfc[~dfc["CD_CONTA"].str.match(r"^6\.01\.01|^6\.02") & (dfc["VL"] < 0)]
     tx = topo(tx[tx["DESC"].str.contains(RX_IR) & tx["DESC"].str.contains(r"pag|recolhid|liquid")
-                 & ~tx["DESC"].str.contains(RX_IR_EXC)])
+                 & ~tx["DESC"].str.contains(RX_IR_EXC)
+                 & ~(tx["DESC"].str.contains(RX_A_PAGAR) & ~tx["DESC"].str.contains(RX_PAGO))])
     registrar(tx, "ir_csll_pagos")
     if dfc.empty:
         m["ir_csll_pagos"] = np.nan
@@ -641,28 +689,43 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
 
     # Serviço da dívida pago, ex-arrendamento (positivo = pago): juros (operacional ou financiamento)
     # e amortização de principal (financiamento). Linha que junta principal e juros entra só no total.
+    # Linha que junta dívida e arrendamento ("amortização de empréstimos, arrendamentos e debêntures") vai para
+    # servico_div_arrend_misto: só o índice com arrendamento no denominador é calculável.
     sdv = dfc[dfc["CD_CONTA"].str.match(r"^6\.0[13]\.") & ~dfc["CD_CONTA"].str.startswith("6.01.01")
               & (dfc["VL"] < 0)]
-    sdv = sdv[~sdv["DESC"].str.contains(RX_ARR) & ~sdv["DESC"].str.contains(RX_SD_EXC)]
+    e_div = sdv["DESC"].str.contains(RX_DIVIDA)
+    sdv = sdv[~(sdv["DESC"].str.contains(RX_ARR_SD) & ~e_div) & ~(sdv["DESC"].str.contains(RX_SACADO) & ~e_div)
+              & ~sdv["DESC"].str.contains(RX_SD_EXC)
+              & ~(sdv["DESC"].str.contains(RX_A_PAGAR) & ~sdv["DESC"].str.contains(RX_PAGO))]
     no_fin = sdv["CD_CONTA"].str.startswith("6.03")
     e_jur = sdv["DESC"].str.contains(RX_JUROS) & (sdv["DESC"].str.contains(RX_SD_VERBO) | no_fin)
     e_pri = no_fin & sdv["DESC"].str.contains(RX_DIVIDA) & sdv["DESC"].str.contains(RX_SD_VERBO) \
         & ~sdv["DESC"].str.contains(RX_JUROS)
     sdv = topo(sdv[e_jur | e_pri]).copy()
+    m["servico_div_arrend_misto"] = np.nan
     if dfc.empty:
         m["juros_pagos"] = m["principal_pago"] = m["servico_divida_pago"] = np.nan
     else:
         sdv["classe"] = np.where(~sdv["DESC"].str.contains(RX_JUROS), "principal",
                                  np.where(sdv["DESC"].str.contains(RX_SD_MISTO), "misto", "juros"))
+        c_arr = sdv["DESC"].str.contains(RX_ARR_SD)
         for c in ("juros", "principal", "misto"):
-            registrar(sdv[sdv["classe"] == c], f"servico_divida:{c}")
-        m["servico_divida_pago"] = float(-sdv["VL"].sum()) if len(sdv) else 0.0
-        if (sdv["classe"] == "misto").any():
-            m["juros_pagos"] = m["principal_pago"] = np.nan
-            notas.append("principal e juros da dívida em linha única: só o serviço total é confiável")
+            registrar(sdv[(sdv["classe"] == c) & ~c_arr], f"servico_divida:{c}")
+            registrar(sdv[(sdv["classe"] == c) & c_arr], f"servico_divida:{c}+arrendamento")
+        total = float(-sdv["VL"].sum()) if len(sdv) else 0.0
+        if c_arr.any():
+            m["servico_div_arrend_misto"] = total
+            m["juros_pagos"] = m["principal_pago"] = m["servico_divida_pago"] = np.nan
+            notas.append("dívida e arrendamento nas mesmas linhas da DFC: só (EBITDA − IR − capex) ÷ "
+                         "(serviço + arrend.) é calculável")
         else:
-            m["juros_pagos"] = float(-sdv.loc[sdv["classe"] == "juros", "VL"].sum())
-            m["principal_pago"] = float(-sdv.loc[sdv["classe"] == "principal", "VL"].sum())
+            m["servico_divida_pago"] = total
+            if (sdv["classe"] == "misto").any():
+                m["juros_pagos"] = m["principal_pago"] = np.nan
+                notas.append("principal e juros da dívida em linha única: só o serviço total é confiável")
+            else:
+                m["juros_pagos"] = float(-sdv.loc[sdv["classe"] == "juros", "VL"].sum())
+                m["principal_pago"] = float(-sdv.loc[sdv["classe"] == "principal", "VL"].sum())
         if not len(sdv):
             notas.append("nenhum pagamento de juros/principal de dívida identificado na DFC (assumido 0)")
 
@@ -719,9 +782,16 @@ def derivadas(m: dict, anual: bool = True) -> dict:
     m["desp_fin_liquida"] = -rf if pd.notna(rf) and rf < 0 else np.nan  # vazio com resultado financeiro >= 0
     m["ebitda_menos_ir"] = _g("ebitda") - _g("ir_csll_pagos")
     m["caixa_servico_divida"] = m["ebitda_menos_ir"] - arr_pg
-    m["caixa_servico_pos_capex"] = m["caixa_servico_divida"] - _g("capex_organico")
-    m["ebitda_ir_capex"] = m["ebitda_menos_ir"] - _g("capex_organico")
-    m["servico_divida_c_arrend"] = _g("servico_divida_pago") + arr_pg
+    # capex da cobertura = capex orgânico (6.02) + compra de frota no FCO líquida do valor contábil vendido
+    cf = _g("capex_frota_liquido")
+    m["capex_cobertura"] = _g("capex_organico") + (cf if pd.notna(cf) else 0.0)
+    m["caixa_servico_pos_capex"] = m["caixa_servico_divida"] - m["capex_cobertura"]
+    m["ebitda_ir_capex"] = m["ebitda_menos_ir"] - m["capex_cobertura"]
+    mx = _g("servico_div_arrend_misto")
+    if pd.notna(mx):  # arrendamento dentro das linhas de dívida da DFC
+        m["servico_divida_c_arrend"] = mx + (arr_pg if pd.notna(arr_pg) else 0.0)
+    else:
+        m["servico_divida_c_arrend"] = _g("servico_divida_pago") + arr_pg
     m["cob_ebit_res_fin"] = _div(_g("ebit"), m["desp_fin_liquida"])
     m["cob_juros_caixa"] = _div(m["caixa_servico_divida"], _pos(_g("juros_pagos")))
     m["dscr_ebitda"] = _div(m["caixa_servico_divida"], _pos(_g("servico_divida_pago")))
@@ -741,6 +811,7 @@ METRICAS = [  # (chave, rótulo, formato)
     ("lucro_bruto", "Lucro bruto (R$ mm)", "num"),
     ("ebit", "EBIT (R$ mm)", "num"),
     ("da", "D&A (R$ mm)", "num"),
+    ("impairment", "Impairment - perda/reversão ao valor recuperável (R$ mm)", "num"),
     ("ebitda", "EBITDA reportado/IFRS 16 (R$ mm)", "num"),
     ("pagamento_arrendamento", "Pagamentos de arrendamento - DFC (R$ mm)", "num"),
     ("ebitda_pre_ifrs16", "EBITDA pré-IFRS 16 (R$ mm)", "num"),
@@ -779,6 +850,7 @@ METRICAS = [  # (chave, rótulo, formato)
     ("juros_pagos", "Juros pagos da dívida, ex-arrend. - DFC (R$ mm)", "num"),
     ("principal_pago", "Principal amortizado, ex-arrend. - DFC (R$ mm)", "num"),
     ("servico_divida_pago", "Serviço da dívida pago (juros + principal) (R$ mm)", "num"),
+    ("capex_frota_liquido", "Capex de frota no FCO, líq. do valor contábil vendido (R$ mm)", "num"),
     ("cob_ebit_res_fin", "EBIT / resultado financeiro líquido", "mult"),
     ("cob_juros_caixa", "(EBITDA - IR - arrend.) / juros pagos", "mult"),
     ("dscr_ebitda", "(EBITDA - IR - arrend.) / (juros + principal)", "mult"),
