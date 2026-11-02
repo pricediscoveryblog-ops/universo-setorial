@@ -66,6 +66,7 @@ METRICAS = {
     "dscr_ebitda": ("(EBITDA − IR − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
     "dscr_pos_capex": ("(EBITDA − IR − capex − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
     "dscr_capex_arrend_den": ("(EBITDA − IR − capex) ÷ (juros + principal + arrend.)", "x", "Cobertura da dívida"),
+    "dscr_ebitda_arrend_den": ("(EBITDA − IR) ÷ (juros + principal + arrend.)", "x", "Cobertura da dívida"),
     # crescimento contra o mesmo período do ano anterior (anual: ano anterior; LTM e trimestral: 4 trimestres antes)
     "cresc_receita": ("Crescimento da receita líquida (a/a)", "pct", "Crescimento"),
     "cresc_lucro_bruto": ("Crescimento do lucro bruto (a/a)", "pct", "Crescimento"),
@@ -112,15 +113,17 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "dscr_ebitda": ("caixa_servico_divida", "servico_divida_pago"),
          "dscr_pos_capex": ("caixa_servico_pos_capex", "servico_divida_pago"),
          "dscr_capex_arrend_den": ("ebitda_ir_capex", "servico_divida_c_arrend"),
+         "dscr_ebitda_arrend_den": ("ebitda_menos_ir", "servico_divida_c_arrend"),
          # múltiplos do setor = Σ valor de mercado (ou EV) ÷ Σ fundamento, na mesma data
          "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
          "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
          "ev_receita_com_arrend": ("ev_com_arrend", "m_receita_12m"), "ev_receita_sem_arrend": ("ev_sem_arrend", "m_receita_12m"),
          "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
 # bases dos índices de cobertura (não aparecem como métrica; usadas no agregado do setor)
-AUX_COB = ["desp_fin_liquida", "caixa_servico_divida", "caixa_servico_pos_capex", "ebitda_ir_capex",
+AUX_COB = ["desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex", "ebitda_ir_capex",
            "servico_divida_c_arrend"]
-AGREG_DEN_POS = {"cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda", "dscr_pos_capex", "dscr_capex_arrend_den"}
+AGREG_DEN_POS = {"cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda", "dscr_pos_capex", "dscr_capex_arrend_den",
+                 "dscr_ebitda_arrend_den"}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -2150,11 +2153,12 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   frota/ativo para locação no FCO, líquida do valor contábil dos ativos vendidos, caso das locadoras):
   EBIT ÷ resultado financeiro líquido (vazio se o resultado financeiro for ≥ 0);
   (EBITDA − IR − arrend.) ÷ juros; (EBITDA − IR − arrend.) ÷ (juros + principal);
-  (EBITDA − IR − capex − arrend.) ÷ (juros + principal); (EBITDA − IR − capex) ÷ (juros + principal + arrend.).
+  (EBITDA − IR − capex − arrend.) ÷ (juros + principal); (EBITDA − IR − capex) ÷ (juros + principal + arrend.);
+  (EBITDA − IR) ÷ (juros + principal + arrend.).
   Vazios com denominador ≤ 0 (empresa sem dívida paga no período). Linha da DFC que junta principal e juros
   entra só no serviço total: o índice só de juros fica vazio. Juros capitalizados no investimento (6.02) ficam
   fora. IR, juros e principal não identificados na DFC = 0 (com nota). Setor = Σ numerador ÷ Σ denominador.
-  Dívida e arrendamento na mesma linha da DFC: só (EBITDA − IR − capex) ÷ (serviço + arrend.) é calculado; os
+  Dívida e arrendamento na mesma linha da DFC: só os índices com arrendamento no denominador são calculados; os
   índices com arrendamento no numerador ficam vazios. IR pago aceita linhas "pagos e retidos".
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
 - Graus de alavancagem também na visão do setor (por empresa e, sem recorte, por setor sobre os agregados).
