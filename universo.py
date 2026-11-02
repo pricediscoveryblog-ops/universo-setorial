@@ -253,7 +253,7 @@ DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta",
              # cobertura da dívida (bases e índices; ver cs.derivadas)
              "desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex",
              "ebitda_ir_capex", "servico_divida_c_arrend", "capex_cobertura", "cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda",
-             "dscr_pos_capex", "dscr_capex_arrend_den"]
+             "dscr_pos_capex", "dscr_capex_arrend_den", "dscr_ebitda_arrend_den"]
 
 
 def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
