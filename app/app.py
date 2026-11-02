@@ -21,6 +21,7 @@ METRICAS = {
     "lucro_bruto": ("Lucro bruto", "mm", "Resultado"),
     "ebit": ("EBIT", "mm", "Resultado"),
     "da": ("D&A", "mm", "Resultado"),
+    "impairment": ("Impairment (perda/reversão ao valor recuperável)", "mm", "Resultado"),
     "ebitda": ("EBITDA (IFRS 16)", "mm", "Resultado"),
     "ebitda_pre_ifrs16": ("EBITDA pré-IFRS 16", "mm", "Resultado"),
     "lucro_liquido": ("Lucro líquido", "mm", "Resultado"),
@@ -38,6 +39,7 @@ METRICAS = {
     "juros_pagos": ("Juros pagos da dívida (ex-arrend.)", "mm", "Caixa e investimento"),
     "principal_pago": ("Principal amortizado (ex-arrend.)", "mm", "Caixa e investimento"),
     "servico_divida_pago": ("Serviço da dívida pago (juros + principal)", "mm", "Caixa e investimento"),
+    "capex_frota_liquido": ("Capex de frota no FCO (líq. do valor contábil vendido)", "mm", "Caixa e investimento"),
     "caixa": ("Caixa + aplicações CP", "mm", "Balanço e dívida"),
     "divida_bruta_ex_arrend": ("Dívida bruta ex-arrendamento", "mm", "Balanço e dívida"),
     "passivo_arrendamento": ("Passivo de arrendamento", "mm", "Balanço e dívida"),
@@ -62,8 +64,8 @@ METRICAS = {
     "cob_ebit_res_fin": ("EBIT ÷ resultado financeiro líquido", "x", "Cobertura da dívida"),
     "cob_juros_caixa": ("(EBITDA − IR − arrend.) ÷ juros pagos", "x", "Cobertura da dívida"),
     "dscr_ebitda": ("(EBITDA − IR − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
-    "dscr_pos_capex": ("(EBITDA − IR − capex org. − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
-    "dscr_capex_arrend_den": ("(EBITDA − IR − capex org.) ÷ (juros + principal + arrend.)", "x", "Cobertura da dívida"),
+    "dscr_pos_capex": ("(EBITDA − IR − capex − arrend.) ÷ (juros + principal)", "x", "Cobertura da dívida"),
+    "dscr_capex_arrend_den": ("(EBITDA − IR − capex) ÷ (juros + principal + arrend.)", "x", "Cobertura da dívida"),
     # crescimento contra o mesmo período do ano anterior (anual: ano anterior; LTM e trimestral: 4 trimestres antes)
     "cresc_receita": ("Crescimento da receita líquida (a/a)", "pct", "Crescimento"),
     "cresc_lucro_bruto": ("Crescimento do lucro bruto (a/a)", "pct", "Crescimento"),
@@ -2126,7 +2128,9 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
 - *LTM*: soma dos últimos 4 trimestres consecutivos + balanço do último trimestre.
 
 **Definições próprias (não são números reportados pelas empresas).**
-- EBITDA = EBIT (DRE 3.05) + D&A da DFC. Não inclui os ajustes que as empresas divulgam.
+- EBITDA = EBIT (DRE 3.05) + D&A + impairment da DFC (perda ou reversão ao valor recuperável de ativos não
+  financeiros, inclusive ágio; fora recebíveis, estoques, tributos e ativos biológicos). Quando a DFC junta D&A e
+  impairment numa linha, o impairment está dentro da D&A (com nota). Não inclui outros ajustes que as empresas divulgam.
 - EBITDA pré-IFRS 16 = EBITDA − pagamentos de arrendamento (principal + juros) da DFC; antes de 2019 = EBITDA.
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
 - Capex orgânico = saídas para imobilizado (inclui propriedade para investimento), intangível e ativo de
@@ -2142,13 +2146,16 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
 - Conversão de caixa = FCO ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
 - Cobertura da dívida (fluxos do mesmo período; IR = IR + CSLL **pagos** na DFC; arrend. = principal + juros de
-  arrendamento pagos; juros e principal = dívida ex-arrendamento, pagos na DFC; capex = capex orgânico):
+  arrendamento pagos; juros e principal = dívida ex-arrendamento, pagos na DFC; capex = capex orgânico + compra de
+  frota/ativo para locação no FCO, líquida do valor contábil dos ativos vendidos, caso das locadoras):
   EBIT ÷ resultado financeiro líquido (vazio se o resultado financeiro for ≥ 0);
   (EBITDA − IR − arrend.) ÷ juros; (EBITDA − IR − arrend.) ÷ (juros + principal);
   (EBITDA − IR − capex − arrend.) ÷ (juros + principal); (EBITDA − IR − capex) ÷ (juros + principal + arrend.).
   Vazios com denominador ≤ 0 (empresa sem dívida paga no período). Linha da DFC que junta principal e juros
   entra só no serviço total: o índice só de juros fica vazio. Juros capitalizados no investimento (6.02) ficam
   fora. IR, juros e principal não identificados na DFC = 0 (com nota). Setor = Σ numerador ÷ Σ denominador.
+  Dívida e arrendamento na mesma linha da DFC: só (EBITDA − IR − capex) ÷ (serviço + arrend.) é calculado; os
+  índices com arrendamento no numerador ficam vazios. IR pago aceita linhas "pagos e retidos".
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
 - Graus de alavancagem também na visão do setor (por empresa e, sem recorte, por setor sobre os agregados).
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
