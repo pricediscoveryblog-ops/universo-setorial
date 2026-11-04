@@ -1796,8 +1796,10 @@ def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
         return pd.DataFrame()
     e = pd.concat(partes, ignore_index=True)
     e["cnpj"] = e["cnpj"].astype(str).str.zfill(14)
-    e["dt_refer"] = pd.to_datetime(e["dt_refer"], errors="coerce")
-    e["dt_receb"] = pd.to_datetime(e["dt_receb"], errors="coerce")
+    # as duas fontes gravam formatos diferentes (só data nos Dados Abertos; data e hora na consulta ENET):
+    # format="ISO8601" lê os dois. Sem ele, o pandas 2+ deduz o formato pela 1a linha e anula as demais.
+    e["dt_refer"] = pd.to_datetime(e["dt_refer"], errors="coerce", format="ISO8601")
+    e["dt_receb"] = pd.to_datetime(e["dt_receb"], errors="coerce", format="ISO8601")
     e = e.dropna(subset=["dt_refer", "dt_receb"]).sort_values("dt_receb")
     return e.drop_duplicates(["cnpj", "documento", "dt_refer"])     # primeira entrega de cada documento
 
