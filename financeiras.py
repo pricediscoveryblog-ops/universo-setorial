@@ -52,6 +52,8 @@ def _nivel(c: str) -> int:
 
 
 def _topo(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
     cods = set(df["cd_conta"])
     def anc(c):
         p = c.split(".")
@@ -66,17 +68,17 @@ def _um(df, rx, nivel=None, excl=None, prefixo=None):
         d = d[d["cd_conta"].str.startswith(prefixo)]
     if nivel:
         d = d[d["nivel"] == nivel]
-    d = d[d["d"].str.contains(rx)]
+    d = d.loc[d["d"].str.contains(rx).astype(bool)]
     if excl:
-        d = d[~d["d"].str.contains(excl)]
+        d = d.loc[~d["d"].str.contains(excl).astype(bool)]
     return d.sort_values("cd_conta").iloc[0] if len(d) else None
 
 
 def _soma(df, rx, prefixo=None, excl=None):
     d = df if prefixo is None else df[df["cd_conta"].str.startswith(prefixo)]
-    d = d[d["d"].str.contains(rx)]
+    d = d.loc[d["d"].str.contains(rx).astype(bool)]
     if excl:
-        d = d[~d["d"].str.contains(excl)]
+        d = d.loc[~d["d"].str.contains(excl).astype(bool)]
     d = _topo(d)
     return (d["valor_rs_mm"].sum() if len(d) else np.nan), d
 
@@ -90,26 +92,33 @@ def abertura_ativo(bpa: pd.DataFrame, m: dict, reg) -> None:
     líquida − TVM). A provisão é somada de volta à carteira quando está DENTRO da conta de crédito (COSIF: conta
     de crédito líquida, com a provisão como subconta); quando é conta irmã da carteira (IFRS: provisão ao lado
     das operações de crédito), a carteira já está bruta e a provisão só entra no saldo."""
+    for k in ("carteira_credito", "carteira_credito_bruta", "provisao_carteira", "tvm", "demais_ativos"):
+        m[k] = np.nan
+    if bpa.empty:
+        return
     cred, dcred = _soma(bpa, RX_CRED, excl=RX_CRED_EXCL)
     m["carteira_credito"] = cred if (pd.notna(cred) and cred > 0) else np.nan
     reg("carteira_credito", dcred)
-    for k in ("carteira_credito_bruta", "provisao_carteira", "tvm", "demais_ativos"):
-        m[k] = np.nan
     if pd.notna(m["carteira_credito"]):
         prov = _topo(bpa[bpa["d"].str.contains(RX_PROV) & (bpa["valor_rs_mm"] < 0)])
         cods = list(dcred["cd_conta"])
         pais = {_pai(c) for c in cods}
-        dentro = prov[prov["cd_conta"].map(lambda c: any(c.startswith(x + ".") for x in cods))]
-        irma = prov[~prov.index.isin(dentro.index) & prov["cd_conta"].map(_pai).isin(pais)]
+        # máscaras booleanas explícitas: com prov vazio, prov[Series vazia] seria seleção de colunas
+        em_cred = prov["cd_conta"].map(lambda c: any(c.startswith(x + ".") for x in cods)).astype(bool)
+        dentro = prov.loc[em_cred]
+        irma = prov.loc[~em_cred & prov["cd_conta"].map(_pai).isin(pais).astype(bool)]
         m["carteira_credito_bruta"] = cred - dentro["valor_rs_mm"].sum()
-        m["provisao_carteira"] = -(dentro["valor_rs_mm"].sum() + irma["valor_rs_mm"].sum())
+        # sem conta de provisão identificada: saldo vazio (não zero)
+        m["provisao_carteira"] = -(dentro["valor_rs_mm"].sum() + irma["valor_rs_mm"].sum()) if len(dentro) + len(irma) \
+            else np.nan
         reg("provisao_carteira", pd.concat([dentro, irma]))
     tvm, dtvm = _soma(bpa, RX_TVM, excl=RX_TVM_EXCL)
     if pd.notna(tvm) and tvm > 0:
         m["tvm"] = tvm
         reg("tvm", dtvm)
     if pd.notna(m["carteira_credito_bruta"]) and pd.notna(m["tvm"]) and pd.notna(m.get("ativo_total")):
-        dem = m["ativo_total"] - (m["carteira_credito_bruta"] - m["provisao_carteira"]) - m["tvm"]
+        prov_ = m["provisao_carteira"] if pd.notna(m["provisao_carteira"]) else 0.0
+        dem = m["ativo_total"] - (m["carteira_credito_bruta"] - prov_) - m["tvm"]
         m["demais_ativos"] = dem if dem >= 0 else np.nan  # negativo = sobreposição na captura: não informa
 
 
