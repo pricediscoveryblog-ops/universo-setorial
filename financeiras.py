@@ -31,7 +31,7 @@ RAZOES = ["roe", "roa", "pl_ativo", "margem_liquida", "indice_eficiencia", "cust
           "payout", "carteira_bruta_ativo", "tvm_ativo", "demais_ativos_ativo", "cobertura_carteira"]
 
 RX_CRED = (r"operacoes de credito|emprestimos e adiantamentos a clientes|emprestimos e recebiveis de clientes|"
-           r"carteira de credito")
+           r"carteira de credito|^operacoes de arrendamento")
 RX_CRED_EXCL = r"provisao|perda|cessao|arrendamento mercantil a receber"
 # provisão para perdas com crédito (saldo redutor do ativo)
 RX_PROV = (r"provisao para creditos|provisao para perdas|liquidacao duvidosa|perdas? esperadas?|"
@@ -40,6 +40,10 @@ RX_PROV = (r"provisao para creditos|provisao para perdas|liquidacao duvidosa|per
 RX_TVM = (r"titulos e valores mobiliarios|instrumentos financeiros derivativos|^derivativos|"
           r"aplicacoes em titulos")
 RX_TVM_EXCL = r"provisao|perda"
+# grupos IFRS de ativos financeiros a valor justo: entram inteiros no TVM (títulos e derivativos), porque alguns
+# bancos (ex.: BTG) informam só o total do grupo, sem abrir as subcontas
+RX_VJ = r"^ativos financeiros (?:avaliados )?(?:a|ao) valor justo"
+RX_CA = r"^ativos financeiros (?:avaliados )?(?:a|ao) custo amortizado"
 
 
 def _n(s) -> str:
@@ -91,16 +95,30 @@ def abertura_ativo(bpa: pd.DataFrame, m: dict, reg) -> None:
     """Carteira de crédito bruta, provisão (saldo), TVM e derivativos e demais ativos (= ativo total − carteira
     líquida − TVM). A provisão é somada de volta à carteira quando está DENTRO da conta de crédito (COSIF: conta
     de crédito líquida, com a provisão como subconta); quando é conta irmã da carteira (IFRS: provisão ao lado
-    das operações de crédito), a carteira já está bruta e a provisão só entra no saldo."""
+    das operações de crédito), a carteira já está bruta e a provisão só entra no saldo.
+    TVM = grupos IFRS a valor justo (inteiros) + contas de TVM/derivativos fora deles (ex.: TVM ao custo amortizado).
+    Sem abertura do grupo ao custo amortizado (subcontas zeradas, ex.: Santander), carteira e TVM ficam vazios."""
     for k in ("carteira_credito", "carteira_credito_bruta", "provisao_carteira", "tvm", "demais_ativos"):
         m[k] = np.nan
+    notas = []
+    m["nota_ativo"] = ""
     if bpa.empty:
+        return
+    # grupo ao custo amortizado sem abertura: não dá para separar carteira de TVM
+    ca = _topo(bpa.loc[bpa["d"].str.contains(RX_CA).astype(bool) & (bpa["valor_rs_mm"] > 0)])
+    sem_abertura = any(
+        bpa.loc[bpa["cd_conta"].str.startswith(c + "."), "valor_rs_mm"].abs().sum() < 0.01 * v
+        for c, v in zip(ca["cd_conta"], ca["valor_rs_mm"]))
+    if sem_abertura:
+        m["nota_ativo"] = ("ativos ao custo amortizado sem abertura no ITR/DFP (subcontas zeradas): carteira e TVM "
+                           "não separáveis")
         return
     cred, dcred = _soma(bpa, RX_CRED, excl=RX_CRED_EXCL)
     m["carteira_credito"] = cred if (pd.notna(cred) and cred > 0) else np.nan
     reg("carteira_credito", dcred)
     if pd.notna(m["carteira_credito"]):
-        prov = _topo(bpa[bpa["d"].str.contains(RX_PROV) & (bpa["valor_rs_mm"] < 0)])
+        prov_todas = bpa.loc[bpa["d"].str.contains(RX_PROV).astype(bool)]
+        prov = _topo(prov_todas.loc[prov_todas["valor_rs_mm"] < 0])
         cods = list(dcred["cd_conta"])
         pais = {_pai(c) for c in cods}
         # máscaras booleanas explícitas: com prov vazio, prov[Series vazia] seria seleção de colunas
@@ -112,14 +130,24 @@ def abertura_ativo(bpa: pd.DataFrame, m: dict, reg) -> None:
         m["provisao_carteira"] = -(dentro["valor_rs_mm"].sum() + irma["valor_rs_mm"].sum()) if len(dentro) + len(irma) \
             else np.nan
         reg("provisao_carteira", pd.concat([dentro, irma]))
-    tvm, dtvm = _soma(bpa, RX_TVM, excl=RX_TVM_EXCL)
-    if pd.notna(tvm) and tvm > 0:
+        if not len(dentro) + len(irma):
+            notas.append("provisão zerada no balanço: carteira informada líquida de provisão (bruta = líquida)"
+                         if prov_todas["cd_conta"].map(_pai).isin(pais).any() else
+                         "provisão não aberta no balanço: a carteira pode estar líquida de provisão")
+    vj = _topo(bpa.loc[bpa["d"].str.contains(RX_VJ).astype(bool) & (bpa["valor_rs_mm"] > 0)])
+    vj_cods = list(vj["cd_conta"])
+    _, dtvm = _soma(bpa, RX_TVM, excl=RX_TVM_EXCL)
+    if len(dtvm):
+        dtvm = dtvm.loc[~dtvm["cd_conta"].map(lambda c: any(c.startswith(x + ".") for x in vj_cods)).astype(bool)]
+    tvm = vj["valor_rs_mm"].sum() + (dtvm["valor_rs_mm"].sum() if len(dtvm) else 0.0)
+    if tvm > 0:
         m["tvm"] = tvm
-        reg("tvm", dtvm)
+        reg("tvm", pd.concat([vj, dtvm]))
     if pd.notna(m["carteira_credito_bruta"]) and pd.notna(m["tvm"]) and pd.notna(m.get("ativo_total")):
         prov_ = m["provisao_carteira"] if pd.notna(m["provisao_carteira"]) else 0.0
         dem = m["ativo_total"] - (m["carteira_credito_bruta"] - prov_) - m["tvm"]
         m["demais_ativos"] = dem if dem >= 0 else np.nan  # negativo = sobreposição na captura: não informa
+    m["nota_ativo"] = "; ".join(notas)
 
 
 def metricas_documento(g: pd.DataFrame) -> tuple[dict, list]:
@@ -296,7 +324,7 @@ def calcular_financeiras(estrutura: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
             return {"cnpj": cnpj, "tipo": tipo, "exercicio": s["exercicio"], "trimestre": s["trimestre"],
                     "periodo": periodo, "dt_ini": s["dt_ini"].date(), "dt_fim": s["dt_fim"].date(), "fonte": fonte,
                     **s["ident"], **{k: r.get(k) for k in ["layout_dfp"] + FLUXOS + ESTOQUES + RAZOES},
-                    "notas": "; ".join(n for n in notas if n)}
+                    "notas": "; ".join(n for n in notas + [m.get("nota_ativo") or ""] if n)}
 
         # ---- anual: DFP
         for s in snaps:
