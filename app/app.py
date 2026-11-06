@@ -26,7 +26,10 @@ METRICAS = {
     "ebitda_pre_ifrs16": ("EBITDA pré-IFRS 16", "mm", "Resultado"),
     "lucro_liquido": ("Lucro líquido", "mm", "Resultado"),
     "resultado_financeiro": ("Resultado financeiro líquido", "mm", "Resultado"),
-    "fco": ("Fluxo de caixa operacional", "mm", "Caixa e investimento"),
+    "fco": ("FCO comparável (sem juros e dividendos)", "mm", "Caixa e investimento"),
+    "fco_reportado": ("FCO reportado (DFC)", "mm", "Caixa e investimento"),
+    "fco_juros_no_fco": ("Juros pagos/recebidos dentro do FCO (líq.)", "mm", "Caixa e investimento"),
+    "fco_div_no_fco": ("Dividendos/JCP dentro do FCO (líq.)", "mm", "Caixa e investimento"),
     "capex_organico": ("Capex orgânico", "mm", "Caixa e investimento"),
     "capex_organico_liquido": ("Capex orgânico líq. de vendas", "mm", "Caixa e investimento"),
     "vendas_imob_intang": ("Vendas de imobilizado/intangível", "mm", "Caixa e investimento"),
@@ -54,7 +57,7 @@ METRICAS = {
     "margem_liquida": ("Margem líquida", "pct", "Margens e retorno"),
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
     "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
-    "conversao_fco_ebitda": ("Conversão de caixa (FCO ÷ EBITDA IFRS 16)", "pct", "Margens e retorno"),
+    "conversao_fco_ebitda": ("Conversão de caixa (FCO comparável ÷ EBITDA IFRS 16)", "pct", "Margens e retorno"),
     "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
     "giro_ativo": ("Giro do ativo (receita ÷ ativo total)", "x", "Margens e retorno"),
     "alavancagem_ativo_pl": ("Alavancagem (ativo total ÷ PL)", "x", "Alavancagem e múltiplos"),
@@ -191,8 +194,12 @@ def carregar(versao: tuple = ()):
     base["gao"] = _grau(base["cresc_ebit"], base["cresc_receita"])
     base["gaf"] = _grau(base["cresc_lucro_liquido"], base["cresc_ebit"])
     base["gat"] = _grau(base["cresc_lucro_liquido"], base["cresc_receita"])
-    # conversão do EBITDA em caixa: FCO ÷ EBITDA IFRS 16 (sob IFRS 16 o arrendamento pago sai do FCO e vai para o
-    # financiamento, então FCO e EBITDA IFRS 16 estão no mesmo critério). Vazio com EBITDA ≤ 0.
+    # FCO comparável (coletor): garante as colunas novas numa base gerada antes da mudança
+    for c in ("fco_reportado", "fco_juros_no_fco", "fco_div_no_fco"):
+        if c not in base.columns:
+            base[c] = np.nan
+    # conversão do EBITDA em caixa: FCO comparável (sem juros e dividendos) ÷ EBITDA IFRS 16. Sob IFRS 16 o
+    # arrendamento pago sai do FCO, então FCO e EBITDA IFRS 16 estão no mesmo critério. Vazio com EBITDA ≤ 0.
     base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
@@ -1269,7 +1276,9 @@ with aba_emp:
             k1, k2 = st.columns(2)
             fig = go.Figure()
             fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["ebitda"], name="EBITDA IFRS 16", opacity=0.6))
-            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco"], name="Fluxo de caixa operacional", opacity=0.9))
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco"], name="FCO comparável", opacity=0.9))
+            if d_emp["fco_reportado"].notna().any() and (d_emp["fco_reportado"] - d_emp["fco"]).abs().max() > 0.05:
+                fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco_reportado"], name="FCO reportado", opacity=0.4))
             fig.update_layout(title="EBITDA e FCO (R$ mm)", barmode="group", height=360,
                               legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
             k1.plotly_chart(fig, width="stretch")
@@ -1283,8 +1292,9 @@ with aba_emp:
             fig.update_layout(title="Conversão de caixa (FCO ÷ EBITDA)", height=360, yaxis_tickformat=".0%",
                               legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
             k2.plotly_chart(fig, width="stretch")
-            st.caption("FCO da DFC ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0). Abaixo de 100%: parte do "
-                       "EBITDA ficou em capital de giro, impostos pagos ou juros classificados no operacional. "
+            st.caption("FCO comparável ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0). O FCO comparável tira "
+                       "do operacional os juros e dividendos/JCP pagos ou recebidos que a empresa classifica ali. "
+                       "Abaixo de 100%: parte do EBITDA ficou em capital de giro ou IR/CSLL pagos. "
                        "No trimestral, a sazonalidade do capital de giro pesa; LTM e anual são mais estáveis.")
         else:
             st.info("Sem FCO ou EBITDA positivo para calcular a conversão de caixa.")
@@ -2231,7 +2241,12 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
 - Capex orgânico = saídas para imobilizado (inclui propriedade para investimento), intangível e ativo de
   contrato/concessão no bloco de investimento.
-- FCL pós-arrendamento = FCO − capex orgânico líquido de vendas − arrendamento pago fora do FCO.
+- FCO comparável = FCO da DFC (6.01) sem juros e dividendos/JCP pagos ou recebidos que a empresa classifica no
+  operacional (o CPC 03 permite operacional, investimento ou financiamento). Assim, a diferença para o EBITDA fica
+  em capital de giro e IR/CSLL pagos. Juros recebidos que só estão dentro do lucro (sem linha própria) não saem.
+  O FCO reportado continua disponível.
+- FCL pós-arrendamento = FCO comparável − capex orgânico líquido de vendas − arrendamento pago (principal + juros),
+  contado uma vez. Como o FCO comparável não tem juros, o FCL é antes do serviço da dívida.
 - NCAV (Graham) = ativo circulante − passivo total.
 - Prazos médios (dias; 365 no anual/LTM, 90 no trimestral), com saldos médios inicial e final (CP + LP):
   PMR = dias ÷ (receita ÷ clientes); PME = dias ÷ (CPV ÷ estoques); PMP = dias ÷ (compras ÷ fornecedores),
@@ -2240,7 +2255,7 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   fim do trimestre, com os documentos já divulgados até ali (por isso pode usar o trimestre anterior).
   Setor agregado: Σ valor de mercado (ou EV) ÷ Σ PL, lucro 12m ou EBITDA 12m das empresas com os dois dados.
 - Giro do ativo = receita ÷ ativo total; alavancagem = ativo total ÷ PL (fim do período).
-- Conversão de caixa = FCO ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
+- Conversão de caixa = FCO comparável ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0).
 - Cobertura da dívida (fluxos do mesmo período; IR = IR + CSLL **pagos** na DFC; arrend. = principal + juros de
   arrendamento pagos; juros e principal = dívida ex-arrendamento, pagos na DFC; capex = capex orgânico + compra de
   frota/ativo para locação no FCO, líquida do valor contábil dos ativos vendidos, caso das locadoras):
