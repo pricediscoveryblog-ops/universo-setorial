@@ -364,68 +364,89 @@ def _acoes_em(cnpj, dt_fim, compos, fre=None):
     return _acoes_fre([cnpj], dt_fim, fre or {})
 
 
-def _financeiras(fin: pd.DataFrame, raiz_de: dict, acoes_fn, px) -> list[dict]:
-    """Bancos e seguradoras (base anual da DFP): P/VPA, P/L, dividend yield e ROE no fim do exercício.
-    EV/EBITDA não se aplica a instituições financeiras."""
+def _financeiras(fin: pd.DataFrame, raiz_de: dict, acoes_fn, px, disponib: dict | None = None,
+                 datas_tri: list | None = None) -> list[dict]:
+    """Bancos e seguradoras: P/VPA, P/L e dividend yield (EV/EBITDA não se aplica a instituições financeiras).
+    - anual: preço do último pregão do exercício com os números do exercício (DFP);
+    - trimestral (ponto no tempo, mesma regra das demais empresas): em cada data, PL do último ITR/DFP DIVULGADO
+      até a data (data de recebimento na CVM); lucro e dividendos LTM desse documento (DFP: os do exercício)."""
+    disponib = disponib or {}
+    f_ = fin.copy()
+    if "tipo" not in f_.columns:  # base gerada antes da coleta de ITR: só anual
+        f_["tipo"] = "anual"
+    f_["dt_fim"] = pd.to_datetime(f_["dt_fim"])
+    if not datas_tri:
+        datas_tri = [pd.Timestamp.today().normalize()]
     linhas = []
-    for cnpj, g in fin.groupby("cnpj"):
+    for cnpj, g in f_.groupby("cnpj"):
         raiz = raiz_de.get(cnpj, "")
         if not raiz or raiz not in px.por_raiz:
             continue
         meta = {"cnpj": cnpj, "empresa": g["empresa"].iloc[0], "ticker": g["ticker"].iloc[0], "setor": "Financeiro",
                 "subsetor": g["subsetor"].iloc[0], "segmento": g["segmento"].iloc[0]}
-        for _, r in g.iterrows():
-            dfim = pd.Timestamp(r["dt_fim"])
-            qt, nota = acoes_fn(cnpj, dfim)
+
+        def linha(tipo, d, fund, flu, notas_base):
+            qt, nota_qt = acoes_fn(cnpj, d)
             if qt is None:
-                continue
-            vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], dfim)
-            div_ = r.get("dividendos_pagos")
-            linhas.append({**meta, "tipo": "anual", "data": dfim.date(), "periodo_base": str(r["exercicio"]),
-                           "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
-                           "data_preco_on": p_on[1].date() if p_on else None,
-                           "ticker_pn": p_pn[0] if p_pn else None, "preco_pn": p_pn[2] if p_pn else np.nan,
-                           "data_preco_pn": p_pn[1].date() if p_pn else None,
-                           "acoes_on": qt[0], "acoes_pn": qt[1], "valor_mercado": vm,
-                           "ev_com_arrend": np.nan, "ev_sem_arrend": np.nan,
-                           "pl_controladores": r.get("pl_controladores"),
-                           "lucro_controladores_12m": r.get("lucro_controladores"),
-                           "p_vpa": _div(vm, r.get("pl_controladores")), "p_l": _div(vm, r.get("lucro_controladores")),
-                           "ev_ebitda_ifrs16": np.nan, "ev_ebitda_pre_ifrs16": np.nan,
-                           "dividendos_12m": div_,
-                           "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
-                           "notas": "; ".join(n for n in [nota] + notas if n)})
-        # pontos trimestrais entre o último exercício e hoje, com o preço de cada data e os fundamentos do último
-        # exercício divulgado (bancos e seguradoras só têm base anual); o último ponto é o pregão mais recente
-        ult = g.sort_values("dt_fim").iloc[-1]
-        d0 = pd.Timestamp(ult["dt_fim"])
-        datas_tri = list(pd.date_range(d0, pd.Timestamp.today().normalize(), freq="QE")[1:])
-        datas_tri.append(pd.Timestamp.today().normalize())
-        for d in datas_tri:
-            qt, nota = acoes_fn(cnpj, d)
-            if qt is None:
-                continue
+                return None
             vm, p_on, p_pn, notas = _valor_mercado(px, raiz, qt[0], qt[1], d)
-            if pd.isna(vm):
+            pl = fund.get("pl_controladores")
+            luc = flu.get("lucro_controladores") if flu is not None else np.nan
+            div_ = flu.get("dividendos_pagos") if flu is not None else np.nan
+            return {**meta, "tipo": tipo, "data": d.date(), "periodo_base": str(fund.get("periodo") or ""),
+                    "dt_fim_base": pd.Timestamp(fund.get("dt_fim")).date(),
+                    "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
+                    "data_preco_on": p_on[1].date() if p_on else None,
+                    "ticker_pn": p_pn[0] if p_pn else None, "preco_pn": p_pn[2] if p_pn else np.nan,
+                    "data_preco_pn": p_pn[1].date() if p_pn else None,
+                    "acoes_on": qt[0], "acoes_pn": qt[1], "valor_mercado": vm,
+                    "ev_com_arrend": np.nan, "ev_sem_arrend": np.nan,
+                    "pl_controladores": pl, "lucro_controladores_12m": luc,
+                    "p_vpa": _div(vm, pl), "p_l": _div(vm, luc),
+                    "ev_ebitda_ifrs16": np.nan, "ev_ebitda_pre_ifrs16": np.nan,
+                    "dividendos_12m": div_,
+                    "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
+                    "notas": "; ".join(n for n in notas_base + [nota_qt] + notas if n)}
+
+        # --- anual: preço do fim do exercício com os números do exercício
+        anu = g[g["tipo"] == "anual"].sort_values("dt_fim")
+        for _, r in anu.iterrows():
+            row = linha("anual", r["dt_fim"], r, r, [])
+            if row:
+                row["periodo_base"] = str(r["exercicio"])
+                linhas.append(row)
+
+        # --- trimestral: ponto no tempo (último ITR/DFP divulgado até cada data)
+        tri = g[g["tipo"] == "trimestral"].drop_duplicates("dt_fim", keep="last").set_index("dt_fim")
+        ltm = g[g["tipo"] == "ltm"].drop_duplicates("dt_fim", keep="last").set_index("dt_fim")
+        anu_i = anu.drop_duplicates("dt_fim", keep="last").set_index("dt_fim")
+        docs = sorted(set(tri.index) | set(anu_i.index))
+
+        def divulgado(dfim):
+            k = str(pd.Timestamp(dfim).date())
+            if (cnpj, k) in disponib:
+                return pd.Timestamp(disponib[(cnpj, k)]), ""
+            return pd.Timestamp(dfim) + pd.Timedelta(days=90), "data de divulgação estimada (fim do período + 90 dias)"
+
+        disp = [(divulgado(x), x) for x in docs]
+        for d in datas_tri:
+            d = pd.Timestamp(d)
+            vis = [x for x in disp if x[0][0] <= d]
+            if not vis:
                 continue
-            div_ = ult.get("dividendos_pagos")
-            linhas.append({**meta, "tipo": "trimestral", "data": d.date(), "periodo_base": str(ult["exercicio"]),
-                           "dt_fim_base": d0.date(),
-                           "ticker_on": p_on[0] if p_on else None, "preco_on": p_on[2] if p_on else np.nan,
-                           "data_preco_on": p_on[1].date() if p_on else None,
-                           "ticker_pn": p_pn[0] if p_pn else None, "preco_pn": p_pn[2] if p_pn else np.nan,
-                           "data_preco_pn": p_pn[1].date() if p_pn else None,
-                           "acoes_on": qt[0], "acoes_pn": qt[1], "valor_mercado": vm,
-                           "ev_com_arrend": np.nan, "ev_sem_arrend": np.nan,
-                           "pl_controladores": ult.get("pl_controladores"),
-                           "lucro_controladores_12m": ult.get("lucro_controladores"),
-                           "p_vpa": _div(vm, ult.get("pl_controladores")),
-                           "p_l": _div(vm, ult.get("lucro_controladores")),
-                           "ev_ebitda_ifrs16": np.nan, "ev_ebitda_pre_ifrs16": np.nan,
-                           "dividendos_12m": div_,
-                           "dividend_yield": (div_ / vm) if pd.notna(vm) and vm > 0 and pd.notna(div_) else np.nan,
-                           "notas": "; ".join(n for n in [nota, f"fundamentos do exercício {ult['exercicio']}"]
-                                              + notas if n)})
+            (_, nota_disp), dfim = max(vis, key=lambda x: x[1])
+            fund = tri.loc[dfim] if dfim in tri.index else anu_i.loc[dfim]
+            fund = fund.copy()
+            fund["dt_fim"] = dfim
+            if dfim in ltm.index:
+                flu, nota_flu = ltm.loc[dfim], ""
+            elif dfim in anu_i.index:
+                flu, nota_flu = anu_i.loc[dfim], ""
+            else:
+                flu, nota_flu = None, "sem LTM para o último documento divulgado (P/L e dividend yield vazios)"
+            row = linha("trimestral", d, fund, flu, [nota_disp, nota_flu])
+            if row and pd.notna(row["valor_mercado"]):
+                linhas.append(row)
     return linhas
 
 
@@ -454,7 +475,8 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
     for cnpj_, g_ in b[b["tipo"].isin(["trimestral", "anual"])].groupby("cnpj"):
         pl_series[cnpj_] = g_[["dt_fim", "pl_controladores"]].dropna().sort_values("dt_fim")
     if fin is not None and len(fin):
-        for cnpj_, g_ in fin.groupby("cnpj"):
+        fin_pl = fin[fin["tipo"] != "ltm"] if "tipo" in fin.columns else fin
+        for cnpj_, g_ in fin_pl.groupby("cnpj"):
             pl_series[cnpj_] = g_.assign(dt_fim=pd.to_datetime(g_["dt_fim"]))[["dt_fim", "pl_controladores"]] \
                 .dropna().sort_values("dt_fim")
 
@@ -540,7 +562,8 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
             row["periodo_base"] = fund.get("periodo")
             linhas.append(row)
     if fin is not None and len(fin):
-        linhas += _financeiras(fin, raiz_de, lambda c, d: acoes_da_serie(serie_de(c, raiz_de.get(c, "")), d), px)
+        linhas += _financeiras(fin, raiz_de, lambda c, d: acoes_da_serie(serie_de(c, raiz_de.get(c, "")), d), px,
+                               disponib, datas_tri)
     # ---- valor de mercado por pregão (base das variações de preço no app).
     # Usa as ações vigentes em cada data: desdobramentos e grupamentos não aparecem como variação, porque o
     # preço cai (ou sobe) e a quantidade muda na mesma proporção. Emissões e recompras aparecem, como devem.
