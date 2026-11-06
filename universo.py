@@ -33,7 +33,7 @@ SAIDA = cs.SAIDAS / "universo"
 
 FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladores", "cpv", "da", "impairment", "ebitda",
           "pagamento_arrendamento", "pag_arrend_juros", "pag_arrend_principal", "ebitda_pre_ifrs16",
-          "fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
+          "fco", "fco_reportado", "fco_juros_no_fco", "fco_div_no_fco", "capex_imobilizado", "capex_intangivel", "capex_imob_intang_combinado",
           "capex_ativo_contrato", "capex_organico", "vendas_imob_intang", "capex_organico_liquido",
           "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
           "fcl_pos_arrend", "dividendos_pagos", "resultado_financeiro", "receitas_financeiras",
