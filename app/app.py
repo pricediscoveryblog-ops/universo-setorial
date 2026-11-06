@@ -147,9 +147,17 @@ FIN = {
     "receita_servicos": ("Receitas de serviços e tarifas", "mm", "soma"),
     "despesas_pessoal_adm": ("Despesas de pessoal e administrativas", "mm", "soma"),
     "carteira_credito": ("Carteira de crédito (aprox.)", "mm", "soma"),
+    "carteira_credito_bruta": ("Carteira de crédito bruta", "mm", "soma"),
+    "provisao_carteira": ("Provisão para perdas de crédito (saldo)", "mm", "soma"),
+    "tvm": ("Títulos e valores mobiliários e derivativos", "mm", "soma"),
+    "demais_ativos": ("Demais ativos", "mm", "soma"),
     "depositos": ("Depósitos", "mm", "soma"),
-    "custo_credito": ("Custo do crédito (PDD / carteira)", "pct", ("despesa_pdd", "carteira_credito")),
+    "custo_credito": ("Custo do crédito (PDD / carteira bruta)", "pct", ("despesa_pdd", "carteira_credito_bruta")),
     "credito_depositos": ("Crédito / depósitos", "x", ("carteira_credito", "depositos")),
+    "carteira_bruta_ativo": ("Carteira bruta / ativo", "pct", ("carteira_credito_bruta", "ativo_total")),
+    "tvm_ativo": ("TVM e derivativos / ativo", "pct", ("tvm", "ativo_total")),
+    "demais_ativos_ativo": ("Demais ativos / ativo", "pct", ("demais_ativos", "ativo_total")),
+    "cobertura_carteira": ("Provisão / carteira bruta", "pct", ("provisao_carteira", "carteira_credito_bruta")),
     "indice_eficiencia": ("Índice de eficiência (aprox.)", "pct", None),
     "dividendos_pagos": ("Dividendos + JCP pagos", "mm", "soma"),
     "payout": ("Payout (dividendos pagos ÷ lucro)", "pct", ("dividendos_pagos", "lucro_controladores")),
@@ -211,6 +219,16 @@ def carregar(versao: tuple = ()):
         for c in ("ticker", "empresa", "segmento"):
             fin[c] = fin[c].fillna("")
         fin["rotulo"] = fin["ticker"] + " — " + fin["empresa"]
+        # anual (DFP) segue em fin; trimestral e LTM (ITR) vão para fin_per. Bases antigas não têm tipo: só anual
+        if "tipo" not in fin.columns:
+            fin["tipo"] = "anual"
+        fin["cnpj"] = fin["cnpj"].astype(str).str.zfill(14)
+        fin_per = fin[fin["tipo"].isin(["trimestral", "ltm"])].copy()
+        fin_per["dt_fim"] = pd.to_datetime(fin_per["dt_fim"], errors="coerce")
+        fin_per = calc_cresc_fin_per(fin_per)
+        fin = fin[fin["tipo"] == "anual"].copy()
+    else:
+        fin_per = pd.DataFrame()
     mult = pd.read_csv(DADOS / "multiplos.csv.gz", dtype={"cnpj": str}) if (DADOS / "multiplos.csv.gz").exists() else pd.DataFrame()
     if not mult.empty:
         mult["cnpj"] = mult["cnpj"].str.zfill(14)
@@ -257,7 +275,7 @@ def carregar(versao: tuple = ()):
             if k not in fin.columns:
                 fin[k] = np.nan
         fin = calc_cresc_fin(fin)
-    return base, cob, meta, fin, mult
+    return base, cob, meta, fin, mult, fin_per
 
 
 @st.cache_data(max_entries=1, show_spinner=False)
@@ -381,6 +399,25 @@ def calc_cresc_fin(f: pd.DataFrame) -> pd.DataFrame:
     ant = ant.assign(exercicio=ant["exercicio"] + 1).rename(columns={c: c + "_ant" for c in niveis})
     f = f.drop(columns=[c + "_ant" for c in niveis if c + "_ant" in f.columns]).merge(
         ant, on=["cnpj", "exercicio"], how="left")
+    for k, c in CRESC_FIN.items():
+        a = f[c + "_ant"].where(f[c + "_ant"] > 0)
+        f[k] = f[c] / a - 1
+    return f
+
+
+def calc_cresc_fin_per(f: pd.DataFrame) -> pd.DataFrame:
+    """Trimestral e LTM dos bancos e seguradoras: crescimento contra o mesmo período do ano anterior (data de fim
+    − 12 meses), com a mesma lógica do anual (<col>_ant para o agregado; vazio sem o período anterior ou base ≤ 0)."""
+    if f.empty:
+        return f
+    f = f.copy()
+    pdd = -pd.to_numeric(f["despesa_pdd"], errors="coerce")
+    f["nivel_pdd"] = pdd.where(pdd > 0)
+    niveis = list(CRESC_FIN.values())
+    ant = f[["cnpj", "tipo", "dt_fim"] + niveis].dropna(subset=["dt_fim"]).drop_duplicates(["cnpj", "tipo", "dt_fim"])
+    ant = ant.assign(dt_fim=ant["dt_fim"] + pd.DateOffset(years=1)).rename(columns={c: c + "_ant" for c in niveis})
+    f = f.drop(columns=[c + "_ant" for c in niveis if c + "_ant" in f.columns]).merge(
+        ant, on=["cnpj", "tipo", "dt_fim"], how="left")
     for k, c in CRESC_FIN.items():
         a = f[c + "_ant"].where(f[c + "_ant"] > 0)
         f[k] = f[c] / a - 1
@@ -520,7 +557,7 @@ def eixo_x(tipo: str) -> str:
 
 
 try:
-    base, cob, meta, fin, mult = carregar(versao_arquivos(*(DADOS / f for f in (
+    base, cob, meta, fin, mult, fin_per = carregar(versao_arquivos(*(DADOS / f for f in (
         "base.csv.gz", "cobertura.csv", "metadados.json", "financeiras.csv.gz", "multiplos.csv.gz"))))
 except FileNotFoundError:
     st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
@@ -606,40 +643,80 @@ if not sel_met:
 st.sidebar.caption(f"{filtrado['cnpj'].nunique()} empresas · {len(filtrado)} linhas no filtro")
 
 def empresa_financeira():
-    """Aba Empresa para bancos e seguradoras: indicadores próprios vs. mediana do segmento + múltiplos."""
+    """Aba Empresa para bancos e seguradoras: indicadores próprios vs. mediana do segmento + múltiplos.
+    Segue a periodicidade da barra lateral: anual (DFP), LTM ou trimestral (ITR)."""
     emp_f = st.selectbox("Instituição", sorted(fin["rotulo"].unique()), key="emp_fin")
-    d = fin[fin["rotulo"] == emp_f].sort_values("exercicio")
+    anual = tipo == "anual" or fin_per.empty
+    pares = fin if anual else fin_per[fin_per["tipo"] == tipo]
+    d = pares[pares["rotulo"] == emp_f].sort_values("exercicio" if anual else "dt_fim")
+    if d.empty and not anual:
+        st.info("Sem ITRs desta instituição na base: mostrando a série anual (DFP).")
+        anual, pares = True, fin
+        d = fin[fin["rotulo"] == emp_f].sort_values("exercicio")
+    x_col = "exercicio" if anual else "dt_fim"
     seg_f = d["segmento"].iloc[0]
-    st.caption(f"Financeiro / {d['subsetor'].iloc[0]} / **{seg_f}** · série anual (DFP) · "
+    desc = ("série anual (DFP)" if anual else
+            "últimos 12 meses (fluxos de 4 trimestres somados; saldos do último ITR/DFP)" if tipo == "ltm" else
+            "trimestral (ITR; fluxo do trimestre por diferença de acumulados; ROE, ROA e custo do crédito "
+            "anualizados ×4)")
+    st.caption(f"Financeiro / {d['subsetor'].iloc[0]} / **{seg_f}** · {desc} · "
                "base separada, com plano de contas de instituição financeira")
     disp_k = [k for k in FIN if k in d.columns and d[k].notna().any() and FIN[k][1] in ("pct", "x")]
     padrao = [k for k in ("roe", "roa", "pl_ativo", "indice_eficiencia", "custo_credito", "payout")
               if k in disp_k]
     sel = st.multiselect("Indicadores", disp_k, default=padrao, format_func=lambda k: FIN[k][0], key="ind_emp_fin")
-    med = fin[fin["segmento"] == seg_f].groupby("exercicio")[sel].median() if sel else pd.DataFrame()
+    med = pares[pares["segmento"] == seg_f].groupby(x_col)[sel].median() if sel else pd.DataFrame()
     cols = st.columns(2)
     for i, k in enumerate(sel):
-        mm = med[med.index.isin(d["exercicio"])]
+        mm = med[med.index.isin(d[x_col])]
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=d["exercicio"], y=d[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
+        fig.add_trace(go.Scatter(x=d[x_col], y=d[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
         fig.add_trace(go.Scatter(x=mm.index, y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
-        add_medias(fig, d["exercicio"], d[k], mm[k])
+        add_medias(fig, d[x_col], d[k], mm[k])
         fig.update_layout(title=FIN[k][0] + {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[FIN[k][1]], height=320,
                           margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2))
         if FIN[k][1] == "pct":
             fig.update_yaxes(tickformat=".0%")
         cols[i % 2].plotly_chart(fig, width="stretch")
 
+    # ---- composição do ativo: carteira bruta − provisão + TVM e derivativos + demais ativos = ativo total
+    comp = [("carteira_credito_bruta", "Carteira de crédito bruta"), ("tvm", "TVM e derivativos"),
+            ("demais_ativos", "Demais ativos"), ("provisao_carteira", "(−) Provisão para perdas")]
+    if all(k in d.columns for k, _ in comp) and d["carteira_credito_bruta"].notna().any():
+        st.subheader("Composição do ativo")
+        at_ = d["ativo_total"].where(d["ativo_total"] > 0)
+        c_a, c_b = st.columns(2)
+        for col_, (tit_, den_) in zip((c_a, c_b), (("% do ativo total", at_), ("R$ mm", 1))):
+            fig = go.Figure()
+            for k, nome in comp:
+                fig.add_trace(go.Bar(x=d[x_col], y=d[k] * (-1 if k == "provisao_carteira" else 1) / den_, name=nome))
+            fig.update_layout(barmode="relative", title=tit_, height=360, legend=dict(orientation="h", y=-0.25),
+                              margin=dict(t=40, b=20, l=10, r=10))
+            if den_ is at_:
+                fig.update_yaxes(tickformat=".0%")
+            col_.plotly_chart(fig, width="stretch")
+        st.caption("Carteira bruta − provisão + TVM e derivativos + demais ativos = ativo total. Carteira bruta: contas "
+                   "de operações de crédito do balanço, com a provisão somada de volta quando vem dentro da conta "
+                   "(COSIF); sob IFRS a conta já é bruta e a provisão é conta irmã (pode incluir perdas esperadas de "
+                   "TVM ao custo amortizado). Demais ativos = resíduo: caixa, aplicações interfinanceiras, "
+                   "compulsórios, tributos, investimentos etc. Vazio quando a captura não fecha.")
+
     st.subheader("Múltiplos de mercado")
     cnpj_f = str(d["cnpj"].iloc[0]).zfill(14)
-    dm = mult[(mult["cnpj"] == cnpj_f) & (mult["tipo"] == "anual")].sort_values("data") if not mult.empty else pd.DataFrame()
+    tipo_m = "anual" if anual else "trimestral"
+    dm = mult[(mult["cnpj"] == cnpj_f) & (mult["tipo"] == tipo_m)].sort_values("data") if not mult.empty else pd.DataFrame()
+    if not anual and len(dm):
+        dm = dm[dm["data"] >= pd.Timestamp(d["dt_fim"].min())]
     if dm.empty:
         st.info("Múltiplos de bancos e seguradoras ainda não gerados: aparecem depois da próxima execução do coletor.")
         return emp_f, d, seg_f
     painel_mercado(d["cnpj"].iloc[0])
     st.caption("Anual: preço do último pregão do exercício com lucro e PL dos controladores do exercício. "
+               "EV/EBITDA não se aplica a instituições financeiras." if anual else
+               "Ponto no tempo: em cada data (fim de trimestre e último pregão), PL dos controladores do último "
+               "ITR/DFP divulgado até a data e lucro e dividendos dos 12 meses desse documento. "
                "EV/EBITDA não se aplica a instituições financeiras.")
-    pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == "anual")]
+    pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == tipo_m)]
     med_m = pares_m.groupby("data")[["p_vpa", "p_l", "roe", "dividend_yield"]].median()
     med_m = med_m[med_m.index.isin(dm["data"])]
     graficos = [("P/VPA", "p_vpa", "x"), ("P/L", "p_l", "x"), ("ROE (lucro ÷ PL dos controladores)", "roe", "pct"),
@@ -656,10 +733,10 @@ def empresa_financeira():
         else:
             fig.update_yaxes(ticksuffix="x")
         col.plotly_chart(fig, width="stretch")
-    st.caption("No setor financeiro, P/VPA × ROE é a leitura central: P/VPA = P/L × ROE em cada ano.")
+    st.caption("No setor financeiro, P/VPA × ROE é a leitura central: P/VPA = P/L × ROE em cada data.")
     with st.expander("Valor de mercado, preços, ações e notas"):
-        cols_m = ["data", "valor_mercado", "ticker_on", "preco_on", "acoes_on", "ticker_pn", "preco_pn", "acoes_pn",
-                  "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
+        cols_m = ["data", "periodo_base", "valor_mercado", "ticker_on", "preco_on", "acoes_on", "ticker_pn", "preco_pn",
+                  "acoes_pn", "p_vpa", "p_l", "roe", "dividendos_12m", "dividend_yield", "notas"]
         tab_m = dm[[c for c in cols_m if c in dm.columns]].assign(data=dm["data"].dt.date)
         st.dataframe(tab_m, hide_index=True, width="stretch")
     return emp_f, d, seg_f
@@ -669,13 +746,28 @@ IND_FIN_EXTRA = {"p_vpa": ("P/VPA", "x"), "dividend_yield": ("Dividend yield", "
 
 
 def serie_financeira(rot: str) -> pd.DataFrame:
-    """Indicadores anuais de um banco/seguradora + múltiplos de mercado do fim de cada exercício."""
+    """Série de um banco/seguradora na periodicidade da barra lateral + múltiplos de mercado da mesma data.
+    Coluna _x: exercício (anual) ou data de fim em ano decimal (trimestral/LTM), no eixo do ponto do último pregão."""
+    if tipo != "anual" and not fin_per.empty:
+        d = fin_per[(fin_per["rotulo"] == rot) & (fin_per["tipo"] == tipo)].sort_values("dt_fim").copy()
+        if len(d):
+            extra = list(IND_FIN_EXTRA) + ["valor_mercado", "p_l"]
+            if not mult.empty:
+                cn = str(d["cnpj"].iloc[0]).zfill(14)
+                m = mult[(mult["cnpj"] == cn) & (mult["tipo"] == "trimestral")][["data"] + extra] \
+                    .drop_duplicates("data")
+                d = d.drop(columns=[c for c in extra if c in d.columns]).merge(
+                    m, left_on="dt_fim", right_on="data", how="left").drop(columns="data")
+            dt_ = pd.to_datetime(d["dt_fim"])
+            d["_x"] = dt_.dt.year + (dt_.dt.dayofyear - 1) / 366
+            return d
     d = fin[fin["rotulo"] == rot].sort_values("exercicio").copy()
     if not mult.empty and len(d):
         cn = str(d["cnpj"].iloc[0]).zfill(14)
         m = mult[(mult["cnpj"] == cn) & (mult["tipo"] == "anual")].assign(exercicio=lambda x: x["data"].dt.year)
         d = d.drop(columns=[c for c in IND_FIN_EXTRA if c in d.columns]).merge(
             m[["exercicio"] + list(IND_FIN_EXTRA)].drop_duplicates("exercicio"), on="exercicio", how="left")
+    d["_x"] = d["exercicio"]
     return d
 
 
@@ -764,12 +856,12 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
                               format_func=lambda k: ind_ov[k][0], key="ov_ind_outras_fin") if outras else None
     escala = o2.radio("Escala", ["Base 100 (primeiro ponto)", "Valores (dois eixos)"], key="ov_esc_fin")
     cn_f = str(d["cnpj"].iloc[0]).zfill(14)
-    series_ov = [(f"{ind_ov[k][0]} {emp_f.split(' — ')[0]}", se["exercicio"], se[k], ind_ov[k][1], k, cn_f)
+    series_ov = [(f"{ind_ov[k][0]} {emp_f.split(' — ')[0]}", se["_x"], se[k], ind_ov[k][1], k, cn_f)
                  for k in sel_ov]
     for o in outras:
         so = serie_financeira(o)
         if ind_outras in so.columns:
-            series_ov.append((f"{ind_ov[ind_outras][0]} {o.split(' — ')[0]}", so["exercicio"], so[ind_outras],
+            series_ov.append((f"{ind_ov[ind_outras][0]} {o.split(' — ')[0]}", so["_x"], so[ind_outras],
                               ind_ov[ind_outras][1], ind_outras,
                               str(fin[fin["rotulo"] == o]["cnpj"].iloc[0]).zfill(14)))
     if not series_ov:
@@ -815,7 +907,8 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
     if ignoradas:
         st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
                    ". Use a escala de valores para vê-las.")
-    st.caption("Série anual (DFP). Base 100 compara o comportamento relativo desde o primeiro exercício; em valores, "
+    st.caption("Série na periodicidade da barra lateral (anual: DFP; LTM e trimestral: ITR). Base 100 compara o "
+               "comportamento relativo desde o primeiro ponto; em valores, "
                "R$ mm à esquerda e múltiplos/% à direita. ◎ = valor calculado com o preço do último pregão, na cor da curva.")
 
 
@@ -1942,7 +2035,8 @@ with aba_fin:
         st.info("Base de bancos e seguradoras ainda não gerada (financeiras.csv.gz). Rode o workflow no modo universo.")
     else:
         st.caption("Base separada: bancos e seguradoras usam plano de contas próprio e não entram nas medianas das "
-                   "demais abas. Fonte: CVM (DFP anual). Métricas são definições próprias; conferir com os releases.")
+                   "demais abas. Fonte: CVM (DFP anual; trimestral e LTM pelo ITR na aba Empresa). Métricas são "
+                   "definições próprias; conferir com os releases.")
         c1, c2, c3 = st.columns([1.2, 1.2, 1])
         grupos_f = {"Bancos e financeiras": ~fin["segmento"].str.contains("Segurad|Ressegurad", regex=True),
                     "Seguradoras e resseguradoras": fin["segmento"].str.contains("Segurad|Ressegurad", regex=True)}
@@ -2022,7 +2116,15 @@ with aba_fin:
             "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
                                 "pode diferir da carteira ampliada divulgada.",
             "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
-            "custo_credito": "PDD do ano ÷ carteira no fim do ano (aproximação).",
+            "custo_credito": "PDD do período ÷ carteira de crédito bruta no fim do período (aproximação).",
+            "carteira_credito_bruta": "Operações de crédito do balanço, com a provisão somada de volta quando vem "
+                                      "dentro da conta (COSIF). Sob IFRS a conta já é bruta.",
+            "provisao_carteira": "Saldo redutor de PDD / perdas esperadas ligado à carteira. Sob IFRS pode incluir "
+                                 "perdas esperadas de TVM ao custo amortizado.",
+            "tvm": "Títulos e valores mobiliários e derivativos, somando todas as categorias (custo amortizado, "
+                   "VJORA e VJR).",
+            "demais_ativos": "Resíduo: ativo total − carteira líquida − TVM (caixa, aplicações interfinanceiras, "
+                             "compulsórios, tributos, investimentos etc.).",
             "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
             "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
                                       "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
@@ -2285,6 +2387,10 @@ Dividend yield = dividendos + JCP pagos nos 12 meses (DFC, regime de caixa, só 
 contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
 ROE = lucro dos controladores ÷ PL dos controladores (PL total − não controladores), no fim do ano.
 Eficiência e carteira de crédito são aproximações próprias. Basileia e inadimplência não constam da DFP.
+Na aba Empresa, a série segue a periodicidade da barra lateral: anual (DFP), trimestral (ITR; fluxo do trimestre
+por diferença dos acumulados; ROE, ROA e custo do crédito anualizados × 4) e LTM (4 trimestres somados, saldos do
+último trimestre). Múltiplos trimestrais no ponto no tempo: PL do último ITR/DFP divulgado e lucro LTM.
+Abertura do ativo: carteira de crédito bruta, (−) provisão, TVM e derivativos e demais ativos (resíduo).
 Crescimento (PL dos controladores, carteira de crédito, ativo total, despesa de PDD) = exercício ÷ exercício anterior − 1;
 o gráfico mostra o crescimento acumulado em base 100 (por instituição e agregado do grupo em amostra casada).
 
