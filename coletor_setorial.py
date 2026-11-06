@@ -415,6 +415,37 @@ RX_FROTA = re.compile(r"imobilizad|veiculo|frota|\bcarros?\b|ativos? (?:operacio
 RX_FROTA_EXC = re.compile(r"titulo|aplicac|valores mobiliarios|estoque|venda|aliena|receb|ativos? de contrato|concess|direito de uso|arrend")
 RX_BAIXA_FROTA = re.compile(r"desmobiliz|desativ|seminov|(?:custo|baixa|valor residual|valor contabil).{0,40}(?:veiculo|carro|frota|ativos? (?:operaciona|de loca|para loca))")
 RX_SD_MISTO = re.compile(r"principal|(?:emprestim|financiament|debent|divida)\w* e (?:juro|encargo)|juros e (?:amortiz|principal)")
+# FCO comparável: juros e dividendos/JCP pagos ou recebidos que a empresa classifica no operacional (o CPC 03
+# permite operacional, investimento ou financiamento). Saem do FCO para que a diferença para o EBITDA seja
+# basicamente capital de giro e IR/CSLL pagos.
+RX_FCO_JUR = re.compile(r"juro|encargos? (?:financeir|da divida|de emprestim|sobre (?:emprestim|financ|debent))|rendimento")
+RX_FCO_DIV = re.compile(r"dividend|capital proprio|\bjscp\b|\bjcp\b")
+RX_FCO_PAG = re.compile(r"\bpag(?:o|os|a|as|amentos?)\b|\bpagt|liquidad|quitad|desembols")
+RX_FCO_REC = re.compile(r"\breceb(?:ido|idos|ida|idas|imentos?)\b|recebiment")
+RX_FCO_ACCR = re.compile(r"a pagar|a recolher|\bretid|a receber|provis|apropri|incorrid|capitaliz|acruad|nao pag|nao receb|"
+                         r"propost|calculad|variac|atualizac|reversa|declarad|deliberad|descontinuad")
+RX_FCO_ACCR_FORTE = re.compile(r"provis|apropri|incorrid|capitaliz|acruad|nao pag|nao receb|variac")
+
+
+def classe_jur_div_fco(desc: str, vl: float, ajuste_nao_caixa: bool):
+    """'juros' ou 'dividendos' quando a linha do FCO (6.01.xx) é juros ou dividendos/JCP pagos ou recebidos; senão None.
+    Nos ajustes não-caixa (6.01.01) só vale linha com verbo de caixa e sinal coerente (pago < 0, recebido > 0)."""
+    e_div = bool(RX_FCO_DIV.search(desc))
+    e_jur = bool(RX_FCO_JUR.search(desc)) and "capital proprio" not in desc
+    if not (e_jur or e_div) or RX_IR.search(desc):
+        return None
+    pg, rc = bool(RX_FCO_PAG.search(desc)), bool(RX_FCO_REC.search(desc))
+    if RX_FCO_ACCR.search(desc) and (not (pg or rc) or RX_FCO_ACCR_FORTE.search(desc)):
+        return None
+    if ajuste_nao_caixa:
+        if not (pg or rc) or (pg and not rc and vl > 0) or (rc and not pg and vl < 0):
+            return None
+    elif not (pg or rc):  # sem verbo de caixa: juros só como saída, rendimento só como entrada
+        if "rendimento" in desc and vl < 0:
+            return None
+        if e_jur and "rendimento" not in desc and vl > 0:
+            return None
+    return "dividendos" if e_div else "juros"
 
 
 def topo(rows: pd.DataFrame) -> pd.DataFrame:
@@ -729,11 +760,33 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
         if not len(sdv):
             notas.append("nenhum pagamento de juros/principal de dívida identificado na DFC (assumido 0)")
 
-    # Fluxo de caixa operacional e FCL (definição própria)
-    m["fco"] = conta(sub, dfc_demo, "6.01") if not dfc.empty else np.nan
+    # Fluxo de caixa operacional. fco_reportado = total da DFC (6.01). fco = FCO comparável: sem juros e
+    # dividendos/JCP pagos ou recebidos que a empresa classifica no operacional (valores com o sinal da DFC
+    # em fco_juros_no_fco e fco_div_no_fco), para que FCO ≈ EBITDA − capital de giro − IR/CSLL pagos.
+    m["fco_reportado"] = conta(sub, dfc_demo, "6.01") if not dfc.empty else np.nan
+    jd = dfc[dfc["CD_CONTA"].str.startswith("6.01.")].copy()
+    jd["classe"] = [classe_jur_div_fco(d, v, c.startswith("6.01.01"))
+                    for d, v, c in zip(jd["DESC"], jd["VL"], jd["CD_CONTA"])]
+    jd = topo(jd[jd["classe"].notna()])
+    for c in ("juros", "dividendos"):
+        registrar(jd[jd["classe"] == c], f"fco_excluido:{c}")
+    if dfc.empty:
+        m["fco_juros_no_fco"] = m["fco_div_no_fco"] = np.nan
+    else:
+        m["fco_juros_no_fco"] = float(jd.loc[jd["classe"] == "juros", "VL"].sum())
+        m["fco_div_no_fco"] = float(jd.loc[jd["classe"] == "dividendos", "VL"].sum())
+    m["fco"] = m["fco_reportado"] - m["fco_juros_no_fco"] - m["fco_div_no_fco"]
+    # FCL (definição própria) = FCO comparável − capex orgânico líquido − arrendamento pago, contado uma vez:
+    # o pago fora do FCO + os juros de arrendamento retirados do FCO acima
     pag_fora_fco = 0.0
     if len(pg):
         pag_fora_fco = -pg.loc[~pg["CD_CONTA"].str.startswith("6.01"), "VL"].sum()
+    arr_j = jd[(jd["classe"] == "juros") & jd["DESC"].str.contains(RX_ARR_SD)]
+    arr_misto = arr_j["DESC"].str.contains(RX_ARR_MISTO)
+    pag_fora_fco += -arr_j.loc[~arr_misto, "VL"].sum()
+    if arr_misto.any():
+        notas.append("juros de dívida e arrendamento na mesma linha do FCO: retirados do FCO, mas a parte de "
+                     "arrendamento não é descontada no FCL (FCL pode estar superestimado)")
     m["fcl_pos_arrend"] = m["fco"] - m["capex_organico_liquido"] - pag_fora_fco
 
     ifrs16 = pos_ifrs16
@@ -817,7 +870,10 @@ METRICAS = [  # (chave, rótulo, formato)
     ("pagamento_arrendamento", "Pagamentos de arrendamento - DFC (R$ mm)", "num"),
     ("ebitda_pre_ifrs16", "EBITDA pré-IFRS 16 (R$ mm)", "num"),
     ("lucro_liquido", "Lucro líquido (R$ mm)", "num"),
-    ("fco", "Fluxo de caixa operacional - DFC (R$ mm)", "num"),
+    ("fco_reportado", "Fluxo de caixa operacional reportado - DFC 6.01 (R$ mm)", "num"),
+    ("fco_juros_no_fco", "Juros pagos/recebidos dentro do FCO, líquido, sinal da DFC (R$ mm)", "num"),
+    ("fco_div_no_fco", "Dividendos/JCP pagos/recebidos dentro do FCO, líquido, sinal da DFC (R$ mm)", "num"),
+    ("fco", "FCO comparável, sem juros e dividendos (R$ mm)", "num"),
     ("capex_imobilizado", "Capex imobilizado (R$ mm)", "num"),
     ("capex_intangivel", "Capex intangível (R$ mm)", "num"),
     ("capex_imob_intang_combinado", "Capex imob.+intang. em linha única (R$ mm)", "num"),
@@ -982,7 +1038,7 @@ def escrever_saidas(grupo, base, cob, reap, aud, n_anos):
         "Grupo", "Gerado em", "Fonte dos dados", "Universo de empresas", "Janela", "Valores", "Escolha da versão",
         "EBITDA", "EBITDA pré-IFRS 16", "Pagamentos de arrendamento", "Passivo de arrendamento",
         "Dívida bruta ex-arrendamento", "Caixa", "NCAV", "Alavancagem",
-        "Capex orgânico", "Vendas de imobilizado/intangível", "Aquisições", "Capex total", "Ativo de contrato no FCO", "FCL pós-arrendamento", "Capex / D&A", "Lacunas", "Aviso"],
+        "Capex orgânico", "Vendas de imobilizado/intangível", "Aquisições", "Capex total", "Ativo de contrato no FCO", "FCO comparável", "FCL pós-arrendamento", "Capex / D&A", "Lacunas", "Aviso"],
         "Descrição": [
         grupo, datetime.now().strftime("%Y-%m-%d %H:%M"),
         "CVM Dados Abertos — DFP (dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP) e cadastro de companhias",
@@ -1004,7 +1060,9 @@ def escrever_saidas(grupo, base, cob, reap, aud, n_anos):
         "Saídas na DFC de investimento para aquisição/aporte em controladas, coligadas e joint ventures. Sem linha no ano = 0 (marcado em 'notas')",
         "Capex orgânico + aquisições (bruto e líquido de vendas de imobilizado/intangível)",
         "Informativo: variação de ativo de contrato classificada no operacional (concessões). Não somado ao capex para evitar dupla contagem",
-        "Definição própria: FCO (6.01) − capex orgânico líquido de vendas − pagamentos de arrendamento classificados fora do FCO",
+        "Definição própria: FCO (6.01) sem juros e dividendos/JCP pagos ou recebidos classificados no operacional "
+        "(diferença para o EBITDA = capital de giro + IR/CSLL pagos). FCO reportado guardado em fco_reportado",
+        "Definição própria: FCO comparável − capex orgânico líquido de vendas − arrendamento pago (principal + juros), contado uma vez",
         "Definição própria: proxy de quanto do capex excede a reposição (>1x sugere expansão)",
         "Vazio = não identificado (nunca zero). Ver colunas 'notas' e aba auditoria",
         "Métricas derivadas são cálculo próprio do script, não números reportados pelas companhias. Conferir aba auditoria."]})
