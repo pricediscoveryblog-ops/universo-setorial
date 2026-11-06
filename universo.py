@@ -397,13 +397,27 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             if bruto.empty:
                 continue
             prep = cs.preparar(bruto)
-            if doc == "DFP" and fin_cnpjs:
+            if fin_cnpjs:
+                # bancos e seguradoras: DFP e ITR, período corrente. Nos fluxos fica o acumulado no exercício (a DRE
+                # do ITR também traz o trimestre isolado, descartado como nas demais empresas); balanço na data
                 f = prep[prep["CNPJ_NUM"].isin(fin_cnpjs) & (prep["ORDEM"] == "ultimo")]
                 for (cn, _ref), g in f.groupby(["CNPJ_NUM", "DT_REFER"]):
                     b = "con" if ((g["BASE"] == "con") & (g["DEMO"] == "DRE")).any() else "ind"
-                    g = g[g["BASE"] == b].drop_duplicates(["DEMO", "CD_CONTA", "DT_FIM"])
+                    g = g[g["BASE"] == b]
+                    fluxo = g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD"])
+                    if not fluxo.any() or g.loc[fluxo, "DT_INI"].isna().all():
+                        continue
+                    dt_ini = g.loc[fluxo, "DT_INI"].min()
+                    g = g[~fluxo | (g["DT_INI"] == dt_ini)].drop_duplicates(["DEMO", "CD_CONTA", "DT_FIM"])
+                    fluxo = g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD"])
+                    dt_fim = g.loc[fluxo, "DT_FIM"].max()
+                    if pd.isna(dt_fim):
+                        continue
+                    g = g[fluxo | (g["DT_FIM"] == dt_fim)]
                     estrutura_fin.append(pd.DataFrame({
-                        "cnpj": cn, "exercicio": g["DT_FIM"].dt.year, "dt_fim": g["DT_FIM"].dt.date,
+                        "cnpj": cn, "documento": doc, "exercicio": _fim_exercicio(dt_ini).year,
+                        "trimestre": 4 if doc == "DFP" else _trimestre(dt_ini, dt_fim),
+                        "dt_ini": dt_ini.date(), "dt_fim": dt_fim.date(), "arq_ano": ano,
                         "base": "consolidado" if b == "con" else "individual", "demonstracao": g["DEMO"],
                         "cd_conta": g["CD_CONTA"], "ds_conta": g["DS_CONTA"], "valor_rs_mm": g["VL"]}))
                 prep = prep[~prep["CNPJ_NUM"].isin(fin_cnpjs - set(univ["cnpj_cvm"]))]
@@ -474,8 +488,9 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         print(f"  -> estrutura_financeiras.csv.gz ({len(ef)} linhas, {ef['cnpj'].nunique()} empresas)")
         import financeiras
         fb, fa = financeiras.calcular_financeiras(ef)
-        ult = fb.groupby("cnpj")["exercicio"].transform(lambda s: s.nlargest(n_anos).min())
-        fb = fb[fb["exercicio"] >= ult]
+        # janela: os n_anos exercícios mais recentes com DFP; trimestral e LTM dentro da mesma janela
+        ini_f = fb[fb["tipo"] == "anual"].groupby("cnpj")["exercicio"].apply(lambda s: sorted(set(s))[-n_anos:][0])
+        fb = fb[fb["exercicio"] >= fb["cnpj"].map(ini_f).fillna(0)]
         fb.to_csv(SAIDA / "financeiras.csv.gz", index=False, compression="gzip")
         fa.to_csv(SAIDA / "auditoria_financeiras.csv.gz", index=False, compression="gzip")
         print(f"  -> financeiras.csv.gz ({len(fb)} linhas), auditoria_financeiras.csv.gz")
