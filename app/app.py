@@ -152,6 +152,11 @@ FIN = {
     "payout": ("Payout (dividendos pagos ÷ lucro)", "pct", ("dividendos_pagos", "lucro_controladores")),
     "valor_mercado": ("Valor de mercado", "mm", "soma"),
     "p_l": ("P/L", "x", ("valor_mercado", "lucro_controladores")),
+    # crescimento contra o exercício anterior; o gráfico mostra o crescimento acumulado (base 100)
+    "cresc_pl_controladores": ("Crescimento do PL (controladores) (a/a)", "pct", "cresc"),
+    "cresc_carteira_credito": ("Crescimento da carteira de crédito (a/a)", "pct", "cresc"),
+    "cresc_ativo_total": ("Crescimento do ativo total (a/a)", "pct", "cresc"),
+    "cresc_pdd": ("Crescimento da despesa de PDD (a/a)", "pct", "cresc"),
 }
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
@@ -244,6 +249,7 @@ def carregar(versao: tuple = ()):
         for k in FIN:
             if k not in fin.columns:
                 fin[k] = np.nan
+        fin = calc_cresc_fin(fin)
     return base, cob, meta, fin, mult
 
 
@@ -346,6 +352,32 @@ def calc_crescimento(b: pd.DataFrame) -> pd.DataFrame:
         partes.append(x)
     resto = b[~b["tipo"].isin(["anual", "ltm", "trimestral"])]
     return pd.concat(partes + [resto], ignore_index=True)
+
+
+# crescimento a/a dos bancos e seguradoras: indicador -> nível usado no agregado e no índice acumulado
+CRESC_FIN = {"cresc_pl_controladores": "pl_controladores", "cresc_carteira_credito": "carteira_credito",
+             "cresc_ativo_total": "ativo_total", "cresc_pdd": "nivel_pdd"}
+ROT_NIVEL_FIN = {"pl_controladores": "PL (controladores)", "carteira_credito": "Carteira de crédito (aprox.)",
+                 "ativo_total": "Ativo total", "nivel_pdd": "Despesa de PDD"}
+
+
+def calc_cresc_fin(f: pd.DataFrame) -> pd.DataFrame:
+    """Crescimento contra o exercício anterior da mesma instituição (exercício − 1), guardando o valor anterior
+    (<col>_ant) para o agregado do grupo (Σ atual ÷ Σ anterior − 1, amostra casada). PDD como despesa em módulo
+    (nivel_pdd = −despesa_pdd; ano com reversão líquida fica vazio). Vazio sem o ano anterior ou com base ≤ 0."""
+    f = f.copy()
+    f["exercicio"] = pd.to_numeric(f["exercicio"], errors="coerce")
+    pdd = -pd.to_numeric(f["despesa_pdd"], errors="coerce")
+    f["nivel_pdd"] = pdd.where(pdd > 0)
+    niveis = list(CRESC_FIN.values())
+    ant = f[["cnpj", "exercicio"] + niveis].dropna(subset=["exercicio"]).drop_duplicates(["cnpj", "exercicio"])
+    ant = ant.assign(exercicio=ant["exercicio"] + 1).rename(columns={c: c + "_ant" for c in niveis})
+    f = f.drop(columns=[c + "_ant" for c in niveis if c + "_ant" in f.columns]).merge(
+        ant, on=["cnpj", "exercicio"], how="left")
+    for k, c in CRESC_FIN.items():
+        a = f[c + "_ant"].where(f[c + "_ant"] > 0)
+        f[k] = f[c] / a - 1
+    return f
 
 
 def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
@@ -712,7 +744,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
 
     # ---- gráficos sobrepostos
     st.subheader("Gráficos sobrepostos")
-    ind_ov = {**{k: (v[0], v[1]) for k, v in FIN.items()}, **IND_FIN_EXTRA}
+    ind_ov = {**{k: (v[0], v[1]) for k, v in FIN.items() if not k.startswith("cresc_")}, **IND_FIN_EXTRA}
     se = serie_financeira(emp_f)
     cand = [k for k in ind_ov if k in se.columns and se[k].notna().any()]
     o1, o2 = st.columns([3, 2])
@@ -1919,7 +1951,14 @@ with aba_fin:
         sel_f = st.multiselect("Empresas (vazio = todas do grupo)", sorted(ff["rotulo"].unique()), key="fin_emp")
         periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
         ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
-        if agg_f == "soma":
+        if agg_f == "cresc":
+            # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
+            cn_ = CRESC_FIN[ind_f]
+            ok = ff[(ff[cn_ + "_ant"] > 0) & ff[cn_].notna()]
+            g_ = ok.groupby("_c")[[cn_, cn_ + "_ant"]].sum()
+            tot_f = g_[cn_] / g_[cn_ + "_ant"] - 1
+            n_cresc = ok.groupby("_c")["cnpj"].nunique().reindex(periodos_f).fillna(0).astype(int)
+        elif agg_f == "soma":
             tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
         elif isinstance(agg_f, tuple):
             n_, d_ = agg_f
@@ -1960,6 +1999,10 @@ with aba_fin:
             vis_tab = full_f
         tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
                         height=min(650, 38 + 35 * len(vis_tab)))
+        if agg_f == "cresc":
+            st.caption("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
+                       "os dois exercícios (amostra casada). Instituições por exercício: " +
+                       " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
         if fmt_f != "mm" and isinstance(agg_f, tuple):
             st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
         notas_fin = {
@@ -1970,6 +2013,12 @@ with aba_fin:
                                 "pode diferir da carteira ampliada divulgada.",
             "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
             "custo_credito": "PDD do ano ÷ carteira no fim do ano (aproximação).",
+            "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
+            "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
+                                      "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
+                                      "'Carteira de crédito'.",
+            "cresc_pdd": "Despesa de PDD do exercício contra a do anterior, em módulo. Exercícios com reversão "
+                         "líquida (PDD positiva na DRE) e bancos que não abrem a PDD na DRE ficam vazios.",
         }
         if ind_f in notas_fin:
             st.caption("ℹ️ " + notas_fin[ind_f])
@@ -1985,6 +2034,43 @@ with aba_fin:
             fig.update_layout(barmode="relative", height=460, legend_title_text="")
             if pct_f:
                 fig.update_yaxes(tickformat=".0%")
+        elif agg_f == "cresc":
+            # crescimento acumulado, base 100 no primeiro exercício (mesma lógica da Visão do setor): uma linha por
+            # instituição (valor ÷ primeiro valor × 100) e o agregado do grupo encadeado em amostra casada
+            cn_ = CRESC_FIN[ind_f]
+            niv_f = ff.pivot_table(index="rotulo", columns="_c", values=cn_, aggfunc="first").reindex(columns=periodos_f)
+            idx_f = {}
+            for r in (tab_f.index if sel_f else niv_f.index):
+                if r not in niv_f.index:
+                    continue
+                v = niv_f.loc[r]
+                ini = v.first_valid_index()
+                if ini is None or v[ini] <= 0:
+                    continue
+                idx = 100 * v / v[ini]
+                neg = idx[idx <= 0].index
+                if len(neg):  # base negativa no meio da série: o índice deixa de ter leitura
+                    idx[idx.index >= neg[0]] = np.nan
+                idx_f[r] = idx
+            if periodos_f:
+                idx_f["Agregado do grupo"] = indice_acumulado(niv_f)
+            nomes_f = list(idx_f)
+            ult_pf = ultf[0] if ultf and ultf[0] in niv_f.columns else (periodos_f[-1] if periodos_f else None)
+            tam_f = niv_f[ult_pf].sort_values(ascending=False) if ult_pf else pd.Series(dtype=float)
+            padrao_f = [r for r in (tab_f.index if sel_f else tam_f.index[:12]) if r in idx_f]
+            padrao_f += [n for n in ("Agregado do grupo",) if n in idx_f]
+            chave_lf = f"fin_cres_linhas_{ind_f}_{grp}_" + str(abs(hash((tuple(sel_f), tuple(periodos_f)))))
+            sel_lf = st.multiselect("Linhas no gráfico", nomes_f, default=padrao_f, key=chave_lf,
+                                    help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+            fig = go.Figure()
+            for nome in sel_lf:
+                y = idx_f[nome]
+                fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                         name=nome.split(" — ")[0] if " — " in nome else nome,
+                                         line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
+            fig.add_hline(y=100, line_dash="dot", line_color="gray")
+            fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro exercício",
+                              title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
         else:
             fig = go.Figure()
             for r in tab_f.index[:10]:
@@ -1996,11 +2082,16 @@ with aba_fin:
             if fmt_f == "pct":
                 fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig, width="stretch")
+        if agg_f == "cresc":
+            st.caption("Uma linha por instituição: valor ÷ valor do primeiro exercício × 100; a linha é interrompida "
+                       "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
+                       "amostra casada. A tabela acima mostra o crescimento de cada exercício contra o anterior.")
         ex_f = full_f.reset_index()
         c1, c2 = st.columns(2)
         c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                            file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key="fin_csv")
-        bruto_f = ff.drop(columns=["_c", "rotulo"], errors="ignore")
+        bruto_f = ff.drop(columns=["_c", "rotulo", "nivel_pdd"] + [c for c in ff.columns if c.endswith("_ant")],
+                          errors="ignore")
         c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
                            file_name="financeiro_base.xlsx", key="fin_xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -2179,6 +2270,8 @@ Dividend yield = dividendos + JCP pagos nos 12 meses (DFC, regime de caixa, só 
 contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
 ROE = lucro dos controladores ÷ PL dos controladores (PL total − não controladores), no fim do ano.
 Eficiência e carteira de crédito são aproximações próprias. Basileia e inadimplência não constam da DFP.
+Crescimento (PL dos controladores, carteira de crédito, ativo total, despesa de PDD) = exercício ÷ exercício anterior − 1;
+o gráfico mostra o crescimento acumulado em base 100 (por instituição e agregado do grupo em amostra casada).
 
 **Limitações conhecidas.**
 - D&A, capex e arrendamento vêm de busca textual na DFC: vazio = não identificado (nunca zero).
