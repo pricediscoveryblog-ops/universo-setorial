@@ -661,17 +661,42 @@ def empresa_financeira():
             "anualizados ×4)")
     st.caption(f"Financeiro / {d['subsetor'].iloc[0]} / **{seg_f}** · {desc} · "
                "base separada, com plano de contas de instituição financeira")
+    # ---- grupo de comparação (mesma lógica das não financeiras): segmento, subsetor, todas ou cesta escolhida
+    cc1, cc2 = st.columns([1, 2])
+    niveis_f = {"Segmento": "segmento", "Subsetor": "subsetor", "Todas as financeiras": None}
+    nivel_f = cc1.radio("Comparar com (mediana)", list(niveis_f) + ["Cesta de instituições"], horizontal=True,
+                        key="cmp_nivel_fin")
+    if nivel_f == "Cesta de instituições":
+        cesta_f = cc2.multiselect("Instituições da cesta (qualquer banco ou seguradora da base)",
+                                  sorted(fin["rotulo"].unique()), default=[emp_f], key="cmp_cesta_fin")
+        cn_cmp = set(fin.loc[fin["rotulo"].isin(cesta_f), "cnpj"].astype(str).str.zfill(14))
+        nome_cmp = f"da cesta ({len(cesta_f)})"
+    elif niveis_f[nivel_f] is None:
+        cn_cmp, nome_cmp = None, "das financeiras"
+    else:
+        col_n = niveis_f[nivel_f]
+        cn_cmp = set(fin.loc[fin[col_n] == d[col_n].iloc[0], "cnpj"].astype(str).str.zfill(14))
+        nome_cmp = str(d[col_n].iloc[0])
+
+    def cmp_f(df):
+        """Recorte do grupo de comparação; a própria instituição entra só se estiver no grupo (ou na cesta)."""
+        return df if cn_cmp is None else df[df["cnpj"].astype(str).str.zfill(14).isin(cn_cmp)]
+
+    n_cmp = cmp_f(pares)["cnpj"].nunique()
+    cc2.caption(f"Mediana calculada sobre {n_cmp} instituição(ões)" +
+                ("" if nivel_f == "Cesta de instituições" else f": {nome_cmp}") +
+                ". Vale para os indicadores e para os múltiplos de mercado abaixo.")
     disp_k = [k for k in FIN if k in d.columns and d[k].notna().any() and FIN[k][1] in ("pct", "x")]
     padrao = [k for k in ("roe", "roa", "pl_ativo", "indice_eficiencia", "custo_credito", "payout")
               if k in disp_k]
     sel = st.multiselect("Indicadores", disp_k, default=padrao, format_func=lambda k: FIN[k][0], key="ind_emp_fin")
-    med = pares[pares["segmento"] == seg_f].groupby(x_col)[sel].median() if sel else pd.DataFrame()
+    med = cmp_f(pares).groupby(x_col)[sel].median() if sel else pd.DataFrame()
     cols = st.columns(2)
     for i, k in enumerate(sel):
         mm = med[med.index.isin(d[x_col])]
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=d[x_col], y=d[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
-        fig.add_trace(go.Scatter(x=mm.index, y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        fig.add_trace(go.Scatter(x=mm.index, y=mm[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {nome_cmp}"))
         add_medias(fig, d[x_col], d[k], mm[k])
         fig.update_layout(title=FIN[k][0] + {"mm": " (R$ mm)", "pct": "", "x": " (x)"}[FIN[k][1]], height=320,
                           margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2))
@@ -716,7 +741,7 @@ def empresa_financeira():
                "Ponto no tempo: em cada data (fim de trimestre e último pregão), PL dos controladores do último "
                "ITR/DFP divulgado até a data e lucro e dividendos dos 12 meses desse documento. "
                "EV/EBITDA não se aplica a instituições financeiras.")
-    pares_m = mult[(mult["segmento"] == seg_f) & (mult["tipo"] == tipo_m)]
+    pares_m = cmp_f(mult[mult["tipo"] == tipo_m])
     med_m = pares_m.groupby("data")[["p_vpa", "p_l", "roe", "dividend_yield"]].median()
     med_m = med_m[med_m.index.isin(dm["data"])]
     graficos = [("P/VPA", "p_vpa", "x"), ("P/L", "p_l", "x"), ("ROE (lucro ÷ PL dos controladores)", "roe", "pct"),
@@ -725,7 +750,7 @@ def empresa_financeira():
     for (tit, k, fmt), col in zip(graficos, cm):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=dm["data"], y=dm[k], mode="lines+markers", name=emp_f.split(" — ")[0]))
-        fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {seg_f}"))
+        fig.add_trace(go.Scatter(x=med_m.index, y=med_m[k], mode="lines", line=dict(dash="dash"), name=f"Mediana {nome_cmp}"))
         add_medias(fig, dm["data"], dm[k], med_m[k])
         fig.update_layout(title=tit, height=320, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.25))
         if fmt == "pct":
