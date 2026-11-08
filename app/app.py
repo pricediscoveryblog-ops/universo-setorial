@@ -175,12 +175,21 @@ IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "
 st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon="📊", layout="wide")
 
 # ------------------------------------------------------------------ mercado: Brasil / EUA
-# O módulo EUA (app/eua.py) lê a base do coletor-eua direto do GitHub. Ao escolher EUA, a base brasileira nem
-# é carregada (st.stop), o que poupa memória no Streamlit gratuito.
-if st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado") == "EUA":
+# No modo EUA o app carrega a base americana (coletor-eua, dados da SEC; módulo app/eua.py) no lugar da brasileira
+# e roda as MESMAS abas. Abas e seções que dependem de dados só brasileiros (altas e baixas, calendário da CVM,
+# bancos e seguradoras, juros ETTJ, debêntures, aluguel de ações) ficam ocultas.
+MERCADO = st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado")
+EUA = MERCADO == "EUA"
+if st.session_state.get("_mercado_ant") not in (None, MERCADO):
+    for _k in [k for k in st.session_state if k != "mercado"]:     # filtros e seleções não valem no outro mercado
+        del st.session_state[_k]
+st.session_state["_mercado_ant"] = MERCADO
+MOEDA = "US$" if EUA else "R$"
+UN = f"{MOEDA} mm"
+if EUA:
     import eua
-    eua.render()
-    st.stop()
+    eua.ajustar_metricas(METRICAS, AGREG)
+    ROT = {k: v[0] for k, v in METRICAS.items()}
 
 
 # ------------------------------------------------------------------ dados
@@ -195,6 +204,14 @@ def carregar(versao: tuple = ()):
     base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
     base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
     base["cnpj"] = base["cnpj"].astype(str).str.zfill(14)
+    base = enriquecer(base)
+    cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
+    meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
+    return _carregar_resto(base, cob, meta)
+
+
+def enriquecer(base: pd.DataFrame) -> pd.DataFrame:
+    """Colunas derivadas comuns às bases brasileira e americana (DuPont, prazos, crescimento, graus, conversão)."""
     for c in ("ticker", "setor", "subsetor", "segmento", "empresa", "notas"):
         base[c] = base[c].fillna("")
     base["rotulo"] = base["ticker"] + " — " + base["empresa"]
@@ -217,8 +234,20 @@ def carregar(versao: tuple = ()):
     # conversão do EBITDA em caixa: FCO comparável (sem juros e dividendos) ÷ EBITDA IFRS 16. Sob IFRS 16 o
     # arrendamento pago sai do FCO, então FCO e EBITDA IFRS 16 estão no mesmo critério. Vazio com EBITDA ≤ 0.
     base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
-    cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
-    meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
+    return base
+
+
+def garantir_colunas(base: pd.DataFrame) -> pd.DataFrame:
+    """Colunas esperadas pelas abas que a base não trouxe (ex.: mercado sem preços) entram vazias."""
+    faltam = [k for k in METRICAS if k not in base.columns] + list(
+        {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m",
+         "m_receita_12m"} - set(base.columns)) + [c for c in AUX_COB if c not in base.columns]
+    for c in faltam:
+        base[c] = np.nan
+    return base
+
+
+def _carregar_resto(base, cob, meta):
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
     if not fin.empty:
         for k in FIN:  # métricas novas ausentes em bases geradas por versões anteriores do coletor
@@ -274,10 +303,7 @@ def carregar(versao: tuple = ()):
             mf = mult[mult["tipo"] == "anual"][["cnpj", "data", "valor_mercado", "p_l"]].drop_duplicates(["cnpj", "data"])
             fin = fin.drop(columns=[c for c in ("valor_mercado", "p_l") if c in fin.columns]) \
                      .merge(mf, left_on=["cnpj", "_dt"], right_on=["cnpj", "data"], how="left").drop(columns=["data", "_dt"])
-    for c in [k for k in METRICAS if k not in base.columns] + list(
-            {"m_pl_controladores", "m_lucro_12m", "m_ebitda_12m", "m_ebitda_pre_12m", "m_dividendos_12m",
-             "m_receita_12m"} - set(base.columns)) + [c for c in AUX_COB if c not in base.columns]:
-        base[c] = np.nan
+    base = garantir_colunas(base)
     if not fin.empty:
         for k in FIN:
             if k not in fin.columns:
@@ -534,7 +560,7 @@ def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     for c in cols:
         rot, f, _ = METRICAS[c]
         if f == "mm":
-            cfg[c] = st.column_config.NumberColumn(f"{rot} (R$ mm)", format="%,.1f")
+            cfg[c] = st.column_config.NumberColumn(f"{rot} ({UN})", format="%,.1f")
         elif f == "pct":
             cfg[c] = st.column_config.NumberColumn(rot, format="%.1f%%")
         elif f == "d":
@@ -564,12 +590,30 @@ def eixo_x(tipo: str) -> str:
     return "exercicio" if tipo == "anual" else "dt_fim"
 
 
-try:
-    base, cob, meta, fin, mult, fin_per = carregar(versao_arquivos(*(DADOS / f for f in (
-        "base.csv.gz", "cobertura.csv", "metadados.json", "financeiras.csv.gz", "multiplos.csv.gz"))))
-except FileNotFoundError:
-    st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
-    st.stop()
+@st.cache_resource(max_entries=1, show_spinner="Carregando a base americana…")
+def carregar_eua(versao: str):
+    """Base da SEC no formato da CVM. cache_resource (sem cópia por sessão): a base americana é ~10x a brasileira
+    e o Streamlit gratuito tem pouca memória. As abas só filtram a base, não a alteram."""
+    b = eua.compactar(garantir_colunas(enriquecer(eua.base_como_br())).copy())   # .copy(): desfragmenta
+    return b, eua.cobertura(), pd.Series(eua.metadados()), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
+if EUA:
+    if not eua.tem_acesso():
+        eua.sem_acesso()
+        st.stop()
+    try:
+        base, cob, meta, fin, mult, fin_per = carregar_eua(eua.versao())
+    except Exception as e:
+        eua.sem_acesso(str(e))
+        st.stop()
+else:
+    try:
+        base, cob, meta, fin, mult, fin_per = carregar(versao_arquivos(*(DADOS / f for f in (
+            "base.csv.gz", "cobertura.csv", "metadados.json", "financeiras.csv.gz", "multiplos.csv.gz"))))
+    except FileNotFoundError:
+        st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
+        st.stop()
 
 # ------------------------------------------------------------------ navegação: clique numa empresa -> aba Empresa
 _dest = st.session_state.pop("_ir_empresa", None)
@@ -600,10 +644,11 @@ def tabela_clicavel(dados: pd.DataFrame, rotulos, chave: str, alvo=None, **kw):
 
 
 # ------------------------------------------------------------------ barra lateral
-st.sidebar.title("📊 Universo setorial")
+st.sidebar.title("🇺🇸 Universo EUA" if EUA else "📊 Universo setorial")
 if meta is not None:
     st.sidebar.caption(f"Base gerada em {meta.get('gerado_em', '?')} · {meta.get('empresas_com_dados', '?')} empresas · "
-                       "Fonte: CVM (DFP/ITR) + classificação B3")
+                       + ("Fonte: SEC (10-K/10-Q, XBRL) + classificação SEC/SIC · US$ mm" if EUA else
+                          "Fonte: CVM (DFP/ITR) + classificação B3"))
 
 tipo_rot = st.sidebar.radio("Periodicidade", list(TIPOS), horizontal=False)
 tipo = TIPOS[tipo_rot]
@@ -923,7 +968,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
         else:
             eixo = "y" if f == "mm" else "y2"
             fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
-                                     name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
+                                     name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else f" ({UN})"),
                                      yaxis=eixo, line=dict(color=cor), marker=dict(color=cor)))
             if ponto:
                 fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
@@ -933,7 +978,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
         fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
         fig.add_hline(y=100, line_dash="dot", line_color="gray")
     else:
-        fig.update_layout(yaxis=dict(title="R$ mm"),
+        fig.update_layout(yaxis=dict(title=UN),
                           yaxis2=dict(title="Múltiplos (x) e %", overlaying="y", side="right", showgrid=False))
     fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), margin=dict(t=30, b=20, l=10, r=10))
     st.plotly_chart(fig, width="stretch")
@@ -942,7 +987,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
                    ". Use a escala de valores para vê-las.")
     st.caption("Série na periodicidade da barra lateral (anual: DFP; LTM e trimestral: ITR). Base 100 compara o "
                "comportamento relativo desde o primeiro ponto; em valores, "
-               "R$ mm à esquerda e múltiplos/% à direita. ◎ = valor calculado com o preço do último pregão, na cor da curva.")
+               f"{UN} à esquerda e múltiplos/% à direita. ◎ = valor calculado com o preço do último pregão, na cor da curva.")
 
 
 def add_medias(fig, x, y, ym=None, rotulo=""):
@@ -1089,10 +1134,19 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 
 # ------------------------------------------------------------------ abas
-aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
-    ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
-     "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"],
-    key="aba_principal", on_change="rerun")
+if EUA:
+    _abas_eua = ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Dados e download", "Cobertura",
+                 "Metodologia"]
+    if st.session_state.get("aba_principal") not in (None, *_abas_eua):
+        st.session_state["aba_principal"] = "Visão do setor"
+    aba_setor, aba_emp, aba_rank, aba_scr, aba_dados, aba_cob, aba_met = st.tabs(
+        _abas_eua, key="aba_principal", on_change="rerun")
+    aba_var = aba_cal = aba_fin = aba_jur = None          # sem dados nos EUA (blocos abaixo ficam desligados)
+else:
+    aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
+        ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
+         "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"],
+        key="aba_principal", on_change="rerun")
 st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
 
 # -------- Visão do setor: um indicador, série histórica completa, participação de cada empresa
@@ -1144,11 +1198,11 @@ with aba_setor:
     else:
         c1, c2 = st.columns([2, 1])
         ind = c1.selectbox("Indicador", list(METRICAS), index=list(METRICAS).index("receita"),
-                           format_func=lambda k: ROT[k] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)", "d": " (dias)"}[METRICAS[k][1]])
+                           format_func=lambda k: ROT[k] + {"mm": f" ({UN})", "pct": " (%)", "x": " (x)", "d": " (dias)"}[METRICAS[k][1]])
         fmt = METRICAS[ind][1]
         modo = c2.radio("Mostrar", ["Valores", "% do setor"], horizontal=True, disabled=(fmt != "mm"),
                         help="Participação = valor da empresa ÷ total do setor filtrado (setor/subsetor/segmento), "
-                             "no mesmo período. Disponível para indicadores em R$.")
+                             f"no mesmo período. Disponível para indicadores em {MOEDA}.")
         pct_setor = (modo == "% do setor") and fmt == "mm"
         periodos = ordem_periodos(setor_f)
         d_set = setor_f.assign(_c=col_periodo(setor_f))
@@ -1213,7 +1267,7 @@ with aba_setor:
                 plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
             longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
             fig = px.bar(longo, x="Período", y="v", color="Empresa",
-                         labels={"v": "% do setor" if pct_setor else ROT[ind] + " (R$ mm)"})
+                         labels={"v": "% do setor" if pct_setor else ROT[ind] + f" ({UN})"})
             fig.update_layout(barmode="relative", height=480, legend_title_text="")
             if pct_setor:
                 fig.update_yaxes(tickformat=".0%")
@@ -1388,7 +1442,7 @@ with aba_emp:
             if len(alertas):
                 fig.add_trace(go.Scatter(x=alertas[eixo_x(tipo)], y=alertas[m], mode="markers", name="Alerta",
                                          marker=dict(symbol="x", size=11, color="red")))
-            unidade = {"mm": " (R$ mm)", "pct": "", "x": " (x)", "d": " (dias)"}[METRICAS[m][1]]
+            unidade = {"mm": f" ({UN})", "pct": "", "x": " (x)", "d": " (dias)"}[METRICAS[m][1]]
             fig.update_layout(title=ROT[m] + unidade, height=320, margin=dict(t=40, b=20, l=10, r=10),
                               legend=dict(orientation="h", y=-0.2))
             if METRICAS[m][1] == "pct":
@@ -1401,11 +1455,13 @@ with aba_emp:
             med_cv = pares.groupby(ex_)["conversao_fco_ebitda"].median().reindex(d_emp[ex_])
             k1, k2 = st.columns(2)
             fig = go.Figure()
-            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["ebitda"], name="EBITDA IFRS 16", opacity=0.6))
-            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco"], name="FCO comparável", opacity=0.9))
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["ebitda"], name="EBITDA US GAAP" if EUA else "EBITDA IFRS 16",
+                                 opacity=0.6))
+            fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco"], name="FCO reportado" if EUA else "FCO comparável",
+                                 opacity=0.9))
             if d_emp["fco_reportado"].notna().any() and (d_emp["fco_reportado"] - d_emp["fco"]).abs().max() > 0.05:
                 fig.add_trace(go.Bar(x=d_emp[ex_], y=d_emp["fco_reportado"], name="FCO reportado", opacity=0.4))
-            fig.update_layout(title="EBITDA e FCO (R$ mm)", barmode="group", height=360,
+            fig.update_layout(title=f"EBITDA e FCO ({UN})", barmode="group", height=360,
                               legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
             k1.plotly_chart(fig, width="stretch")
             fig = go.Figure()
@@ -1418,7 +1474,11 @@ with aba_emp:
             fig.update_layout(title="Conversão de caixa (FCO ÷ EBITDA)", height=360, yaxis_tickformat=".0%",
                               legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
             k2.plotly_chart(fig, width="stretch")
-            st.caption("FCO comparável ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0). O FCO comparável tira "
+            st.caption("FCO como reportado ÷ EBITDA US GAAP do mesmo período (vazio com EBITDA ≤ 0). No US GAAP o FCO "
+                       "já desconta juros pagos, imposto pago e aluguel de arrendamento operacional, então a conversão "
+                       "tende a ficar abaixo da brasileira. Abaixo de 100%: parte do EBITDA ficou em capital de giro, "
+                       "juros ou imposto." if EUA else
+                       "FCO comparável ÷ EBITDA IFRS 16 do mesmo período (vazio com EBITDA ≤ 0). O FCO comparável tira "
                        "do operacional os juros e dividendos/JCP pagos ou recebidos que a empresa classifica ali. "
                        "Abaixo de 100%: parte do EBITDA ficou em capital de giro ou IR/CSLL pagos. "
                        "No trimestral, a sazonalidade do capital de giro pesa; LTM e anual são mais estáveis.")
@@ -1466,7 +1526,9 @@ with aba_emp:
 
         # ---- múltiplos de mercado (valor de mercado com preços da B3 sem ajuste)
         st.subheader("Múltiplos de mercado")
-        if mult.empty:
+        if EUA:
+            st.info("Múltiplos de mercado dos EUA entram na próxima etapa (preços via yfinance, já testados no coletor).")
+        elif mult.empty:
             st.info("Múltiplos ainda não gerados (multiplos.csv.gz). Rode o workflow no modo universo.")
         else:
             tipo_m = "anual" if tipo == "anual" else "trimestral"
@@ -1544,136 +1606,138 @@ with aba_emp:
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
 
-        # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço
-        st.subheader("Dívida em debêntures × dívida do balanço")
-        dvs = carregar_dividas(versao_arquivos(DADOS.parent / "dividas" / "debentures.csv.gz"))
-        cn_e = str(linha_e["cnpj"]).zfill(14)
-        dd = dvs[dvs["cnpj_grupo"] == cn_e].copy() if not dvs.empty else pd.DataFrame()
-        ult_bal = base[(base["cnpj"] == cn_e) & base["tipo"].isin(["trimestral", "anual"])].sort_values("dt_fim").tail(1)
-        if dvs.empty:
-            st.info("Base de debêntures ainda não coletada (saidas/dividas/). Rode o workflow dividas-debentures.")
-        elif dd.empty:
-            st.info("Nenhuma debênture ativa encontrada para a empresa ou suas controladas no SND.")
-        else:
-            dt_bal = ult_bal["dt_fim"].iloc[0] if len(ult_bal) else pd.NaT
-            div_bal = ult_bal["divida_bruta_ex_arrend"].iloc[0] if len(ult_bal) else np.nan
-            dd["remuneracao"] = dd.apply(rotulo_remuneracao, axis=1)
-            dd["premio_mercado"] = dd["taxa_indicativa"] - dd["taxa_emissao"].where(dd["taxa_emissao"] != 0)
-            na_data = dd[dd["data_emissao"] <= dt_bal] if pd.notna(dt_bal) else dd
-            tot_deb = na_data["saldo_rs_mm"].sum()
-            w = dd["saldo_rs_mm"].where(dd["duration_anos"].notna())
-            dur = (dd["duration_anos"] * w).sum() / w.sum() if w.sum() > 0 else np.nan
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"Dívida bruta no balanço ({dt_bal.strftime('%d/%m/%Y') if pd.notna(dt_bal) else '-'})",
-                      f"R$ {div_bal:,.0f} mi".replace(",", ".") if pd.notna(div_bal) else "-")
-            m2.metric("Debêntures (saldo estimado)", f"R$ {tot_deb:,.0f} mi".replace(",", "."),
-                      f"{tot_deb / div_bal:.0%} da dívida" if pd.notna(div_bal) and div_bal > 0 else None,
-                      delta_color="off")
-            dif = div_bal - tot_deb if pd.notna(div_bal) else np.nan
-            m3.metric("Dívida comercial/bancária (diferença)", f"R$ {dif:,.0f} mi".replace(",", ".") if pd.notna(dif) else "-",
-                      f"{dif / div_bal:.0%} da dívida" if pd.notna(dif) and div_bal > 0 else None, delta_color="off")
-            m4.metric("Duration média ponderada", f"{dur:.1f} anos" if pd.notna(dur) else "-")
-            if pd.notna(dif) and dif < 0:
-                st.caption("⚠️ Debêntures acima da dívida do balanço: pode haver debênture de controlada não consolidada, "
-                           "amortização recente não refletida no SND, ou diferença entre saldo estimado e valor contábil.")
-            cols_d = ["codigo", "emissor", "via_controlada", "data_emissao", "vencimento", "remuneracao", "taxa_indicativa",
-                      "premio_mercado", "pct_pu_par", "duration_anos", "saldo_rs_mm", "incentivada"]
-            tab_d = dd[[c for c in cols_d if c in dd.columns]].sort_values("vencimento").assign(
-                data_emissao=lambda x: x["data_emissao"].dt.date, vencimento=lambda x: x["vencimento"].dt.date)
-            st.dataframe(tab_d, hide_index=True, width="stretch", column_config={
-                "codigo": "Código", "emissor": "Emissor", "via_controlada": st.column_config.CheckboxColumn("Controlada"),
-                "data_emissao": "Emissão", "vencimento": "Vencimento", "remuneracao": "Remuneração (emissão)",
-                "taxa_indicativa": st.column_config.NumberColumn("Taxa indicativa ANBIMA", format="%.2f"),
-                "premio_mercado": st.column_config.NumberColumn("Mercado − emissão (p.p.)", format="%+.2f"),
-                "pct_pu_par": st.column_config.NumberColumn("% PU par", format="%.1f"),
-                "duration_anos": st.column_config.NumberColumn("Duration (anos)", format="%.1f"),
-                "saldo_rs_mm": st.column_config.NumberColumn("Saldo (R$ mm)", format="%,.1f"),
-                "incentivada": st.column_config.CheckboxColumn("Incentivada (12.431)")})
-            g1, g2 = st.columns(2)
-            venc = dd.assign(ano=dd["vencimento"].dt.year).groupby(["ano", "indice"])["saldo_rs_mm"].sum().reset_index()
-            fig = px.bar(venc, x="ano", y="saldo_rs_mm", color="indice", labels={"saldo_rs_mm": "R$ mm", "ano": "",
-                                                                                "indice": "Indexador"})
-            fig.update_layout(title="Cronograma de vencimentos (saldo atual)", height=340, margin=dict(t=40, b=20, l=10, r=10))
-            g1.plotly_chart(fig, width="stretch")
-            comp = pd.DataFrame({"Origem": ["Debêntures", "Comercial/bancária"],
-                                 "R$ mm": [tot_deb, max(dif, 0) if pd.notna(dif) else np.nan]})
-            fig = px.pie(comp, names="Origem", values="R$ mm", hole=0.5)
-            fig.update_layout(title="Composição da dívida bruta", height=340, margin=dict(t=40, b=20, l=10, r=10))
-            g2.plotly_chart(fig, width="stretch")
-            st.caption("Fontes: SND/debentures.com.br (debêntures ativas, emissão, vencimento, quantidade em mercado, VNA, "
-                       "remuneração e CNPJ do emissor), ANBIMA (mercado secundário: taxa indicativa, PU, % do PU par e "
-                       "duration em dias úteis ÷ 252) e CVM/FRE item 9.1.c (controladas). Saldo estimado = quantidade em "
-                       "mercado × PU par (ou VNA, sem preço ANBIMA) na data mais recente, não na data do balanço. "
-                       "Na comparação com o balanço entram só debêntures emitidas até a data dele. A diferença inclui "
-                       "empréstimos bancários, BNDES, CCB, notas comerciais, dívida externa e a diferença entre o saldo "
-                       "estimado e o valor contábil (custo amortizado).")
-
-        # ---- aluguel de ações (custo do short)
-        st.subheader("Aluguel de ações (custo do short)")
-        alug = carregar_aluguel(versao_arquivos(DADOS.parent / "aluguel" / "resumo.csv.gz"))
-        raiz_e = str(linha_e["ticker"])[:4]
-        a_emp = alug[alug["ticker"].str[:4] == raiz_e] if not alug.empty else pd.DataFrame()
-        if alug.empty:
-            st.info("Dados de aluguel ainda não disponíveis (saidas/aluguel/resumo.csv.gz).")
-        elif a_emp.empty:
-            st.info(f"Sem registros de aluguel para os papéis {raiz_e}*.")
-        else:
-            tks = a_emp.groupby("ticker")["saldo_alugado_qtd"].mean().sort_values(ascending=False).index.tolist()
-            tk = st.selectbox("Papel", tks, key="alug_tk")
-            at = a_emp[a_emp["ticker"] == tk].sort_values("data")
-            # comparáveis: em cada empresa do grupo, o papel com maior saldo alugado médio
-            grupo = cmp(base[base["tipo"] == tipo])[["cnpj", "ticker"]].drop_duplicates("cnpj")
-            raiz_cnpj = dict(zip(grupo["ticker"].astype(str).str[:4], grupo["cnpj"]))
-            ag = alug[alug["ticker"].str[:4].isin(raiz_cnpj)]
-            princ = (ag.groupby("ticker")["saldo_alugado_qtd"].mean().reset_index()
-                     .assign(r=lambda x: x["ticker"].str[:4]).sort_values("saldo_alugado_qtd").groupby("r").tail(1)["ticker"])
-            med_tx = ag[ag["ticker"].isin(princ)].groupby("data")["taxa_tomador_media"].median()
-            a1, a2 = st.columns(2)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_tomador_media"], mode="lines", name=f"Tomador {tk}"))
-            fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_doador_media"], mode="lines", name=f"Doador {tk}"))
-            mt = med_tx.reindex(at["data"])
-            fig.add_trace(go.Scatter(x=at["data"], y=mt, mode="lines", line=dict(dash="dash"),
-                                     name=f"Mediana tomador {nome_cmp}"))
-            add_medias(fig, at["data"], at["taxa_tomador_media"], mt, "tomador")
-            fig.update_layout(title="Taxa de aluguel (média ponderada do dia, % a.a.)", height=360,
-                              yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.25),
-                              margin=dict(t=40, b=20, l=10, r=10))
-            a1.plotly_chart(fig, width="stretch")
-            # saldo alugado em % das ações em circulação (todas as classes da empresa)
-            if not mult.empty:
-                ult_m = mult[mult["tipo"] == "trimestral"].sort_values("data").groupby("cnpj").tail(1)
-                acoes = (ult_m["acoes_on"].fillna(0) + ult_m["acoes_pn"].fillna(0)).where(lambda x: x > 0)
-                acoes_por_cnpj = dict(zip(ult_m["cnpj"], acoes))
+        if not EUA:          # debêntures (SND/ANBIMA) e aluguel de ações (B3): só Brasil
+            # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço
+            st.subheader("Dívida em debêntures × dívida do balanço")
+            dvs = carregar_dividas(versao_arquivos(DADOS.parent / "dividas" / "debentures.csv.gz"))
+            cn_e = str(linha_e["cnpj"]).zfill(14)
+            dd = dvs[dvs["cnpj_grupo"] == cn_e].copy() if not dvs.empty else pd.DataFrame()
+            ult_bal = base[(base["cnpj"] == cn_e) & base["tipo"].isin(["trimestral", "anual"])].sort_values("dt_fim").tail(1)
+            if dvs.empty:
+                st.info("Base de debêntures ainda não coletada (saidas/dividas/). Rode o workflow dividas-debentures.")
+            elif dd.empty:
+                st.info("Nenhuma debênture ativa encontrada para a empresa ou suas controladas no SND.")
             else:
-                acoes_por_cnpj = {}
-            def pct_alugado(df_r, cnpj_):
-                q = acoes_por_cnpj.get(cnpj_)
-                serie = df_r.groupby("data")["saldo_alugado_qtd"].sum(min_count=1)
-                return serie / q if q else serie * np.nan
-            p_emp = pct_alugado(a_emp, linha_e["cnpj"])
-            pares_pct = [pct_alugado(ag[ag["ticker"].str[:4] == r], c).rename(r) for r, c in raiz_cnpj.items()]
-            med_pct = pd.concat(pares_pct, axis=1).median(axis=1) if pares_pct else pd.Series(dtype=float)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=p_emp.index, y=p_emp.values, mode="lines", name=f"{raiz_e} (todas as classes)"))
-            mp = med_pct.reindex(p_emp.index)
-            fig.add_trace(go.Scatter(x=p_emp.index, y=mp.values, mode="lines", line=dict(dash="dash"),
-                                     name=f"Mediana {nome_cmp}"))
-            add_medias(fig, p_emp.index, p_emp.values, mp.values)
-            fig.update_layout(title="Saldo alugado (% das ações em circulação)", height=360, yaxis_tickformat=".1%",
-                              legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
-            a2.plotly_chart(fig, width="stretch")
-            st.caption(f"Fonte: B3 (empréstimo de ativos), via coletor-aluguel-b3; série desde "
-                       f"{alug['data'].min().date()}. Taxas ao ano (a B3 informa em fração; 0,04 = 4% a.a.), média ponderada pela quantidade contratada no "
-                       "dia (eletrônico e balcão). Saldo alugado ÷ ações em circulação da última composição do capital. "
-                       "Comparáveis: o papel com maior saldo alugado de cada empresa do grupo escolhido.")
+                dt_bal = ult_bal["dt_fim"].iloc[0] if len(ult_bal) else pd.NaT
+                div_bal = ult_bal["divida_bruta_ex_arrend"].iloc[0] if len(ult_bal) else np.nan
+                dd["remuneracao"] = dd.apply(rotulo_remuneracao, axis=1)
+                dd["premio_mercado"] = dd["taxa_indicativa"] - dd["taxa_emissao"].where(dd["taxa_emissao"] != 0)
+                na_data = dd[dd["data_emissao"] <= dt_bal] if pd.notna(dt_bal) else dd
+                tot_deb = na_data["saldo_rs_mm"].sum()
+                w = dd["saldo_rs_mm"].where(dd["duration_anos"].notna())
+                dur = (dd["duration_anos"] * w).sum() / w.sum() if w.sum() > 0 else np.nan
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(f"Dívida bruta no balanço ({dt_bal.strftime('%d/%m/%Y') if pd.notna(dt_bal) else '-'})",
+                          f"R$ {div_bal:,.0f} mi".replace(",", ".") if pd.notna(div_bal) else "-")
+                m2.metric("Debêntures (saldo estimado)", f"R$ {tot_deb:,.0f} mi".replace(",", "."),
+                          f"{tot_deb / div_bal:.0%} da dívida" if pd.notna(div_bal) and div_bal > 0 else None,
+                          delta_color="off")
+                dif = div_bal - tot_deb if pd.notna(div_bal) else np.nan
+                m3.metric("Dívida comercial/bancária (diferença)", f"R$ {dif:,.0f} mi".replace(",", ".") if pd.notna(dif) else "-",
+                          f"{dif / div_bal:.0%} da dívida" if pd.notna(dif) and div_bal > 0 else None, delta_color="off")
+                m4.metric("Duration média ponderada", f"{dur:.1f} anos" if pd.notna(dur) else "-")
+                if pd.notna(dif) and dif < 0:
+                    st.caption("⚠️ Debêntures acima da dívida do balanço: pode haver debênture de controlada não consolidada, "
+                               "amortização recente não refletida no SND, ou diferença entre saldo estimado e valor contábil.")
+                cols_d = ["codigo", "emissor", "via_controlada", "data_emissao", "vencimento", "remuneracao", "taxa_indicativa",
+                          "premio_mercado", "pct_pu_par", "duration_anos", "saldo_rs_mm", "incentivada"]
+                tab_d = dd[[c for c in cols_d if c in dd.columns]].sort_values("vencimento").assign(
+                    data_emissao=lambda x: x["data_emissao"].dt.date, vencimento=lambda x: x["vencimento"].dt.date)
+                st.dataframe(tab_d, hide_index=True, width="stretch", column_config={
+                    "codigo": "Código", "emissor": "Emissor", "via_controlada": st.column_config.CheckboxColumn("Controlada"),
+                    "data_emissao": "Emissão", "vencimento": "Vencimento", "remuneracao": "Remuneração (emissão)",
+                    "taxa_indicativa": st.column_config.NumberColumn("Taxa indicativa ANBIMA", format="%.2f"),
+                    "premio_mercado": st.column_config.NumberColumn("Mercado − emissão (p.p.)", format="%+.2f"),
+                    "pct_pu_par": st.column_config.NumberColumn("% PU par", format="%.1f"),
+                    "duration_anos": st.column_config.NumberColumn("Duration (anos)", format="%.1f"),
+                    "saldo_rs_mm": st.column_config.NumberColumn("Saldo (R$ mm)", format="%,.1f"),
+                    "incentivada": st.column_config.CheckboxColumn("Incentivada (12.431)")})
+                g1, g2 = st.columns(2)
+                venc = dd.assign(ano=dd["vencimento"].dt.year).groupby(["ano", "indice"])["saldo_rs_mm"].sum().reset_index()
+                fig = px.bar(venc, x="ano", y="saldo_rs_mm", color="indice", labels={"saldo_rs_mm": "R$ mm", "ano": "",
+                                                                                    "indice": "Indexador"})
+                fig.update_layout(title="Cronograma de vencimentos (saldo atual)", height=340, margin=dict(t=40, b=20, l=10, r=10))
+                g1.plotly_chart(fig, width="stretch")
+                comp = pd.DataFrame({"Origem": ["Debêntures", "Comercial/bancária"],
+                                     "R$ mm": [tot_deb, max(dif, 0) if pd.notna(dif) else np.nan]})
+                fig = px.pie(comp, names="Origem", values="R$ mm", hole=0.5)
+                fig.update_layout(title="Composição da dívida bruta", height=340, margin=dict(t=40, b=20, l=10, r=10))
+                g2.plotly_chart(fig, width="stretch")
+                st.caption("Fontes: SND/debentures.com.br (debêntures ativas, emissão, vencimento, quantidade em mercado, VNA, "
+                           "remuneração e CNPJ do emissor), ANBIMA (mercado secundário: taxa indicativa, PU, % do PU par e "
+                           "duration em dias úteis ÷ 252) e CVM/FRE item 9.1.c (controladas). Saldo estimado = quantidade em "
+                           "mercado × PU par (ou VNA, sem preço ANBIMA) na data mais recente, não na data do balanço. "
+                           "Na comparação com o balanço entram só debêntures emitidas até a data dele. A diferença inclui "
+                           "empréstimos bancários, BNDES, CCB, notas comerciais, dívida externa e a diferença entre o saldo "
+                           "estimado e o valor contábil (custo amortizado).")
+
+            # ---- aluguel de ações (custo do short)
+            st.subheader("Aluguel de ações (custo do short)")
+            alug = carregar_aluguel(versao_arquivos(DADOS.parent / "aluguel" / "resumo.csv.gz"))
+            raiz_e = str(linha_e["ticker"])[:4]
+            a_emp = alug[alug["ticker"].str[:4] == raiz_e] if not alug.empty else pd.DataFrame()
+            if alug.empty:
+                st.info("Dados de aluguel ainda não disponíveis (saidas/aluguel/resumo.csv.gz).")
+            elif a_emp.empty:
+                st.info(f"Sem registros de aluguel para os papéis {raiz_e}*.")
+            else:
+                tks = a_emp.groupby("ticker")["saldo_alugado_qtd"].mean().sort_values(ascending=False).index.tolist()
+                tk = st.selectbox("Papel", tks, key="alug_tk")
+                at = a_emp[a_emp["ticker"] == tk].sort_values("data")
+                # comparáveis: em cada empresa do grupo, o papel com maior saldo alugado médio
+                grupo = cmp(base[base["tipo"] == tipo])[["cnpj", "ticker"]].drop_duplicates("cnpj")
+                raiz_cnpj = dict(zip(grupo["ticker"].astype(str).str[:4], grupo["cnpj"]))
+                ag = alug[alug["ticker"].str[:4].isin(raiz_cnpj)]
+                princ = (ag.groupby("ticker")["saldo_alugado_qtd"].mean().reset_index()
+                         .assign(r=lambda x: x["ticker"].str[:4]).sort_values("saldo_alugado_qtd").groupby("r").tail(1)["ticker"])
+                med_tx = ag[ag["ticker"].isin(princ)].groupby("data")["taxa_tomador_media"].median()
+                a1, a2 = st.columns(2)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_tomador_media"], mode="lines", name=f"Tomador {tk}"))
+                fig.add_trace(go.Scatter(x=at["data"], y=at["taxa_doador_media"], mode="lines", name=f"Doador {tk}"))
+                mt = med_tx.reindex(at["data"])
+                fig.add_trace(go.Scatter(x=at["data"], y=mt, mode="lines", line=dict(dash="dash"),
+                                         name=f"Mediana tomador {nome_cmp}"))
+                add_medias(fig, at["data"], at["taxa_tomador_media"], mt, "tomador")
+                fig.update_layout(title="Taxa de aluguel (média ponderada do dia, % a.a.)", height=360,
+                                  yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.25),
+                                  margin=dict(t=40, b=20, l=10, r=10))
+                a1.plotly_chart(fig, width="stretch")
+                # saldo alugado em % das ações em circulação (todas as classes da empresa)
+                if not mult.empty:
+                    ult_m = mult[mult["tipo"] == "trimestral"].sort_values("data").groupby("cnpj").tail(1)
+                    acoes = (ult_m["acoes_on"].fillna(0) + ult_m["acoes_pn"].fillna(0)).where(lambda x: x > 0)
+                    acoes_por_cnpj = dict(zip(ult_m["cnpj"], acoes))
+                else:
+                    acoes_por_cnpj = {}
+                def pct_alugado(df_r, cnpj_):
+                    q = acoes_por_cnpj.get(cnpj_)
+                    serie = df_r.groupby("data")["saldo_alugado_qtd"].sum(min_count=1)
+                    return serie / q if q else serie * np.nan
+                p_emp = pct_alugado(a_emp, linha_e["cnpj"])
+                pares_pct = [pct_alugado(ag[ag["ticker"].str[:4] == r], c).rename(r) for r, c in raiz_cnpj.items()]
+                med_pct = pd.concat(pares_pct, axis=1).median(axis=1) if pares_pct else pd.Series(dtype=float)
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=p_emp.index, y=p_emp.values, mode="lines", name=f"{raiz_e} (todas as classes)"))
+                mp = med_pct.reindex(p_emp.index)
+                fig.add_trace(go.Scatter(x=p_emp.index, y=mp.values, mode="lines", line=dict(dash="dash"),
+                                         name=f"Mediana {nome_cmp}"))
+                add_medias(fig, p_emp.index, p_emp.values, mp.values)
+                fig.update_layout(title="Saldo alugado (% das ações em circulação)", height=360, yaxis_tickformat=".1%",
+                                  legend=dict(orientation="h", y=-0.25), margin=dict(t=40, b=20, l=10, r=10))
+                a2.plotly_chart(fig, width="stretch")
+                st.caption(f"Fonte: B3 (empréstimo de ativos), via coletor-aluguel-b3; série desde "
+                           f"{alug['data'].min().date()}. Taxas ao ano (a B3 informa em fração; 0,04 = 4% a.a.), média ponderada pela quantidade contratada no "
+                           "dia (eletrônico e balcão). Saldo alugado ÷ ações em circulação da última composição do capital. "
+                           "Comparáveis: o papel com maior saldo alugado de cada empresa do grupo escolhido.")
 
         # ---- gráficos sobrepostos: valor de mercado (padrão) + outras linhas para comparar comportamento
         st.subheader("Gráficos sobrepostos")
         ex_ = eixo_x(tipo)
         cand = [k for k in METRICAS if k in d_emp.columns and d_emp[k].notna().any()]
         o1, o2 = st.columns([3, 2])
-        sel_ov = o1.multiselect("Linhas da empresa", cand, default=[k for k in ("valor_mercado",) if k in cand],
+        padrao_ov = [k for k in ("valor_mercado",) if k in cand] or [k for k in ("receita", "lucro_liquido") if k in cand]
+        sel_ov = o1.multiselect("Linhas da empresa", cand, default=padrao_ov,
                                 format_func=lambda k: ROT[k], key="ov_ind")
         outras = o1.multiselect("Valor de mercado de outras empresas (opcional)",
                                 sorted(r for r in base["rotulo"].unique() if r != emp), key="ov_emp")
@@ -1716,7 +1780,7 @@ with aba_emp:
                 else:
                     eixo = "y" if f == "mm" else "y2"
                     fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
-                                             name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else " (R$ mm)"),
+                                             name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else f" ({UN})"),
                                              yaxis=eixo, line=dict(color=cor), marker=dict(color=cor)))
                     if ponto:
                         fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
@@ -1726,7 +1790,7 @@ with aba_emp:
                 fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
                 fig.add_hline(y=100, line_dash="dot", line_color="gray")
             else:
-                fig.update_layout(yaxis=dict(title="R$ mm"),
+                fig.update_layout(yaxis=dict(title=UN),
                                   yaxis2=dict(title="Múltiplos (x) e % ", overlaying="y", side="right", showgrid=False))
             fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), margin=dict(t=30, b=20, l=10, r=10))
             st.plotly_chart(fig, width="stretch")
@@ -1734,7 +1798,7 @@ with aba_emp:
                 st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
                            ". Use a escala de valores para vê-las.")
             st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
-                       "na barra lateral. Em valores, R$ mm ficam no eixo da esquerda; múltiplos e % no da direita. "
+                       f"na barra lateral. Em valores, {UN} ficam no eixo da esquerda; múltiplos e % no da direita. "
                        "◎ = indicador de mercado calculado com o preço do último pregão, na cor da curva correspondente.")
 
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
@@ -1789,13 +1853,13 @@ with aba_scr:
     sel_scr = c1.multiselect("Indicadores para filtrar", opcoes_scr,
                              default=[k for k in ("p_l", "p_vpa", "div_liq_ebitda_ifrs16", "roe_pl_final") if k in opcoes_scr],
                              format_func=lambda k: rot_scr[k] + (" (%)" if fmt_scr[k] == "pct" else
-                                                                 " (R$ mm)" if fmt_scr[k] == "mm" else
+                                                                 f" ({UN})" if fmt_scr[k] == "mm" else
                                                                  " (dias)" if fmt_scr[k] == "d" else " (x)"),
                              key="scr_ind")
     sem_velha = c2.checkbox("Excluir cotações antigas (último negócio há mais de 30 dias)", value=True, key="scr_velha")
     sem_alerta = c2.checkbox("Excluir empresas com alerta de qualidade no último LTM", value=False, key="scr_alerta")
     res = snap.copy()
-    if sem_velha and "data_ultimo_negocio" in res:
+    if sem_velha and "data_ultimo_negocio" in res and res["data_ultimo_negocio"].notna().any():
         ref_d = pd.to_datetime(res["data_cotacao"]).max()
         res = res[(ref_d - pd.to_datetime(res["data_ultimo_negocio"])).dt.days <= 30]
     if sem_alerta:
@@ -1836,7 +1900,7 @@ with aba_scr:
         elif fmt_scr[k] == "d":
             cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (dias)", format="%.0f")
         else:
-            cfg[k] = st.column_config.NumberColumn(rot_scr[k] + " (R$ mm)", format="%,.0f")
+            cfg[k] = st.column_config.NumberColumn(rot_scr[k] + f" ({UN})", format="%,.0f")
     vis_r = vis_r.sort_values(mostrar[0] if mostrar else "rotulo")
     tabela_clicavel(vis_r, vis_r["rotulo"], "clk_scr", column_config=cfg, hide_index=True,
                     width="stretch", height=min(700, 38 + 35 * len(vis_r)))
@@ -1880,78 +1944,79 @@ JANELAS = {"Diária": ("D", 1), "Semanal": ("D", 7), "Mensal": ("M", 1), "Trimes
            "Semestral": ("M", 6), "Anual": ("M", 12), "2 anos": ("M", 24), "3 anos": ("M", 36),
            "5 anos": ("M", 60)}
 
-with aba_var:
-    vmd = carregar_vm_diario(versao_arquivos(DADOS / "valor_mercado_diario.csv.gz"))
-    if vmd.empty:
-        st.info("Série diária de valor de mercado ainda não gerada: aparece depois da próxima execução do coletor.")
-    else:
-        pregoes = sorted(vmd["data"].unique())
-        c0, c1, c2 = st.columns([1.4, 1.4, 1.4])
-        d_fim = c0.selectbox("Data final (pregão)", pregoes[::-1],
-                             format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="var_dfim")
-        d_fim = pd.Timestamp(d_fim)
-        jan = c1.selectbox("Período", list(JANELAS), index=2, key="var_jan")
-        n_top = c2.slider("Quantas de cada lado", 5, 50, 30, 5, key="var_n")
-        c3 = st.container()
-        unidade, passo = JANELAS[jan]
-        alvo = d_fim - (pd.Timedelta(days=passo) if unidade == "D" else pd.DateOffset(months=passo))
-        tol = 3 if unidade == "D" else 20       # tolerância em dias para achar o pregão de referência
-        fim = vmd[vmd["data"] == d_fim][["cnpj", "valor_mercado"]].rename(columns={"valor_mercado": "vm_fim"})
-        if jan == "Diária":                    # diária: pregão imediatamente anterior ao escolhido
-            anteriores = [d for d in pregoes if d < d_fim]
-            alvo = pd.Timestamp(anteriores[-1]) if anteriores else alvo
-        ant = vmd[vmd["data"] <= alvo].sort_values("data").groupby("cnpj").tail(1)
-        ant = ant[(alvo - ant["data"]).dt.days <= tol][["cnpj", "data", "valor_mercado"]].rename(
-            columns={"data": "data_ini", "valor_mercado": "vm_ini"})
-        v = fim.merge(ant, on="cnpj").assign(variacao=lambda x: x["vm_fim"] / x["vm_ini"] - 1)
-        info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]
-        if not fin.empty:
-            f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
-            for c in ("rotulo", "setor", "subsetor", "segmento"):
-                if c not in f_i.columns:
-                    f_i[c] = "Financeiro" if c == "setor" else np.nan
-            info = pd.concat([info, f_i[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]])
-        v = v.merge(info.drop_duplicates("cnpj"), on="cnpj", how="left")
-        set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
-        if set_f:
-            v = v[v["setor"].isin(set_f)]
-        vm_min = st.slider("Valor de mercado mínimo (R$ bi)", 0.0, 20.0, 0.5, 0.25, key="var_vmmin",
-                           help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
-        v = v[(v["vm_fim"] >= vm_min * 1000) & v["variacao"].notna()]
-        v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em R$ milhões
-        st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
-                   f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. O valor de mercado "
-                   "usa as ações vigentes em cada data, então desdobramentos e grupamentos não viram variação; "
-                   "emissões e recompras, sim. Não inclui dividendos (é variação de preço, não retorno total).")
-        cfg_v = {"rotulo": "Empresa", "setor": "Setor", "variacao": st.column_config.NumberColumn("Variação", format="percent"),
-                 "vm_bi": st.column_config.NumberColumn("Valor de mercado (R$ bi)", format="%,.1f"),
-                 "data_ini": "Pregão inicial"}
-        cols_v = ["rotulo", "setor", "variacao", "vm_bi", "data_ini"]
-        altas = v.nlargest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
-        baixas = v.nsmallest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
-        t1, t2 = st.columns(2)
-        t1.markdown(f"**{n_top} maiores altas**")
-        tabela_clicavel(altas, altas["rotulo"], "clk_altas", alvo=t1, hide_index=True, width="stretch",
-                        column_config=cfg_v, height=min(900, 38 + 35 * n_top))
-        t2.markdown(f"**{n_top} maiores baixas**")
-        tabela_clicavel(baixas, baixas["rotulo"], "clk_baixas", alvo=t2, hide_index=True, width="stretch",
-                        column_config=cfg_v, height=min(900, 38 + 35 * n_top))
-        st.subheader("Variação por setor")
-        por_setor = v.groupby("setor").apply(
-            lambda g: pd.Series({"Mediana": g["variacao"].median(),
-                                 "Ponderada pelo valor de mercado": g["vm_fim"].sum() / (g["vm_fim"] / (1 + g["variacao"])).sum() - 1,
-                                 "Empresas": len(g)}), include_groups=False).sort_values("Ponderada pelo valor de mercado")
-        fig = go.Figure()
-        for c, cor in (("Mediana", None), ("Ponderada pelo valor de mercado", "#16a34a")):
-            fig.add_trace(go.Bar(y=por_setor.index, x=por_setor[c], orientation="h", name=c, marker_color=cor))
-        fig.add_vline(x=0, line_color="gray")
-        fig.update_layout(height=max(360, 26 * len(por_setor)), barmode="group", xaxis_tickformat=".1%",
-                          legend=dict(orientation="h", y=-0.15), margin=dict(t=20, b=20, l=10, r=10))
-        st.plotly_chart(fig, width="stretch")
-        exp_v = v[cols_v + ["subsetor", "segmento", "vm_fim", "vm_ini"]].sort_values("variacao", ascending=False)
-        st.download_button("⬇️ Todas as empresas (CSV)",
-                           exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                           file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
+if not EUA:          # sem dados equivalentes nos EUA
+    with aba_var:
+        vmd = carregar_vm_diario(versao_arquivos(DADOS / "valor_mercado_diario.csv.gz"))
+        if vmd.empty:
+            st.info("Série diária de valor de mercado ainda não gerada: aparece depois da próxima execução do coletor.")
+        else:
+            pregoes = sorted(vmd["data"].unique())
+            c0, c1, c2 = st.columns([1.4, 1.4, 1.4])
+            d_fim = c0.selectbox("Data final (pregão)", pregoes[::-1],
+                                 format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="var_dfim")
+            d_fim = pd.Timestamp(d_fim)
+            jan = c1.selectbox("Período", list(JANELAS), index=2, key="var_jan")
+            n_top = c2.slider("Quantas de cada lado", 5, 50, 30, 5, key="var_n")
+            c3 = st.container()
+            unidade, passo = JANELAS[jan]
+            alvo = d_fim - (pd.Timedelta(days=passo) if unidade == "D" else pd.DateOffset(months=passo))
+            tol = 3 if unidade == "D" else 20       # tolerância em dias para achar o pregão de referência
+            fim = vmd[vmd["data"] == d_fim][["cnpj", "valor_mercado"]].rename(columns={"valor_mercado": "vm_fim"})
+            if jan == "Diária":                    # diária: pregão imediatamente anterior ao escolhido
+                anteriores = [d for d in pregoes if d < d_fim]
+                alvo = pd.Timestamp(anteriores[-1]) if anteriores else alvo
+            ant = vmd[vmd["data"] <= alvo].sort_values("data").groupby("cnpj").tail(1)
+            ant = ant[(alvo - ant["data"]).dt.days <= tol][["cnpj", "data", "valor_mercado"]].rename(
+                columns={"data": "data_ini", "valor_mercado": "vm_ini"})
+            v = fim.merge(ant, on="cnpj").assign(variacao=lambda x: x["vm_fim"] / x["vm_ini"] - 1)
+            info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]
+            if not fin.empty:
+                f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
+                for c in ("rotulo", "setor", "subsetor", "segmento"):
+                    if c not in f_i.columns:
+                        f_i[c] = "Financeiro" if c == "setor" else np.nan
+                info = pd.concat([info, f_i[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]])
+            v = v.merge(info.drop_duplicates("cnpj"), on="cnpj", how="left")
+            set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
+            if set_f:
+                v = v[v["setor"].isin(set_f)]
+            vm_min = st.slider("Valor de mercado mínimo (R$ bi)", 0.0, 20.0, 0.5, 0.25, key="var_vmmin",
+                               help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
+            v = v[(v["vm_fim"] >= vm_min * 1000) & v["variacao"].notna()]
+            v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em R$ milhões
+            st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
+                       f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. O valor de mercado "
+                       "usa as ações vigentes em cada data, então desdobramentos e grupamentos não viram variação; "
+                       "emissões e recompras, sim. Não inclui dividendos (é variação de preço, não retorno total).")
+            cfg_v = {"rotulo": "Empresa", "setor": "Setor", "variacao": st.column_config.NumberColumn("Variação", format="percent"),
+                     "vm_bi": st.column_config.NumberColumn("Valor de mercado (R$ bi)", format="%,.1f"),
+                     "data_ini": "Pregão inicial"}
+            cols_v = ["rotulo", "setor", "variacao", "vm_bi", "data_ini"]
+            altas = v.nlargest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
+            baixas = v.nsmallest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)
+            t1, t2 = st.columns(2)
+            t1.markdown(f"**{n_top} maiores altas**")
+            tabela_clicavel(altas, altas["rotulo"], "clk_altas", alvo=t1, hide_index=True, width="stretch",
+                            column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+            t2.markdown(f"**{n_top} maiores baixas**")
+            tabela_clicavel(baixas, baixas["rotulo"], "clk_baixas", alvo=t2, hide_index=True, width="stretch",
+                            column_config=cfg_v, height=min(900, 38 + 35 * n_top))
+            st.subheader("Variação por setor")
+            por_setor = v.groupby("setor").apply(
+                lambda g: pd.Series({"Mediana": g["variacao"].median(),
+                                     "Ponderada pelo valor de mercado": g["vm_fim"].sum() / (g["vm_fim"] / (1 + g["variacao"])).sum() - 1,
+                                     "Empresas": len(g)}), include_groups=False).sort_values("Ponderada pelo valor de mercado")
+            fig = go.Figure()
+            for c, cor in (("Mediana", None), ("Ponderada pelo valor de mercado", "#16a34a")):
+                fig.add_trace(go.Bar(y=por_setor.index, x=por_setor[c], orientation="h", name=c, marker_color=cor))
+            fig.add_vline(x=0, line_color="gray")
+            fig.update_layout(height=max(360, 26 * len(por_setor)), barmode="group", xaxis_tickformat=".1%",
+                              legend=dict(orientation="h", y=-0.15), margin=dict(t=20, b=20, l=10, r=10))
+            st.plotly_chart(fig, width="stretch")
+            exp_v = v[cols_v + ["subsetor", "segmento", "vm_fim", "vm_ini"]].sort_values("variacao", ascending=False)
+            st.download_button("⬇️ Todas as empresas (CSV)",
+                               exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                               file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
 
 
 # -------- Calendário de resultados (entregas de ITR/DFP à CVM)
@@ -1972,350 +2037,353 @@ def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
     return e.drop_duplicates(["cnpj", "documento", "dt_refer"])     # primeira entrega de cada documento
 
 
-with aba_cal:
-    ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
-    if ent.empty:
-        st.info("Datas de entrega ainda não geradas: aparecem depois da próxima execução do coletor.")
-    else:
-        hoje = pd.Timestamp.today().normalize()
-        refs = sorted(d for d in ent["dt_refer"].unique() if pd.Timestamp(d).month in (3, 6, 9, 12))
-        fins_tri = [pd.Timestamp(d) for d in pd.date_range(end=hoje, periods=2, freq="QE")]
-        padrao = fins_tri[-1] if fins_tri[-1] <= hoje else fins_tri[0]
-        opcoes = sorted(set(pd.Timestamp(d) for d in refs[-12:]) | {padrao}, reverse=True)
-        k1, k2 = st.columns([1.3, 2])
-        ref = k1.selectbox("Trimestre de referência", opcoes, index=opcoes.index(padrao),
-                           format_func=lambda d: f"{(d.month - 1) // 3 + 1}T{str(d.year)[2:]} (encerrado em "
-                                                 f"{d.strftime('%d/%m/%Y')})", key="cal_ref")
-        ref = pd.Timestamp(ref)
-        ant_ref = ref - pd.DateOffset(years=1)
-        # universo: empresas da base (e financeiras) que entregaram algum documento nos 15 meses anteriores
-        info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor"]]
-        if not fin.empty:
-            f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
-            f_i["setor"] = f_i["setor"] if "setor" in f_i.columns else "Financeiro"
-            info = pd.concat([info, f_i[["cnpj", "rotulo", "setor"]]]).drop_duplicates("cnpj")
-        ativas = ent[(ent["dt_refer"] < ref) & (ent["dt_refer"] >= ref - pd.DateOffset(months=15))]["cnpj"].unique()
-        univ_c = info[info["cnpj"].isin(ativas)].copy()
-        setores_c = k2.multiselect("Setores (vazio = todos)", sorted(univ_c["setor"].dropna().unique()), key="cal_set")
-        if setores_c:
-            univ_c = univ_c[univ_c["setor"].isin(setores_c)]
-        atual = ent[ent["dt_refer"] == ref].sort_values("dt_receb").drop_duplicates("cnpj")
-        passado = ent[ent["dt_refer"] == ant_ref].sort_values("dt_receb").drop_duplicates("cnpj")
-        t = univ_c.merge(atual[["cnpj", "documento", "dt_receb", "link"]], on="cnpj", how="left").merge(
-            passado[["cnpj", "documento", "dt_receb"]].rename(columns={"documento": "doc_ant", "dt_receb": "receb_ant"}),
-            on="cnpj", how="left")
-        # prazo legal: ITR 45 dias após o fim do trimestre; DFP 3 meses após o fim do exercício
-        doc_esp = t["documento"].fillna(t["doc_ant"]).fillna("DFP" if ref.month == 12 else "ITR")
-        t["prazo_legal"] = np.where(doc_esp == "DFP", ref + pd.DateOffset(months=3), ref + pd.Timedelta(days=45))
-        t["prazo_legal"] = pd.to_datetime(t["prazo_legal"])
-        # data estimada: entrega do mesmo trimestre do ano anterior + 364 dias (mesmo dia da semana)
-        t["data_estimada"] = t["receb_ant"].dt.normalize() + pd.Timedelta(days=364)
-        divulgou = t["dt_receb"].notna()
-        n_tot, n_div = len(t), int(divulgou.sum())
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Já divulgaram", f"{n_div} de {n_tot}", f"{n_div / n_tot:.0%}" if n_tot else None, delta_color="off")
-        pend = t[~divulgou].copy()
-        atrasadas = pend[hoje > pend["prazo_legal"]]
-        m2.metric("Pendentes", f"{len(pend)}")
-        m3.metric("Passaram do prazo legal", f"{len(atrasadas)}")
+if not EUA:          # sem dados equivalentes nos EUA
+    with aba_cal:
+        ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
+        if ent.empty:
+            st.info("Datas de entrega ainda não geradas: aparecem depois da próxima execução do coletor.")
+        else:
+            hoje = pd.Timestamp.today().normalize()
+            refs = sorted(d for d in ent["dt_refer"].unique() if pd.Timestamp(d).month in (3, 6, 9, 12))
+            fins_tri = [pd.Timestamp(d) for d in pd.date_range(end=hoje, periods=2, freq="QE")]
+            padrao = fins_tri[-1] if fins_tri[-1] <= hoje else fins_tri[0]
+            opcoes = sorted(set(pd.Timestamp(d) for d in refs[-12:]) | {padrao}, reverse=True)
+            k1, k2 = st.columns([1.3, 2])
+            ref = k1.selectbox("Trimestre de referência", opcoes, index=opcoes.index(padrao),
+                               format_func=lambda d: f"{(d.month - 1) // 3 + 1}T{str(d.year)[2:]} (encerrado em "
+                                                     f"{d.strftime('%d/%m/%Y')})", key="cal_ref")
+            ref = pd.Timestamp(ref)
+            ant_ref = ref - pd.DateOffset(years=1)
+            # universo: empresas da base (e financeiras) que entregaram algum documento nos 15 meses anteriores
+            info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor"]]
+            if not fin.empty:
+                f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
+                f_i["setor"] = f_i["setor"] if "setor" in f_i.columns else "Financeiro"
+                info = pd.concat([info, f_i[["cnpj", "rotulo", "setor"]]]).drop_duplicates("cnpj")
+            ativas = ent[(ent["dt_refer"] < ref) & (ent["dt_refer"] >= ref - pd.DateOffset(months=15))]["cnpj"].unique()
+            univ_c = info[info["cnpj"].isin(ativas)].copy()
+            setores_c = k2.multiselect("Setores (vazio = todos)", sorted(univ_c["setor"].dropna().unique()), key="cal_set")
+            if setores_c:
+                univ_c = univ_c[univ_c["setor"].isin(setores_c)]
+            atual = ent[ent["dt_refer"] == ref].sort_values("dt_receb").drop_duplicates("cnpj")
+            passado = ent[ent["dt_refer"] == ant_ref].sort_values("dt_receb").drop_duplicates("cnpj")
+            t = univ_c.merge(atual[["cnpj", "documento", "dt_receb", "link"]], on="cnpj", how="left").merge(
+                passado[["cnpj", "documento", "dt_receb"]].rename(columns={"documento": "doc_ant", "dt_receb": "receb_ant"}),
+                on="cnpj", how="left")
+            # prazo legal: ITR 45 dias após o fim do trimestre; DFP 3 meses após o fim do exercício
+            doc_esp = t["documento"].fillna(t["doc_ant"]).fillna("DFP" if ref.month == 12 else "ITR")
+            t["prazo_legal"] = np.where(doc_esp == "DFP", ref + pd.DateOffset(months=3), ref + pd.Timedelta(days=45))
+            t["prazo_legal"] = pd.to_datetime(t["prazo_legal"])
+            # data estimada: entrega do mesmo trimestre do ano anterior + 364 dias (mesmo dia da semana)
+            t["data_estimada"] = t["receb_ant"].dt.normalize() + pd.Timedelta(days=364)
+            divulgou = t["dt_receb"].notna()
+            n_tot, n_div = len(t), int(divulgou.sum())
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Já divulgaram", f"{n_div} de {n_tot}", f"{n_div / n_tot:.0%}" if n_tot else None, delta_color="off")
+            pend = t[~divulgou].copy()
+            atrasadas = pend[hoje > pend["prazo_legal"]]
+            m2.metric("Pendentes", f"{len(pend)}")
+            m3.metric("Passaram do prazo legal", f"{len(atrasadas)}")
 
-        st.subheader("Já divulgaram")
-        div = t[divulgou].sort_values("dt_receb", ascending=False)
-        tabela_clicavel(div[["rotulo", "setor", "documento", "dt_receb"]].assign(
-            dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), div["rotulo"], "clk_cal_div",
-            hide_index=True, width="stretch", height=min(600, 38 + 35 * len(div)), column_config={
-                "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em"})
+            st.subheader("Já divulgaram")
+            div = t[divulgou].sort_values("dt_receb", ascending=False)
+            tabela_clicavel(div[["rotulo", "setor", "documento", "dt_receb"]].assign(
+                dt_receb=lambda x: x["dt_receb"].dt.strftime("%d/%m/%Y %H:%M")), div["rotulo"], "clk_cal_div",
+                hide_index=True, width="stretch", height=min(600, 38 + 35 * len(div)), column_config={
+                    "rotulo": "Empresa", "setor": "Setor", "documento": "Documento", "dt_receb": "Entregue à CVM em"})
 
-        st.subheader("Ainda não divulgaram")
-        st.caption("⚠️ **Data estimada** com base na data em que a empresa entregou o mesmo trimestre no ano anterior "
-                   "(mesmo dia da semana, 52 semanas depois). Não é a data anunciada pela companhia: confira o "
-                   "calendário de eventos corporativos dela para a data oficial.")
-        pend["situacao"] = np.select(
-            [hoje > pend["prazo_legal"], pend["data_estimada"].isna(), pend["data_estimada"] < hoje],
-            ["Passou do prazo legal", "Sem histórico: usar o prazo legal", "Estimativa já passou"], "No prazo")
-        pend = pend.sort_values(["data_estimada", "prazo_legal"], na_position="last")
-        tabela_clicavel(pend[["rotulo", "setor", "data_estimada", "receb_ant", "prazo_legal", "situacao"]].assign(
-            data_estimada=lambda x: x["data_estimada"].dt.date, receb_ant=lambda x: x["receb_ant"].dt.date,
-            prazo_legal=lambda x: x["prazo_legal"].dt.date), pend["rotulo"], "clk_cal_pend", hide_index=True, width="stretch",
-            height=min(600, 38 + 35 * len(pend)), column_config={
-                "rotulo": "Empresa", "setor": "Setor",
-                "data_estimada": "Data estimada (pela entrega do ano anterior)",
-                "receb_ant": f"Entregou {(ant_ref.month - 1) // 3 + 1}T{str(ant_ref.year)[2:]} em",
-                "prazo_legal": "Prazo legal", "situacao": "Situação"})
+            st.subheader("Ainda não divulgaram")
+            st.caption("⚠️ **Data estimada** com base na data em que a empresa entregou o mesmo trimestre no ano anterior "
+                       "(mesmo dia da semana, 52 semanas depois). Não é a data anunciada pela companhia: confira o "
+                       "calendário de eventos corporativos dela para a data oficial.")
+            pend["situacao"] = np.select(
+                [hoje > pend["prazo_legal"], pend["data_estimada"].isna(), pend["data_estimada"] < hoje],
+                ["Passou do prazo legal", "Sem histórico: usar o prazo legal", "Estimativa já passou"], "No prazo")
+            pend = pend.sort_values(["data_estimada", "prazo_legal"], na_position="last")
+            tabela_clicavel(pend[["rotulo", "setor", "data_estimada", "receb_ant", "prazo_legal", "situacao"]].assign(
+                data_estimada=lambda x: x["data_estimada"].dt.date, receb_ant=lambda x: x["receb_ant"].dt.date,
+                prazo_legal=lambda x: x["prazo_legal"].dt.date), pend["rotulo"], "clk_cal_pend", hide_index=True, width="stretch",
+                height=min(600, 38 + 35 * len(pend)), column_config={
+                    "rotulo": "Empresa", "setor": "Setor",
+                    "data_estimada": "Data estimada (pela entrega do ano anterior)",
+                    "receb_ant": f"Entregou {(ant_ref.month - 1) // 3 + 1}T{str(ant_ref.year)[2:]} em",
+                    "prazo_legal": "Prazo legal", "situacao": "Situação"})
 
-        # calendário: entregas realizadas e estimadas por dia
-        cal_r = div.assign(dia=div["dt_receb"].dt.normalize()).groupby("dia").size().rename("Divulgadas")
-        cal_e = pend.dropna(subset=["data_estimada"]).groupby("data_estimada").size().rename("Estimadas")
-        cal = pd.concat([cal_r, cal_e], axis=1, sort=True).fillna(0)
-        if len(cal):
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=cal.index, y=cal["Divulgadas"], name="Já divulgadas", marker_color="#16a34a"))
-            fig.add_trace(go.Bar(x=cal.index, y=cal["Estimadas"], name="Estimadas (pelo ano anterior)",
-                                 marker_color="#9ca3af"))
-            fig.add_vline(x=hoje, line_dash="dot", line_color="gray")
-            fig.update_layout(barmode="stack", height=340, title="Divulgações por dia", yaxis_title="Empresas",
-                              legend=dict(orientation="h", y=-0.2), margin=dict(t=40, b=20, l=10, r=10))
-            st.plotly_chart(fig, width="stretch")
-        st.caption("Fonte: consulta pública de documentos da CVM (ENET), atualizada a cada 2 horas, e índices de "
-                   "Dados Abertos da CVM (histórico). "
-                   "Data de divulgação = data de recebimento da primeira versão do documento pela CVM. Prazo legal: "
-                   "ITR até 45 dias após o fim do trimestre; DFP até 3 meses após o fim do exercício.")
+            # calendário: entregas realizadas e estimadas por dia
+            cal_r = div.assign(dia=div["dt_receb"].dt.normalize()).groupby("dia").size().rename("Divulgadas")
+            cal_e = pend.dropna(subset=["data_estimada"]).groupby("data_estimada").size().rename("Estimadas")
+            cal = pd.concat([cal_r, cal_e], axis=1, sort=True).fillna(0)
+            if len(cal):
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=cal.index, y=cal["Divulgadas"], name="Já divulgadas", marker_color="#16a34a"))
+                fig.add_trace(go.Bar(x=cal.index, y=cal["Estimadas"], name="Estimadas (pelo ano anterior)",
+                                     marker_color="#9ca3af"))
+                fig.add_vline(x=hoje, line_dash="dot", line_color="gray")
+                fig.update_layout(barmode="stack", height=340, title="Divulgações por dia", yaxis_title="Empresas",
+                                  legend=dict(orientation="h", y=-0.2), margin=dict(t=40, b=20, l=10, r=10))
+                st.plotly_chart(fig, width="stretch")
+            st.caption("Fonte: consulta pública de documentos da CVM (ENET), atualizada a cada 2 horas, e índices de "
+                       "Dados Abertos da CVM (histórico). "
+                       "Data de divulgação = data de recebimento da primeira versão do documento pela CVM. Prazo legal: "
+                       "ITR até 45 dias após o fim do trimestre; DFP até 3 meses após o fim do exercício.")
 
 
 # -------- Financeiro: bancos e seguradoras (plano de contas próprio, base separada)
-with aba_fin:
-    if fin.empty:
-        st.info("Base de bancos e seguradoras ainda não gerada (financeiras.csv.gz). Rode o workflow no modo universo.")
-    else:
-        st.caption("Base separada: bancos e seguradoras usam plano de contas próprio e não entram nas medianas das "
-                   "demais abas. Fonte: CVM (DFP anual; trimestral e LTM pelo ITR na aba Empresa). Métricas são "
-                   "definições próprias; conferir com os releases.")
-        c1, c2, c3 = st.columns([1.2, 1.2, 1])
-        grupos_f = {"Bancos e financeiras": ~fin["segmento"].str.contains("Segurad|Ressegurad", regex=True),
-                    "Seguradoras e resseguradoras": fin["segmento"].str.contains("Segurad|Ressegurad", regex=True)}
-        grp = c1.radio("Grupo", list(grupos_f), horizontal=True)
-        ff = fin[grupos_f[grp]]
-        opcoes = [k for k in FIN if ff[k].notna().any()] if len(ff) else list(FIN)
-        ind_f = c2.selectbox("Indicador", opcoes, format_func=lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]],
-                             key="fin_ind")
-        rot_f, fmt_f, agg_f = FIN[ind_f]
-        modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, disabled=(fmt_f != "mm"), key="fin_modo")
-        pct_f = modo_f == "% do grupo" and fmt_f == "mm"
-        anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
-        if anos_f:
-            fa0, fa1 = st.select_slider("Exercícios", options=anos_f, value=(anos_f[0], anos_f[-1]), key="fin_anos")
-            ff = ff[ff["exercicio"].between(fa0, fa1)]
-        sel_f = st.multiselect("Empresas (vazio = todas do grupo)", sorted(ff["rotulo"].unique()), key="fin_emp")
-        periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
-        ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
-        if agg_f == "cresc":
-            # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
-            cn_ = CRESC_FIN[ind_f]
-            ok = ff[(ff[cn_ + "_ant"] > 0) & ff[cn_].notna()]
-            g_ = ok.groupby("_c")[[cn_, cn_ + "_ant"]].sum()
-            tot_f = g_[cn_] / g_[cn_ + "_ant"] - 1
-            n_cresc = ok.groupby("_c")["cnpj"].nunique().reindex(periodos_f).fillna(0).astype(int)
-        elif agg_f == "soma":
-            tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
-        elif isinstance(agg_f, tuple):
-            n_, d_ = agg_f
-            ok = ff.dropna(subset=[n_, d_])
-            g_ = ok.groupby("_c")[[n_, d_]].sum()
-            tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
+if not EUA:          # sem dados equivalentes nos EUA
+    with aba_fin:
+        if fin.empty:
+            st.info("Base de bancos e seguradoras ainda não gerada (financeiras.csv.gz). Rode o workflow no modo universo.")
         else:
-            tot_f = pd.Series(dtype=float)
-        tot_f = tot_f.reindex(periodos_f)
-        med_f = ff.groupby("_c")[ind_f].median().reindex(periodos_f)
-        vis_f = ff[ff["rotulo"].isin(sel_f)] if sel_f else ff
-        tab_f = vis_f.pivot_table(index="rotulo", columns="_c", values=ind_f, aggfunc="first").reindex(columns=periodos_f)
-        ultf = [p for p in periodos_f[::-1] if p in tab_f.columns and tab_f[p].notna().any()]
-        if ultf:
-            tab_f = tab_f.sort_values(ultf[0], ascending=False)
-        if pct_f:
-            tab_f = tab_f.div(tot_f, axis=1)
-        extra_f = {}
-        if fmt_f == "mm":
-            if sel_f:
-                dem = tot_f - vis_f.groupby("_c")[ind_f].sum(min_count=1).reindex(periodos_f).fillna(0)
-                extra_f["Demais do grupo"] = dem / tot_f if pct_f else dem
-            extra_f["TOTAL DO GRUPO"] = tot_f / tot_f if pct_f else tot_f
-        elif len(tot_f.dropna()):
-            extra_f["GRUPO AGREGADO"] = tot_f
-        if not pct_f:
-            extra_f["Mediana do grupo"] = med_f
-        full_f = pd.concat([tab_f, pd.DataFrame(extra_f).T.reindex(columns=periodos_f)])
-        full_f.index.name = "Empresa"
-        if pct_f or fmt_f == "pct":
-            cfg_f = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos_f}
-            vis_tab = full_f * 100
-        elif fmt_f == "x":
-            cfg_f = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos_f}
-            vis_tab = full_f
-        else:
-            cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
-            vis_tab = full_f
-        tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
-                        height=min(650, 38 + 35 * len(vis_tab)))
-        if agg_f == "cresc":
-            st.caption("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
-                       "os dois exercícios (amostra casada). Instituições por exercício: " +
-                       " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
-        if fmt_f != "mm" and isinstance(agg_f, tuple):
-            st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
-        notas_fin = {
-            "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
-                                 "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
-                                 "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
-            "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
-                                "pode diferir da carteira ampliada divulgada.",
-            "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
-            "custo_credito": "PDD do período ÷ carteira de crédito bruta no fim do período (aproximação).",
-            "carteira_credito_bruta": "Operações de crédito do balanço, com a provisão somada de volta quando vem "
-                                      "dentro da conta (COSIF). Sob IFRS a conta já é bruta.",
-            "provisao_carteira": "Saldo redutor de PDD / perdas esperadas ligado à carteira. Sob IFRS pode incluir "
-                                 "perdas esperadas de TVM ao custo amortizado.",
-            "tvm": "Títulos e valores mobiliários e derivativos, somando todas as categorias (custo amortizado, "
-                   "VJORA e VJR).",
-            "demais_ativos": "Resíduo: ativo total − carteira líquida − TVM (caixa, aplicações interfinanceiras, "
-                             "compulsórios, tributos, investimentos etc.).",
-            "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
-            "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
-                                      "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
-                                      "'Carteira de crédito'.",
-            "cresc_pdd": "Despesa de PDD do exercício contra a do anterior, em módulo. Exercícios com reversão "
-                         "líquida (PDD positiva na DRE) e bancos que não abrem a PDD na DRE ficam vazios.",
-        }
-        if ind_f in notas_fin:
-            st.caption("ℹ️ " + notas_fin[ind_f])
-        if fmt_f == "mm":
-            topf = tab_f.index[:10] if not sel_f else tab_f.index
-            plotf = tab_f.loc[topf].T if len(tab_f) else pd.DataFrame()
-            if not sel_f and len(tab_f) > 10:
-                plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
-            elif sel_f and "Demais do grupo" in extra_f:
-                plotf["Demais do grupo"] = extra_f["Demais do grupo"]
-            lf = plotf.reset_index(names="Exercício").melt(id_vars="Exercício", var_name="Empresa", value_name="v")
-            fig = px.bar(lf, x="Exercício", y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
-            fig.update_layout(barmode="relative", height=460, legend_title_text="")
+            st.caption("Base separada: bancos e seguradoras usam plano de contas próprio e não entram nas medianas das "
+                       "demais abas. Fonte: CVM (DFP anual; trimestral e LTM pelo ITR na aba Empresa). Métricas são "
+                       "definições próprias; conferir com os releases.")
+            c1, c2, c3 = st.columns([1.2, 1.2, 1])
+            grupos_f = {"Bancos e financeiras": ~fin["segmento"].str.contains("Segurad|Ressegurad", regex=True),
+                        "Seguradoras e resseguradoras": fin["segmento"].str.contains("Segurad|Ressegurad", regex=True)}
+            grp = c1.radio("Grupo", list(grupos_f), horizontal=True)
+            ff = fin[grupos_f[grp]]
+            opcoes = [k for k in FIN if ff[k].notna().any()] if len(ff) else list(FIN)
+            ind_f = c2.selectbox("Indicador", opcoes, format_func=lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]],
+                                 key="fin_ind")
+            rot_f, fmt_f, agg_f = FIN[ind_f]
+            modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, disabled=(fmt_f != "mm"), key="fin_modo")
+            pct_f = modo_f == "% do grupo" and fmt_f == "mm"
+            anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
+            if anos_f:
+                fa0, fa1 = st.select_slider("Exercícios", options=anos_f, value=(anos_f[0], anos_f[-1]), key="fin_anos")
+                ff = ff[ff["exercicio"].between(fa0, fa1)]
+            sel_f = st.multiselect("Empresas (vazio = todas do grupo)", sorted(ff["rotulo"].unique()), key="fin_emp")
+            periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
+            ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
+            if agg_f == "cresc":
+                # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
+                cn_ = CRESC_FIN[ind_f]
+                ok = ff[(ff[cn_ + "_ant"] > 0) & ff[cn_].notna()]
+                g_ = ok.groupby("_c")[[cn_, cn_ + "_ant"]].sum()
+                tot_f = g_[cn_] / g_[cn_ + "_ant"] - 1
+                n_cresc = ok.groupby("_c")["cnpj"].nunique().reindex(periodos_f).fillna(0).astype(int)
+            elif agg_f == "soma":
+                tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
+            elif isinstance(agg_f, tuple):
+                n_, d_ = agg_f
+                ok = ff.dropna(subset=[n_, d_])
+                g_ = ok.groupby("_c")[[n_, d_]].sum()
+                tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
+            else:
+                tot_f = pd.Series(dtype=float)
+            tot_f = tot_f.reindex(periodos_f)
+            med_f = ff.groupby("_c")[ind_f].median().reindex(periodos_f)
+            vis_f = ff[ff["rotulo"].isin(sel_f)] if sel_f else ff
+            tab_f = vis_f.pivot_table(index="rotulo", columns="_c", values=ind_f, aggfunc="first").reindex(columns=periodos_f)
+            ultf = [p for p in periodos_f[::-1] if p in tab_f.columns and tab_f[p].notna().any()]
+            if ultf:
+                tab_f = tab_f.sort_values(ultf[0], ascending=False)
             if pct_f:
-                fig.update_yaxes(tickformat=".0%")
-        elif agg_f == "cresc":
-            # crescimento acumulado, base 100 no primeiro exercício (mesma lógica da Visão do setor): uma linha por
-            # instituição (valor ÷ primeiro valor × 100) e o agregado do grupo encadeado em amostra casada
-            cn_ = CRESC_FIN[ind_f]
-            niv_f = ff.pivot_table(index="rotulo", columns="_c", values=cn_, aggfunc="first").reindex(columns=periodos_f)
-            idx_f = {}
-            for r in (tab_f.index if sel_f else niv_f.index):
-                if r not in niv_f.index:
-                    continue
-                v = niv_f.loc[r]
-                ini = v.first_valid_index()
-                if ini is None or v[ini] <= 0:
-                    continue
-                idx = 100 * v / v[ini]
-                neg = idx[idx <= 0].index
-                if len(neg):  # base negativa no meio da série: o índice deixa de ter leitura
-                    idx[idx.index >= neg[0]] = np.nan
-                idx_f[r] = idx
-            if periodos_f:
-                idx_f["Agregado do grupo"] = indice_acumulado(niv_f)
-            nomes_f = list(idx_f)
-            ult_pf = ultf[0] if ultf and ultf[0] in niv_f.columns else (periodos_f[-1] if periodos_f else None)
-            tam_f = niv_f[ult_pf].sort_values(ascending=False) if ult_pf else pd.Series(dtype=float)
-            padrao_f = [r for r in (tab_f.index if sel_f else tam_f.index[:12]) if r in idx_f]
-            padrao_f += [n for n in ("Agregado do grupo",) if n in idx_f]
-            chave_lf = f"fin_cres_linhas_{ind_f}_{grp}_" + str(abs(hash((tuple(sel_f), tuple(periodos_f)))))
-            sel_lf = st.multiselect("Linhas no gráfico", nomes_f, default=padrao_f, key=chave_lf,
-                                    help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-            fig = go.Figure()
-            for nome in sel_lf:
-                y = idx_f[nome]
-                fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
-                                         name=nome.split(" — ")[0] if " — " in nome else nome,
-                                         line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
-            fig.add_hline(y=100, line_dash="dot", line_color="gray")
-            fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro exercício",
-                              title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
-        else:
-            fig = go.Figure()
-            for r in tab_f.index[:10]:
-                fig.add_trace(go.Scatter(x=periodos_f, y=tab_f.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
-            if len(tot_f.dropna()):
-                fig.add_trace(go.Scatter(x=periodos_f, y=tot_f, mode="lines", name="Grupo agregado", line=dict(width=4, dash="dash")))
-            fig.add_trace(go.Scatter(x=periodos_f, y=med_f, mode="lines", name="Mediana", line=dict(dash="dot")))
-            fig.update_layout(height=460, legend_title_text="")
-            if fmt_f == "pct":
-                fig.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig, width="stretch")
-        if agg_f == "cresc":
-            st.caption("Uma linha por instituição: valor ÷ valor do primeiro exercício × 100; a linha é interrompida "
-                       "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
-                       "amostra casada. A tabela acima mostra o crescimento de cada exercício contra o anterior.")
-        ex_f = full_f.reset_index()
-        c1, c2 = st.columns(2)
-        c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                           file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key="fin_csv")
-        bruto_f = ff.drop(columns=["_c", "rotulo", "nivel_pdd"] + [c for c in ff.columns if c.endswith("_ant")],
-                          errors="ignore")
-        c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
-                           file_name="financeiro_base.xlsx", key="fin_xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                tab_f = tab_f.div(tot_f, axis=1)
+            extra_f = {}
+            if fmt_f == "mm":
+                if sel_f:
+                    dem = tot_f - vis_f.groupby("_c")[ind_f].sum(min_count=1).reindex(periodos_f).fillna(0)
+                    extra_f["Demais do grupo"] = dem / tot_f if pct_f else dem
+                extra_f["TOTAL DO GRUPO"] = tot_f / tot_f if pct_f else tot_f
+            elif len(tot_f.dropna()):
+                extra_f["GRUPO AGREGADO"] = tot_f
+            if not pct_f:
+                extra_f["Mediana do grupo"] = med_f
+            full_f = pd.concat([tab_f, pd.DataFrame(extra_f).T.reindex(columns=periodos_f)])
+            full_f.index.name = "Empresa"
+            if pct_f or fmt_f == "pct":
+                cfg_f = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos_f}
+                vis_tab = full_f * 100
+            elif fmt_f == "x":
+                cfg_f = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos_f}
+                vis_tab = full_f
+            else:
+                cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
+                vis_tab = full_f
+            tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
+                            height=min(650, 38 + 35 * len(vis_tab)))
+            if agg_f == "cresc":
+                st.caption("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
+                           "os dois exercícios (amostra casada). Instituições por exercício: " +
+                           " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
+            if fmt_f != "mm" and isinstance(agg_f, tuple):
+                st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
+            notas_fin = {
+                "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
+                                     "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
+                                     "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
+                "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
+                                    "pode diferir da carteira ampliada divulgada.",
+                "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
+                "custo_credito": "PDD do período ÷ carteira de crédito bruta no fim do período (aproximação).",
+                "carteira_credito_bruta": "Operações de crédito do balanço, com a provisão somada de volta quando vem "
+                                          "dentro da conta (COSIF). Sob IFRS a conta já é bruta.",
+                "provisao_carteira": "Saldo redutor de PDD / perdas esperadas ligado à carteira. Sob IFRS pode incluir "
+                                     "perdas esperadas de TVM ao custo amortizado.",
+                "tvm": "Títulos e valores mobiliários e derivativos, somando todas as categorias (custo amortizado, "
+                       "VJORA e VJR).",
+                "demais_ativos": "Resíduo: ativo total − carteira líquida − TVM (caixa, aplicações interfinanceiras, "
+                                 "compulsórios, tributos, investimentos etc.).",
+                "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
+                "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
+                                          "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
+                                          "'Carteira de crédito'.",
+                "cresc_pdd": "Despesa de PDD do exercício contra a do anterior, em módulo. Exercícios com reversão "
+                             "líquida (PDD positiva na DRE) e bancos que não abrem a PDD na DRE ficam vazios.",
+            }
+            if ind_f in notas_fin:
+                st.caption("ℹ️ " + notas_fin[ind_f])
+            if fmt_f == "mm":
+                topf = tab_f.index[:10] if not sel_f else tab_f.index
+                plotf = tab_f.loc[topf].T if len(tab_f) else pd.DataFrame()
+                if not sel_f and len(tab_f) > 10:
+                    plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
+                elif sel_f and "Demais do grupo" in extra_f:
+                    plotf["Demais do grupo"] = extra_f["Demais do grupo"]
+                lf = plotf.reset_index(names="Exercício").melt(id_vars="Exercício", var_name="Empresa", value_name="v")
+                fig = px.bar(lf, x="Exercício", y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
+                fig.update_layout(barmode="relative", height=460, legend_title_text="")
+                if pct_f:
+                    fig.update_yaxes(tickformat=".0%")
+            elif agg_f == "cresc":
+                # crescimento acumulado, base 100 no primeiro exercício (mesma lógica da Visão do setor): uma linha por
+                # instituição (valor ÷ primeiro valor × 100) e o agregado do grupo encadeado em amostra casada
+                cn_ = CRESC_FIN[ind_f]
+                niv_f = ff.pivot_table(index="rotulo", columns="_c", values=cn_, aggfunc="first").reindex(columns=periodos_f)
+                idx_f = {}
+                for r in (tab_f.index if sel_f else niv_f.index):
+                    if r not in niv_f.index:
+                        continue
+                    v = niv_f.loc[r]
+                    ini = v.first_valid_index()
+                    if ini is None or v[ini] <= 0:
+                        continue
+                    idx = 100 * v / v[ini]
+                    neg = idx[idx <= 0].index
+                    if len(neg):  # base negativa no meio da série: o índice deixa de ter leitura
+                        idx[idx.index >= neg[0]] = np.nan
+                    idx_f[r] = idx
+                if periodos_f:
+                    idx_f["Agregado do grupo"] = indice_acumulado(niv_f)
+                nomes_f = list(idx_f)
+                ult_pf = ultf[0] if ultf and ultf[0] in niv_f.columns else (periodos_f[-1] if periodos_f else None)
+                tam_f = niv_f[ult_pf].sort_values(ascending=False) if ult_pf else pd.Series(dtype=float)
+                padrao_f = [r for r in (tab_f.index if sel_f else tam_f.index[:12]) if r in idx_f]
+                padrao_f += [n for n in ("Agregado do grupo",) if n in idx_f]
+                chave_lf = f"fin_cres_linhas_{ind_f}_{grp}_" + str(abs(hash((tuple(sel_f), tuple(periodos_f)))))
+                sel_lf = st.multiselect("Linhas no gráfico", nomes_f, default=padrao_f, key=chave_lf,
+                                        help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                fig = go.Figure()
+                for nome in sel_lf:
+                    y = idx_f[nome]
+                    fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                             name=nome.split(" — ")[0] if " — " in nome else nome,
+                                             line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
+                fig.add_hline(y=100, line_dash="dot", line_color="gray")
+                fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro exercício",
+                                  title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
+            else:
+                fig = go.Figure()
+                for r in tab_f.index[:10]:
+                    fig.add_trace(go.Scatter(x=periodos_f, y=tab_f.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+                if len(tot_f.dropna()):
+                    fig.add_trace(go.Scatter(x=periodos_f, y=tot_f, mode="lines", name="Grupo agregado", line=dict(width=4, dash="dash")))
+                fig.add_trace(go.Scatter(x=periodos_f, y=med_f, mode="lines", name="Mediana", line=dict(dash="dot")))
+                fig.update_layout(height=460, legend_title_text="")
+                if fmt_f == "pct":
+                    fig.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig, width="stretch")
+            if agg_f == "cresc":
+                st.caption("Uma linha por instituição: valor ÷ valor do primeiro exercício × 100; a linha é interrompida "
+                           "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
+                           "amostra casada. A tabela acima mostra o crescimento de cada exercício contra o anterior.")
+            ex_f = full_f.reset_index()
+            c1, c2 = st.columns(2)
+            c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                               file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key="fin_csv")
+            bruto_f = ff.drop(columns=["_c", "rotulo", "nivel_pdd"] + [c for c in ff.columns if c.endswith("_ant")],
+                              errors="ignore")
+            c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
+                               file_name="financeiro_base.xlsx", key="fin_xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # -------- Juros: estrutura a termo (ANBIMA)
-with aba_jur:
-    pj, vj = carregar_juros(versao_arquivos(DADOS.parent / "juros" / "parametros.csv",
-                                            DADOS.parent / "juros" / "vertices.csv.gz"))
-    if pj.empty:
-        st.info("Curvas ainda não coletadas (saidas/juros/). Rode o workflow juros-ettj.")
-    else:
-        datas_j = sorted(pj["data"].unique())
-        st.caption(f"Fonte: ANBIMA, Estrutura a Termo das Taxas de Juros (modelo Svensson), {len(datas_j)} datas de "
-                   f"{pd.Timestamp(datas_j[0]).date()} a {pd.Timestamp(datas_j[-1]).date()}. Taxas % a.a., base 252. "
-                   "A ANBIMA libera gratuitamente só os últimos 5 dias úteis: o histórico cresce com a coleta diária.")
-        tipos_c = {"Prefixada": "pre", "Real (IPCA)": "ipca", "Inflação implícita": "implicita"}
-        j1, j2, j3 = st.columns([1.3, 1.2, 2])
-        tc_rot = j1.radio("Curva", list(tipos_c), key="jur_curva")
-        tc = tipos_c[tc_rot]
-        base_j = j2.selectbox("Data", datas_j[::-1], format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"),
-                              key="jur_data")
-        prazos_cmp = {"1 semana antes": 7, "1 mês antes": 30, "3 meses antes": 91, "6 meses antes": 182,
-                      "1 ano antes": 365}
-        sel_cmp = j3.multiselect("Comparar com", list(prazos_cmp), default=["1 mês antes", "1 ano antes"],
-                                 key="jur_cmp")
-        extra = j3.multiselect("Outras datas", [d for d in datas_j[::-1] if d != base_j],
-                               format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="jur_extra")
-        max_anos = st.slider("Prazo máximo (anos)", 2, 30, 10, key="jur_max",
-                             help="A ANBIMA publica vértices prefixados até 10 anos; além disso a curva prefixada e a "
-                                  "implícita são extrapolação do modelo Svensson.")
-        anos = np.linspace(0.25, max_anos, 120)
-        datas_plot, faltam = [(pd.Timestamp(base_j), "Data escolhida")], []
-        for nome in sel_cmp:
-            alvo = pd.Timestamp(base_j) - pd.Timedelta(days=prazos_cmp[nome])
-            cand = [d for d in datas_j if pd.Timestamp(d) <= alvo]
-            if cand:
-                datas_plot.append((pd.Timestamp(cand[-1]), nome))
-            else:
-                faltam.append(nome)
-        datas_plot += [(pd.Timestamp(d), "") for d in extra]
-        fig = go.Figure()
-        for d, rot in datas_plot:
-            y = curva_juros(pj, d, tc, anos)
-            fig.add_trace(go.Scatter(x=anos, y=y, mode="lines", name=f"{d.strftime('%d/%m/%Y')} {rot}".strip(),
-                                     line=dict(width=4 if rot == "Data escolhida" else 2)))
-        fig.update_layout(title=f"Curva {tc_rot.lower()} (% a.a.)", height=460, yaxis_tickformat=".2%",
-                          xaxis_title="Prazo (anos)", legend=dict(orientation="h", y=-0.2),
-                          margin=dict(t=40, b=20, l=10, r=10))
-        st.plotly_chart(fig, width="stretch")
-        if faltam:
-            st.caption("Sem histórico suficiente para: " + ", ".join(faltam) + ".")
-        # tabela de vértices e variação em pontos-base
-        vert = [v for v in (0.5, 1, 2, 3, 5, 10, 15, 20, 30) if v <= max_anos]
-        tab_j = pd.DataFrame({f"{d.strftime('%d/%m/%Y')} {rot}".strip(): curva_juros(pj, d, tc, vert) * 100
-                              for d, rot in datas_plot}, index=[f"{v:g} ano(s)" for v in vert])
-        base_col = tab_j.columns[0]
-        for c in tab_j.columns[1:]:
-            tab_j[f"Δ vs {c} (bps)"] = (tab_j[base_col] - tab_j[c]) * 100
-        st.dataframe(tab_j.round(2), width="stretch")
-        # histórico de vértices
-        st.subheader("Histórico de vértices")
-        v_hist = st.multiselect("Vértices (anos)", [0.5, 1, 2, 3, 5, 10, 15, 20, 30], default=[1, 2, 5, 10],
-                                key="jur_vert")
-        if v_hist:
-            hist = pd.DataFrame({"data": [pd.Timestamp(d) for d in datas_j]})
-            for v in v_hist:
-                hist[f"{v:g}a"] = [curva_juros(pj, d, tc, [v])[0] for d in datas_j]
+if not EUA:          # sem dados equivalentes nos EUA
+    with aba_jur:
+        pj, vj = carregar_juros(versao_arquivos(DADOS.parent / "juros" / "parametros.csv",
+                                                DADOS.parent / "juros" / "vertices.csv.gz"))
+        if pj.empty:
+            st.info("Curvas ainda não coletadas (saidas/juros/). Rode o workflow juros-ettj.")
+        else:
+            datas_j = sorted(pj["data"].unique())
+            st.caption(f"Fonte: ANBIMA, Estrutura a Termo das Taxas de Juros (modelo Svensson), {len(datas_j)} datas de "
+                       f"{pd.Timestamp(datas_j[0]).date()} a {pd.Timestamp(datas_j[-1]).date()}. Taxas % a.a., base 252. "
+                       "A ANBIMA libera gratuitamente só os últimos 5 dias úteis: o histórico cresce com a coleta diária.")
+            tipos_c = {"Prefixada": "pre", "Real (IPCA)": "ipca", "Inflação implícita": "implicita"}
+            j1, j2, j3 = st.columns([1.3, 1.2, 2])
+            tc_rot = j1.radio("Curva", list(tipos_c), key="jur_curva")
+            tc = tipos_c[tc_rot]
+            base_j = j2.selectbox("Data", datas_j[::-1], format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"),
+                                  key="jur_data")
+            prazos_cmp = {"1 semana antes": 7, "1 mês antes": 30, "3 meses antes": 91, "6 meses antes": 182,
+                          "1 ano antes": 365}
+            sel_cmp = j3.multiselect("Comparar com", list(prazos_cmp), default=["1 mês antes", "1 ano antes"],
+                                     key="jur_cmp")
+            extra = j3.multiselect("Outras datas", [d for d in datas_j[::-1] if d != base_j],
+                                   format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="jur_extra")
+            max_anos = st.slider("Prazo máximo (anos)", 2, 30, 10, key="jur_max",
+                                 help="A ANBIMA publica vértices prefixados até 10 anos; além disso a curva prefixada e a "
+                                      "implícita são extrapolação do modelo Svensson.")
+            anos = np.linspace(0.25, max_anos, 120)
+            datas_plot, faltam = [(pd.Timestamp(base_j), "Data escolhida")], []
+            for nome in sel_cmp:
+                alvo = pd.Timestamp(base_j) - pd.Timedelta(days=prazos_cmp[nome])
+                cand = [d for d in datas_j if pd.Timestamp(d) <= alvo]
+                if cand:
+                    datas_plot.append((pd.Timestamp(cand[-1]), nome))
+                else:
+                    faltam.append(nome)
+            datas_plot += [(pd.Timestamp(d), "") for d in extra]
             fig = go.Figure()
-            for v in v_hist:
-                fig.add_trace(go.Scatter(x=hist["data"], y=hist[f"{v:g}a"], mode="lines+markers", name=f"{v:g} ano(s)"))
-            fig.update_layout(title=f"{tc_rot}: vértices ao longo do tempo (% a.a.)", height=400,
-                              yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.2),
+            for d, rot in datas_plot:
+                y = curva_juros(pj, d, tc, anos)
+                fig.add_trace(go.Scatter(x=anos, y=y, mode="lines", name=f"{d.strftime('%d/%m/%Y')} {rot}".strip(),
+                                         line=dict(width=4 if rot == "Data escolhida" else 2)))
+            fig.update_layout(title=f"Curva {tc_rot.lower()} (% a.a.)", height=460, yaxis_tickformat=".2%",
+                              xaxis_title="Prazo (anos)", legend=dict(orientation="h", y=-0.2),
                               margin=dict(t=40, b=20, l=10, r=10))
             st.plotly_chart(fig, width="stretch")
-            exp_h = hist.assign(data=hist["data"].dt.date)
-            st.download_button("⬇️ Histórico (CSV)", exp_h.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                               file_name=f"ettj_{tc}_historico.csv", mime="text/csv", key="jur_csv")
-        st.caption("Curvas reconstruídas pelos parâmetros Svensson divulgados pela ANBIMA (reproduzem os vértices "
-                   "publicados). Inflação implícita = (1 + prefixada) ÷ (1 + real) − 1.")
+            if faltam:
+                st.caption("Sem histórico suficiente para: " + ", ".join(faltam) + ".")
+            # tabela de vértices e variação em pontos-base
+            vert = [v for v in (0.5, 1, 2, 3, 5, 10, 15, 20, 30) if v <= max_anos]
+            tab_j = pd.DataFrame({f"{d.strftime('%d/%m/%Y')} {rot}".strip(): curva_juros(pj, d, tc, vert) * 100
+                                  for d, rot in datas_plot}, index=[f"{v:g} ano(s)" for v in vert])
+            base_col = tab_j.columns[0]
+            for c in tab_j.columns[1:]:
+                tab_j[f"Δ vs {c} (bps)"] = (tab_j[base_col] - tab_j[c]) * 100
+            st.dataframe(tab_j.round(2), width="stretch")
+            # histórico de vértices
+            st.subheader("Histórico de vértices")
+            v_hist = st.multiselect("Vértices (anos)", [0.5, 1, 2, 3, 5, 10, 15, 20, 30], default=[1, 2, 5, 10],
+                                    key="jur_vert")
+            if v_hist:
+                hist = pd.DataFrame({"data": [pd.Timestamp(d) for d in datas_j]})
+                for v in v_hist:
+                    hist[f"{v:g}a"] = [curva_juros(pj, d, tc, [v])[0] for d in datas_j]
+                fig = go.Figure()
+                for v in v_hist:
+                    fig.add_trace(go.Scatter(x=hist["data"], y=hist[f"{v:g}a"], mode="lines+markers", name=f"{v:g} ano(s)"))
+                fig.update_layout(title=f"{tc_rot}: vértices ao longo do tempo (% a.a.)", height=400,
+                                  yaxis_tickformat=".2%", legend=dict(orientation="h", y=-0.2),
+                                  margin=dict(t=40, b=20, l=10, r=10))
+                st.plotly_chart(fig, width="stretch")
+                exp_h = hist.assign(data=hist["data"].dt.date)
+                st.download_button("⬇️ Histórico (CSV)", exp_h.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                                   file_name=f"ettj_{tc}_historico.csv", mime="text/csv", key="jur_csv")
+            st.caption("Curvas reconstruídas pelos parâmetros Svensson divulgados pela ANBIMA (reproduzem os vértices "
+                       "publicados). Inflação implícita = (1 + prefixada) ÷ (1 + real) − 1.")
 
 # -------- Dados e download
 with aba_dados:
@@ -2327,8 +2395,8 @@ with aba_dados:
     mets_vis = [c for c in cols_out if c in METRICAS]
     st.dataframe(para_exibir(saida, mets_vis), column_config=fmt_tabela(saida, mets_vis), hide_index=True,
                  width="stretch", height=500)
-    st.caption("Valores em R$ milhões; margens e retornos em %. No download, percentuais vão como fração (0,15 = 15%).")
-    rot_cols = {c: (ROT[c] + (" (R$ mm)" if METRICAS[c][1] == "mm" else "")) for c in mets_vis}
+    st.caption(f"Valores em {MOEDA} milhões; margens e retornos em %. No download, percentuais vão como fração (0,15 = 15%).")
+    rot_cols = {c: (ROT[c] + (f" ({UN})" if METRICAS[c][1] == "mm" else "")) for c in mets_vis}
     exp = saida.assign(dt_fim=saida["dt_fim"].dt.date).rename(columns=rot_cols)
     c1, c2 = st.columns(2)
     c1.download_button("⬇️ Baixar CSV", exp.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
@@ -2337,7 +2405,8 @@ with aba_dados:
     if not cob.empty:
         abas["cobertura"] = cob[cob["cnpj"].astype(str).str.zfill(14).isin(saida["cnpj"].astype(str).str.zfill(14))]
     abas["fontes"] = pd.DataFrame({"item": ["Fonte", "Gerado em", "Definições"],
-                                   "descrição": ["CVM Dados Abertos (DFP/ITR) + classificação setorial B3",
+                                   "descrição": ["SEC EDGAR (XBRL companyfacts, 10-K/10-Q) + classificação SEC/SIC"
+                                                 if EUA else "CVM Dados Abertos (DFP/ITR) + classificação setorial B3",
                                                  str(meta.get("gerado_em", "")) if meta is not None else "",
                                                  "Ver aba Metodologia do app / README do repositório"]})
     c2.download_button("⬇️ Baixar XLSX", excel_bytes(abas), file_name=f"universo_{tipo}.xlsx",
@@ -2353,10 +2422,14 @@ with aba_cob:
             if sel:
                 c = c[c[col].isin(sel)]
         st.dataframe(c, hide_index=True, width="stretch", height=520)
-        st.caption("Inclui empresas sem dados e os bancos e seguradoras (fora da v1), com o motivo.")
+        st.caption("Inclui empresas sem dados, emissores estrangeiros, SPACs, bancos e seguradoras, com o motivo."
+                   if EUA else "Inclui empresas sem dados e os bancos e seguradoras (fora da v1), com o motivo.")
 
 # -------- Metodologia
 with aba_met:
+  if EUA:
+    eua.metodologia()
+  else:
     st.markdown("""
 **Fontes.** Demonstrações: CVM Dados Abertos (DFP anual e ITR trimestral). Universo e classificação setorial:
 lista de empresas listadas da B3. Bancos e seguradoras fora da v1 (plano de contas de instituição financeira);
