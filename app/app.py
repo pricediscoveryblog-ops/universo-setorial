@@ -174,6 +174,14 @@ IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "
 
 st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon="📊", layout="wide")
 
+# ------------------------------------------------------------------ mercado: Brasil / EUA
+# O módulo EUA (app/eua.py) lê a base do coletor-eua direto do GitHub. Ao escolher EUA, a base brasileira nem
+# é carregada (st.stop), o que poupa memória no Streamlit gratuito.
+if st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado") == "EUA":
+    import eua
+    eua.render()
+    st.stop()
+
 
 # ------------------------------------------------------------------ dados
 def versao_arquivos(*arqs) -> tuple:
