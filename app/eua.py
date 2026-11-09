@@ -40,6 +40,9 @@ ROTULOS_EUA = {
     "div_liq_ebitda_ifrs16": "DL c/ arrend. / EBITDA equiv. IFRS 16",
     "div_liq_ebitda_pre_ifrs16": "DL s/ arrend. / EBITDA após arrend. financeiros",
     "conversao_fco_ebitda": "Conversão de caixa (FCO ÷ EBITDA US GAAP)",
+    "ev_ebitda_ifrs16": "EV/EBITDA equiv. IFRS 16 (c/ arrend.)",
+    "ev_ebitda_pre_ifrs16": "EV/EBITDA após arrend. financeiros (s/ arrend.)",
+    "dividend_yield": "Dividend yield (dividendos pagos 12m)",
 }
 # métricas que só existem na base americana (entram na lista do app no modo EUA)
 EXTRAS_EUA = {
@@ -103,6 +106,15 @@ def versao() -> str:
     return str(metadados().get("gerado_em", ""))
 
 
+def _cnpj(cik) -> str:
+    """'CIK' + 11 dígitos = 14 caracteres, o tamanho do CNPJ (o app completa CNPJs com zeros à esquerda até 14)."""
+    return "CIK" + str(int(cik)).zfill(11)
+
+
+def _cik_de(cnpj: pd.Series) -> pd.Series:
+    return pd.to_numeric(cnpj.astype(str).str.replace("CIK", "", regex=False), errors="coerce")
+
+
 # ------------------------------------------------------------------ base no formato da CVM
 # colunas da base do coletor que as abas usam (o resto fica no repositório coletor-eua)
 COLUNAS = [
@@ -160,8 +172,27 @@ def base_como_br() -> pd.DataFrame:
     b["notas"] = b["notas"].fillna("").str.replace("ausente", "não reportado", regex=False)
     for c in ("ticker", "empresa", "setor", "subsetor", "segmento"):
         b[c] = b[c].fillna("").astype(str)
-    b["cnpj"] = b["cnpj"].astype(str)                       # 'CIK##########' faz o papel do CNPJ
+    b["cnpj"] = _cik_de(b["cnpj"]).map(_cnpj)             # 'CIK' + 11 dígitos faz o papel do CNPJ
+    b = b[b["exercicio"] >= INICIO.year]                     # exercícios 52/53 semanas encerrados em jan/2014 = 2013
     return compactar(b.drop(columns=["tipo_especial"]))
+
+
+def multiplos() -> pd.DataFrame:
+    """Múltiplos de mercado (coletor-eua/multiplos_eua.py) no formato do multiplos.csv.gz brasileiro."""
+    try:
+        m = pd.read_parquet(io.BytesIO(_baixar("multiplos_eua.parquet")))
+    except Exception:                                        # ainda não gerado: o app segue sem múltiplos
+        return pd.DataFrame()
+    cad = pd.read_parquet(io.BytesIO(_baixar("cadastro_eua.parquet")), columns=["cik", "setor", "subsetor", "segmento"])
+    m = m.merge(cad, on="cik", how="left")                  # classificação: usada na mediana de comparáveis
+    for c in ("setor", "subsetor", "segmento"):
+        m[c] = m[c].fillna("")
+    m["cnpj"] = m["cik"].map(_cnpj)
+    m["data"] = pd.to_datetime(m["data"], errors="coerce")
+    m = m[m["data"] >= INICIO]
+    for c in ("ticker", "empresa", "notas", "periodo_base"):
+        m[c] = m[c].fillna("").astype(str)
+    return m.drop(columns=["cik"]).reset_index(drop=True)
 
 
 def cobertura() -> pd.DataFrame:
@@ -169,7 +200,7 @@ def cobertura() -> pd.DataFrame:
     a = pd.read_csv(io.BytesIO(_baixar("auditoria_eua.csv.gz")), compression="gzip")
     cad = pd.read_parquet(io.BytesIO(_baixar("cadastro_eua.parquet")))
     a = a.merge(cad[["cik", "subsetor", "segmento", "bolsa"]], on="cik", how="left")
-    a["cnpj"] = "CIK" + a["cik"].astype(int).astype(str).str.zfill(10)
+    a["cnpj"] = a["cik"].map(_cnpj)
     a["situacao"] = a["motivo"].fillna("").replace("", "com dados")
     cols = ["ticker", "empresa", "setor", "subsetor", "segmento", "bolsa", "cnpj", "situacao", "exercicios",
             "ultimo_dt_fim", "ausentes", "tags"]
@@ -228,10 +259,21 @@ imposto de renda pago (divulgação suplementar do fluxo de caixa; muitas empres
 **Dívida e caixa.** Dívida bruta = LongTermDebt (inclui a parcela corrente) + empréstimos de curto prazo +
 commercial paper (com alternativas por empresa). Caixa = caixa e equivalentes + aplicações de curto prazo.
 
+**Múltiplos de mercado.** Preço de fechamento do Yahoo Finance (via yfinance), sem o ajuste de desdobramentos
+(preço efetivamente negociado na data) × ações em circulação (capa do 10-K/10-Q; empresas com várias classes: total do
+balanço), corrigidas pelos desdobramentos entre a data do dado e a do preço. Mais de um ticker listado: ações totais ×
+preço do ticker principal (aproximação, nas notas). Anual = preço do fim do exercício com os números do exercício.
+Trimestral = ponto no tempo: em cada fim de trimestre fiscal, o último 10-Q/10-K já arquivado até a data (lucro, EBITDA
+e receita dos 12 meses desse documento); o último ponto é o pregão mais recente, atualizado de terça a sábado.
+EV = valor de mercado + dívida líquida + não controladores. EV/EBITDA equiv. IFRS 16 = EV c/ arrendamentos ÷ EBITDA
+equivalente IFRS 16 (sem o dado no LTM: EBITDA + custo de arrendamento operacional do último 10-K); EV/EBITDA após
+arrend. financeiros = EV s/ arrendamentos ÷ EBITDA após arrend. financeiros. P/L e P/VPA com lucro e PL dos
+controladores; dividend yield = dividendos pagos em 12 meses ÷ valor de mercado.
+
 **Limitações conhecidas.**
 - D&A: quando a empresa usa tag própria para o total do fluxo de caixa (ex.: Microsoft), usamos depreciação +
   amortização de intangíveis em tags padrão — o EBITDA fica conservador.
 - Prazos médios dependem de clientes, estoques, fornecedores e custo das vendas em tags padrão.
-- Múltiplos de mercado (preços) ainda não disponíveis nos EUA.
+- Preços do Yahoo Finance (fonte não oficial; pode mudar ou limitar o acesso).
 - Universo só com empresas listadas hoje: medianas históricas têm viés de sobrevivência.
 """)
