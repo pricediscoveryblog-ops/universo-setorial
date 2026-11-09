@@ -247,6 +247,45 @@ def garantir_colunas(base: pd.DataFrame) -> pd.DataFrame:
     return base
 
 
+def preparar_mult(mult: pd.DataFrame) -> pd.DataFrame:
+    """Tipos, colunas ausentes e ROE no critério dos múltiplos (bases brasileira e americana)."""
+    mult["cnpj"] = mult["cnpj"].str.zfill(14)
+    mult["data"] = pd.to_datetime(mult["data"], errors="coerce")
+    mult["notas"] = mult["notas"].fillna("")
+    mult["rotulo"] = mult["ticker"].fillna("").astype(str) + " — " + mult["empresa"].fillna("").astype(str)
+    # colunas que podem faltar em bases geradas por versões anteriores do coletor
+    for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
+              "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l", "ebitda_12m",
+              "ebitda_pre_ifrs16_12m", "valor_mercado", "receita_12m", "ev_receita_com_arrend",
+              "ev_receita_sem_arrend"):
+        if c not in mult.columns:
+            mult[c] = np.nan
+    # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
+    pl_ = mult["pl_controladores"].where(mult["pl_controladores"] > 0)
+    mult["roe"] = mult["lucro_controladores_12m"] / pl_
+    return mult
+
+
+def juntar_mult(base: pd.DataFrame, mult: pd.DataFrame) -> pd.DataFrame:
+    """Leva os múltiplos para a base (visão do setor, ranking, dados) na data de fim de cada período."""
+    # leva os múltiplos para a base (visão do setor, ranking, dados): anual na data de fim do exercício;
+    # trimestral e LTM na data de fim do trimestre (ponto no tempo: documentos já divulgados até ali)
+    ren = {"pl_controladores": "m_pl_controladores", "lucro_controladores_12m": "m_lucro_12m",
+           "ebitda_12m": "m_ebitda_12m", "ebitda_pre_ifrs16_12m": "m_ebitda_pre_12m",
+           "dividendos_12m": "m_dividendos_12m", "receita_12m": "m_receita_12m"}
+    cm = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
+          "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"] + list(ren)
+    mm = mult[["cnpj", "tipo", "data"] + cm].rename(columns=ren).drop_duplicates(["cnpj", "tipo", "data"])
+    partes = []
+    for tipos, tm in ((["anual"], "anual"), (["trimestral", "ltm"], "trimestral")):
+        b_ = base[base["tipo"].isin(tipos)]
+        m_ = mm[mm["tipo"] == tm].drop(columns="tipo")
+        partes.append(b_.merge(m_, left_on=["cnpj", "dt_fim"], right_on=["cnpj", "data"], how="left")
+                      .drop(columns="data"))
+    base = pd.concat(partes, ignore_index=True)
+    return base
+
+
 def _carregar_resto(base, cob, meta):
     fin = pd.read_csv(DADOS / "financeiras.csv.gz", dtype={"cnpj": str}) if (DADOS / "financeiras.csv.gz").exists() else pd.DataFrame()
     if not fin.empty:
@@ -268,35 +307,8 @@ def _carregar_resto(base, cob, meta):
         fin_per = pd.DataFrame()
     mult = pd.read_csv(DADOS / "multiplos.csv.gz", dtype={"cnpj": str}) if (DADOS / "multiplos.csv.gz").exists() else pd.DataFrame()
     if not mult.empty:
-        mult["cnpj"] = mult["cnpj"].str.zfill(14)
-        mult["data"] = pd.to_datetime(mult["data"], errors="coerce")
-        mult["notas"] = mult["notas"].fillna("")
-        mult["rotulo"] = mult["ticker"].fillna("").astype(str) + " — " + mult["empresa"].fillna("").astype(str)
-        # colunas que podem faltar em bases geradas por versões anteriores do coletor
-        for c in ("dividend_yield", "dividendos_12m", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_com_arrend",
-                  "ev_sem_arrend", "pl_controladores", "lucro_controladores_12m", "p_vpa", "p_l", "ebitda_12m",
-                  "ebitda_pre_ifrs16_12m", "valor_mercado", "receita_12m", "ev_receita_com_arrend",
-                  "ev_receita_sem_arrend"):
-            if c not in mult.columns:
-                mult[c] = np.nan
-        # ROE no mesmo critério dos múltiplos: lucro 12m ÷ PL dos controladores do mesmo documento
-        pl_ = mult["pl_controladores"].where(mult["pl_controladores"] > 0)
-        mult["roe"] = mult["lucro_controladores_12m"] / pl_
-        # leva os múltiplos para a base (visão do setor, ranking, dados): anual na data de fim do exercício;
-        # trimestral e LTM na data de fim do trimestre (ponto no tempo: documentos já divulgados até ali)
-        ren = {"pl_controladores": "m_pl_controladores", "lucro_controladores_12m": "m_lucro_12m",
-               "ebitda_12m": "m_ebitda_12m", "ebitda_pre_ifrs16_12m": "m_ebitda_pre_12m",
-               "dividendos_12m": "m_dividendos_12m", "receita_12m": "m_receita_12m"}
-        cm = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
-              "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"] + list(ren)
-        mm = mult[["cnpj", "tipo", "data"] + cm].rename(columns=ren).drop_duplicates(["cnpj", "tipo", "data"])
-        partes = []
-        for tipos, tm in ((["anual"], "anual"), (["trimestral", "ltm"], "trimestral")):
-            b_ = base[base["tipo"].isin(tipos)]
-            m_ = mm[mm["tipo"] == tm].drop(columns="tipo")
-            partes.append(b_.merge(m_, left_on=["cnpj", "dt_fim"], right_on=["cnpj", "data"], how="left")
-                          .drop(columns="data"))
-        base = pd.concat(partes, ignore_index=True)
+        mult = preparar_mult(mult)
+        base = juntar_mult(base, mult)
         if not fin.empty:
             fin["_dt"] = pd.to_datetime(fin["dt_fim"], errors="coerce")
             fin["cnpj"] = fin["cnpj"].astype(str).str.zfill(14)
@@ -509,7 +521,7 @@ def painel_mercado(cnpj: str):
     if h.empty:
         return
     h = h.iloc[0]
-    fmt_mm = lambda v: f"R$ {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
+    fmt_mm = lambda v: f"{MOEDA} {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
     fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
     fmt_p = lambda v: f"{v:.1%}".replace(".", ",") if pd.notna(v) else "-"
     per = str(h.get("periodo_base") or "")
@@ -522,7 +534,8 @@ def painel_mercado(cnpj: str):
                     d_bal = pd.to_datetime(m_["dt_fim"].iloc[0], errors="coerce")
                     break
     atraso = (pd.Timestamp(h["data"]) - d_bal).days if pd.notna(d_bal) else np.nan
-    aviso = (f" ⚠️ balanço com {atraso // 30} meses: a companhia não entregou ITRs mais recentes à CVM"
+    aviso = (f" ⚠️ balanço com {atraso // 30} meses: a companhia não "
+             + ("arquivou 10-Q/10-K mais recentes na SEC" if EUA else "entregou ITRs mais recentes à CVM")
              if pd.notna(atraso) and atraso > 200 else "")
     st.markdown(f"**Na cotação de {pd.Timestamp(h['data']).strftime('%d/%m/%Y')}** — balanço: "
                 f"{h.get('periodo_base', '') or 'último documento divulgado'}"
@@ -534,8 +547,8 @@ def painel_mercado(cnpj: str):
     k4, k5, k6, k7 = st.columns(4)
     k4.metric("P/VPA", fmt_x(h.get("p_vpa")))
     k5.metric("P/L", fmt_x(h.get("p_l")))
-    k6.metric("EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
-    k7.metric("EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
+    k6.metric("EV/EBITDA equiv. IFRS 16" if EUA else "EV/EBITDA IFRS 16", fmt_x(h.get("ev_ebitda_ifrs16")))
+    k7.metric("EV/EBITDA após arrend. fin." if EUA else "EV/EBITDA pré-IFRS 16", fmt_x(h.get("ev_ebitda_pre_ifrs16")))
     k8, k9, k10, k11 = st.columns(4)
     k8.metric("EV/Receita (EV c/ arrend.)", fmt_x(h.get("ev_receita_com_arrend")))
     k9.metric("EV/Receita (EV s/ arrend.)", fmt_x(h.get("ev_receita_sem_arrend")))
@@ -594,8 +607,13 @@ def eixo_x(tipo: str) -> str:
 def carregar_eua(versao: str):
     """Base da SEC no formato da CVM. cache_resource (sem cópia por sessão): a base americana é ~10x a brasileira
     e o Streamlit gratuito tem pouca memória. As abas só filtram a base, não a alteram."""
-    b = eua.compactar(garantir_colunas(enriquecer(eua.base_como_br())).copy())   # .copy(): desfragmenta
-    return b, eua.cobertura(), pd.Series(eua.metadados()), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    b = enriquecer(eua.base_como_br())
+    m = eua.multiplos()
+    if not m.empty:                                   # mesmo tratamento dos múltiplos brasileiros
+        m = eua.compactar(preparar_mult(m))
+        b = juntar_mult(b, m)
+    b = eua.compactar(garantir_colunas(b).copy())   # .copy(): desfragmenta
+    return b, eua.cobertura(), pd.Series(eua.metadados()), pd.DataFrame(), m, pd.DataFrame()
 
 
 if EUA:
@@ -1526,10 +1544,9 @@ with aba_emp:
 
         # ---- múltiplos de mercado (valor de mercado com preços da B3 sem ajuste)
         st.subheader("Múltiplos de mercado")
-        if EUA:
-            st.info("Múltiplos de mercado dos EUA entram na próxima etapa (preços via yfinance, já testados no coletor).")
-        elif mult.empty:
-            st.info("Múltiplos ainda não gerados (multiplos.csv.gz). Rode o workflow no modo universo.")
+        if mult.empty:
+            st.info("Múltiplos ainda não gerados (multiplos_eua.parquet no coletor-eua)." if EUA else
+                    "Múltiplos ainda não gerados (multiplos.csv.gz). Rode o workflow no modo universo.")
         else:
             tipo_m = "anual" if tipo == "anual" else "trimestral"
             cnpj_e = d_emp["cnpj"].iloc[0]
@@ -1583,8 +1600,10 @@ with aba_emp:
                 st.caption("Vazio = denominador ≤ 0 (prejuízo, EBITDA ou PL negativos) ou sem cotação. "
                            "EV = valor de mercado + dívida líquida + participação de não controladores. "
                            "ROE usa o mesmo lucro 12m e PL dos múltiplos, então P/VPA = P/L × ROE em cada ponto. "
-                           "Dividend yield em regime de caixa: dividendos e JCP efetivamente pagos nos 12 meses (DFC), "
-                           "não pela data-com; exclui pagamentos a não controladores.")
+                           + ("Dividend yield em regime de caixa: dividendos pagos nos 12 meses (fluxo de caixa). Preços "
+                              "do Yahoo Finance, sem o ajuste de desdobramentos (preço negociado na data)." if EUA else
+                              "Dividend yield em regime de caixa: dividendos e JCP efetivamente pagos nos 12 meses (DFC), "
+                              "não pela data-com; exclui pagamentos a não controladores."))
                 with st.expander("Valor de mercado, EV, preços, ações e notas"):
                     cols_m = ["data", "periodo_base", "valor_mercado", "ev_com_arrend", "ev_sem_arrend", "ticker_on", "preco_on",
                               "data_preco_on", "acoes_on", "ticker_pn", "preco_pn", "data_preco_pn", "acoes_pn",
@@ -1592,16 +1611,18 @@ with aba_emp:
                               "ev_receita_sem_arrend", "roe", "dividendos_12m", "dividend_yield", "notas"]
                     tab_m = dm[cols_m].assign(data=dm["data"].dt.date)
                     st.dataframe(tab_m, hide_index=True, width="stretch", column_config={
-                        "valor_mercado": st.column_config.NumberColumn("Valor de mercado (R$ mm)", format="%,.1f"),
-                        "ev_com_arrend": st.column_config.NumberColumn("EV c/ arrend. (R$ mm)", format="%,.1f"),
-                        "ev_sem_arrend": st.column_config.NumberColumn("EV s/ arrend. (R$ mm)", format="%,.1f"),
-                        "acoes_on": st.column_config.NumberColumn("Ações ON", format="%,.0f"),
+                        "valor_mercado": st.column_config.NumberColumn(f"Valor de mercado ({UN})", format="%,.1f"),
+                        "ev_com_arrend": st.column_config.NumberColumn(f"EV c/ arrend. ({UN})", format="%,.1f"),
+                        "ev_sem_arrend": st.column_config.NumberColumn(f"EV s/ arrend. ({UN})", format="%,.1f"),
+                        "acoes_on": st.column_config.NumberColumn("Ações (todas as classes)" if EUA else "Ações ON",
+                                                                  format="%,.0f"),
                         "acoes_pn": st.column_config.NumberColumn("Ações PN", format="%,.0f"),
                         **{k: st.column_config.NumberColumn(k, format="%.2fx") for k in
                            ("p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend",
                             "ev_receita_sem_arrend")},
                         "roe": st.column_config.NumberColumn("ROE", format="percent"),
-                        "dividendos_12m": st.column_config.NumberColumn("Dividendos + JCP 12m (R$ mm)", format="%,.1f"),
+                        "dividendos_12m": st.column_config.NumberColumn(("Dividendos 12m" if EUA else "Dividendos + JCP 12m") + f" ({UN})",
+                                                                        format="%,.1f"),
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
