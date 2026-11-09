@@ -266,8 +266,10 @@ def preparar_mult(mult: pd.DataFrame) -> pd.DataFrame:
     return mult
 
 
-def juntar_mult(base: pd.DataFrame, mult: pd.DataFrame) -> pd.DataFrame:
-    """Leva os múltiplos para a base (visão do setor, ranking, dados) na data de fim de cada período."""
+def juntar_mult(base: pd.DataFrame, mult: pd.DataFrame, leve: bool = False) -> pd.DataFrame:
+    """Leva os múltiplos para a base (visão do setor, ranking, dados) na data de fim de cada período.
+    leve=True (base americana, ~10x maior): preenche as colunas na própria base, sem as cópias do concat; exige a
+    base ordenada como anual, trimestral, LTM (é a ordem em que ela é montada), o mesmo resultado do modo normal."""
     # leva os múltiplos para a base (visão do setor, ranking, dados): anual na data de fim do exercício;
     # trimestral e LTM na data de fim do trimestre (ponto no tempo: documentos já divulgados até ali)
     ren = {"pl_controladores": "m_pl_controladores", "lucro_controladores_12m": "m_lucro_12m",
@@ -276,6 +278,13 @@ def juntar_mult(base: pd.DataFrame, mult: pd.DataFrame) -> pd.DataFrame:
     cm = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
           "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"] + list(ren)
     mm = mult[["cnpj", "tipo", "data"] + cm].rename(columns=ren).drop_duplicates(["cnpj", "tipo", "data"])
+    if leve:
+        chave = pd.DataFrame({"cnpj": base["cnpj"].to_numpy(), "data": base["dt_fim"].to_numpy(),
+                              "tipo": np.where(base["tipo"].to_numpy() == "anual", "anual", "trimestral")})
+        j = chave.merge(mm, on=["cnpj", "tipo", "data"], how="left")
+        for c in [c for c in mm.columns if c not in ("cnpj", "tipo", "data")]:
+            base[c] = j[c].to_numpy()
+        return base
     partes = []
     for tipos, tm in ((["anual"], "anual"), (["trimestral", "ltm"], "trimestral")):
         b_ = base[base["tipo"].isin(tipos)]
@@ -607,16 +616,20 @@ def eixo_x(tipo: str) -> str:
 def carregar_eua(versao: str):
     """Base da SEC no formato da CVM. cache_resource (sem cópia por sessão): a base americana é ~10x a brasileira
     e o Streamlit gratuito tem pouca memória. As abas só filtram a base, não a alteram."""
-    b = enriquecer(eua.base_como_br())
+    b = eua.base_como_br()
+    b = eua.compactar(enriquecer(b))                  # derivadas em float32 já na saída do enriquecimento
+    eua.liberar_memoria()
     m = eua.multiplos()
     if not m.empty:                                   # mesmo tratamento dos múltiplos brasileiros
         m = eua.compactar(preparar_mult(m))
-        b = juntar_mult(b, m)
-    b = eua.compactar(garantir_colunas(b).copy())   # .copy(): desfragmenta
+        b = juntar_mult(b, m, leve=True)
+    b = eua.compactar(garantir_colunas(b))
+    eua.liberar_memoria()
     return b, eua.cobertura(), pd.Series(eua.metadados()), pd.DataFrame(), m, pd.DataFrame()
 
 
 if EUA:
+    carregar.clear()                                  # um mercado por vez na memória (Streamlit gratuito)
     if not eua.tem_acesso():
         eua.sem_acesso()
         st.stop()
@@ -626,6 +639,7 @@ if EUA:
         eua.sem_acesso(str(e))
         st.stop()
 else:
+    carregar_eua.clear()                              # um mercado por vez na memória (Streamlit gratuito)
     try:
         base, cob, meta, fin, mult, fin_per = carregar(versao_arquivos(*(DADOS / f for f in (
             "base.csv.gz", "cobertura.csv", "metadados.json", "financeiras.csv.gz", "multiplos.csv.gz"))))
@@ -1561,10 +1575,20 @@ with aba_emp:
                            "Trimestral (ponto no tempo): em cada data, PL, dívida e ações do último ITR/DFP divulgado até a "
                            "data; lucro e EBITDA dos 12 meses desse documento. O último ponto é o pregão mais recente. ")
                 pares_m = cmp(mult[mult["tipo"] == tipo_m])
-                med_m = pares_m.groupby("data")[["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe",
-                                                    "dividend_yield", "ev_receita_com_arrend",
-                                                    "ev_receita_sem_arrend"]].median()
-                med_m = med_m[med_m.index.isin(dm["data"])]
+                cols_med = ["p_vpa", "p_l", "ev_ebitda_ifrs16", "ev_ebitda_pre_ifrs16", "roe", "dividend_yield",
+                            "ev_receita_com_arrend", "ev_receita_sem_arrend"]
+                if EUA:
+                    # anos fiscais diferentes entre empresas: mediana pelo ano/trimestre CIVIL da data
+                    # (o ponto do último pregão, comum a todas, fica à parte)
+                    ult_m = mult["data"].max()
+                    chave_m = lambda s: pd.Series(np.where(s == ult_m, "ultimo", s.dt.to_period(
+                        "Y" if tipo_m == "anual" else "Q").astype(str)), index=s.index)
+                    med_k = pares_m.assign(_k=chave_m(pares_m["data"])).groupby("_k")[cols_med].median()
+                    med_m = dm[["data"]].assign(_k=chave_m(dm["data"])).join(med_k, on="_k") \
+                        .drop_duplicates("data").set_index("data")[cols_med]
+                else:
+                    med_m = pares_m.groupby("data")[cols_med].median()
+                    med_m = med_m[med_m.index.isin(dm["data"])]
                 graficos = [("P/VPA (valor de mercado ÷ PL dos controladores)", [("p_vpa", "P/VPA")]),
                             ("P/L (valor de mercado ÷ lucro 12m dos controladores)", [("p_l", "P/L")]),
                             ("EV/EBITDA IFRS 16 (EV c/ arrendamento ÷ EBITDA IFRS 16)",
@@ -2414,24 +2438,34 @@ with aba_dados:
         cols_out = [c for c in IDENT if c in filtrado.columns] + list(METRICAS) + ["notas"]
     saida = filtrado[cols_out].sort_values(["empresa", "dt_fim"])
     mets_vis = [c for c in cols_out if c in METRICAS]
-    st.dataframe(para_exibir(saida, mets_vis), column_config=fmt_tabela(saida, mets_vis), hide_index=True,
+    # base americana: ~10x a brasileira; tabela na tela limitada e arquivos gerados só sob pedido (cada interação
+    # do app roda todas as abas, e montar CSV/XLSX de 100 mil+ linhas a cada clique estoura a memória do Streamlit)
+    LIM_EXIB = 5000
+    exib = saida.head(LIM_EXIB) if EUA else saida
+    st.dataframe(para_exibir(exib, mets_vis), column_config=fmt_tabela(exib, mets_vis), hide_index=True,
                  width="stretch", height=500)
+    if EUA and len(saida) > LIM_EXIB:
+        st.caption(f"Mostrando as primeiras {LIM_EXIB:,} de {len(saida):,} linhas (use os filtros da barra lateral); "
+                   "o download traz todas.".replace(",", "."))
     st.caption(f"Valores em {MOEDA} milhões; margens e retornos em %. No download, percentuais vão como fração (0,15 = 15%).")
-    rot_cols = {c: (ROT[c] + (f" ({UN})" if METRICAS[c][1] == "mm" else "")) for c in mets_vis}
-    exp = saida.assign(dt_fim=saida["dt_fim"].dt.date).rename(columns=rot_cols)
-    c1, c2 = st.columns(2)
-    c1.download_button("⬇️ Baixar CSV", exp.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                       file_name=f"universo_{tipo}.csv", mime="text/csv")
-    abas = {"dados": exp}
-    if not cob.empty:
-        abas["cobertura"] = cob[cob["cnpj"].astype(str).str.zfill(14).isin(saida["cnpj"].astype(str).str.zfill(14))]
-    abas["fontes"] = pd.DataFrame({"item": ["Fonte", "Gerado em", "Definições"],
-                                   "descrição": ["SEC EDGAR (XBRL companyfacts, 10-K/10-Q) + classificação SEC/SIC"
-                                                 if EUA else "CVM Dados Abertos (DFP/ITR) + classificação setorial B3",
-                                                 str(meta.get("gerado_em", "")) if meta is not None else "",
-                                                 "Ver aba Metodologia do app / README do repositório"]})
-    c2.download_button("⬇️ Baixar XLSX", excel_bytes(abas), file_name=f"universo_{tipo}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    gerar = (not EUA) or st.toggle("Preparar arquivos para download (CSV e XLSX)", key="dl_eua",
+                                   help="Na base americana os arquivos são grandes: só são gerados quando você pede.")
+    if gerar:
+        rot_cols = {c: (ROT[c] + (f" ({UN})" if METRICAS[c][1] == "mm" else "")) for c in mets_vis}
+        exp = saida.assign(dt_fim=saida["dt_fim"].dt.date).rename(columns=rot_cols)
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ Baixar CSV", exp.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                           file_name=f"universo_{tipo}.csv", mime="text/csv")
+        abas = {"dados": exp}
+        if not cob.empty:
+            abas["cobertura"] = cob[cob["cnpj"].astype(str).str.zfill(14).isin(saida["cnpj"].astype(str).str.zfill(14))]
+        abas["fontes"] = pd.DataFrame({"item": ["Fonte", "Gerado em", "Definições"],
+                                       "descrição": ["SEC EDGAR (XBRL companyfacts, 10-K/10-Q) + classificação SEC/SIC"
+                                                     if EUA else "CVM Dados Abertos (DFP/ITR) + classificação setorial B3",
+                                                     str(meta.get("gerado_em", "")) if meta is not None else "",
+                                                     "Ver aba Metodologia do app / README do repositório"]})
+        c2.download_button("⬇️ Baixar XLSX", excel_bytes(abas), file_name=f"universo_{tipo}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # -------- Cobertura
 with aba_cob:
@@ -2528,3 +2562,8 @@ o gráfico mostra o crescimento acumulado em base 100 (por instituição e agreg
 - Universo só com empresas listadas hoje: medianas históricas têm viés de sobrevivência.
 - Trimestres podem divergir do anual quando há reapresentação (o anual usa a versão reapresentada).
 """)
+
+
+# devolve ao sistema a memória liberada nesta execução (base americana é grande; Streamlit gratuito)
+if EUA:
+    eua.liberar_memoria()
