@@ -10,6 +10,8 @@ Testes locais: variável de ambiente EUA_DIR apontando para uma pasta com os arq
 """
 from __future__ import annotations
 
+import ctypes
+import gc
 import io
 import json
 import os
@@ -139,16 +141,29 @@ def compactar(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def liberar_memoria() -> None:
+    """Devolve ao sistema a memória já liberada pelo Python (sem isso o Streamlit gratuito conta o pico como uso)."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
 def base_como_br() -> pd.DataFrame:
-    partes = []
-    for a in ARQUIVOS:
-        # filtros já na leitura (datas ISO comparam como texto): linhas antigas e financeiras nem entram na memória
-        p = pd.read_parquet(io.BytesIO(_baixar(a)), columns=COLUNAS,
-                            filters=[("dt_fim", ">=", INICIO.strftime("%Y-%m-%d")), ("tipo_especial", "!=", "financeira")])
-        p["dt_fim"] = pd.to_datetime(p["dt_fim"], errors="coerce")
-        partes.append(compactar(p))
-    b = pd.concat(partes, ignore_index=True)
-    del partes
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    # filtros já na leitura (datas ISO comparam como texto) e junção no Arrow: uma única conversão para pandas,
+    # sem cópias intermediárias (pico de memória menor)
+    filtros = [("dt_fim", ">=", INICIO.strftime("%Y-%m-%d")), ("tipo_especial", "!=", "financeira")]
+    tabs = [pq.read_table(io.BytesIO(_baixar(a)), columns=COLUNAS, filters=filtros) for a in ARQUIVOS]
+    t = pa.concat_tables(tabs, promote_options="permissive")
+    del tabs
+    b = t.to_pandas(self_destruct=True)
+    del t
+    liberar_memoria()
+    b["dt_fim"] = pd.to_datetime(b["dt_fim"], errors="coerce")
+    b = compactar(b)
     z = lambda s: s.fillna(0)
 
     # FCO: na SEC não há separação de juros/dividendos dentro do FCO -> o FCO é o reportado
@@ -174,7 +189,9 @@ def base_como_br() -> pd.DataFrame:
         b[c] = b[c].fillna("").astype(str)
     b["cnpj"] = _cik_de(b["cnpj"]).map(_cnpj)             # 'CIK' + 11 dígitos faz o papel do CNPJ
     b = b[b["exercicio"] >= INICIO.year]                     # exercícios 52/53 semanas encerrados em jan/2014 = 2013
-    return compactar(b.drop(columns=["tipo_especial"]))
+    b = compactar(b.drop(columns=["tipo_especial"]).reset_index(drop=True))
+    liberar_memoria()
+    return b
 
 
 def multiplos() -> pd.DataFrame:
