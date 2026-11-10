@@ -623,7 +623,7 @@ def carregar_eua(versao: str):
     if not m.empty:                                   # mesmo tratamento dos múltiplos brasileiros
         m = eua.compactar(preparar_mult(m))
         b = juntar_mult(b, m, leve=True)
-    b = eua.compactar(garantir_colunas(b))
+    b = eua.categorizar(eua.compactar(garantir_colunas(b)))
     eua.liberar_memoria()
     return b, eua.cobertura(), pd.Series(eua.metadados()), pd.DataFrame(), m, pd.DataFrame()
 
