@@ -108,6 +108,16 @@ def versao() -> str:
     return str(metadados().get("gerado_em", ""))
 
 
+def trimestre_civil(d: pd.Series) -> pd.Series:
+    """Fim de trimestre civil mais próximo da data (27/12 -> 31/12; 31/10 -> 30/09; 03/01 -> 31/12).
+    As abas comparam empresas pela data de fechamento; nos EUA cada empresa tem o seu calendário fiscal, então os
+    trimestres são alinhados ao trimestre civil mais próximo (calendarização usual em comparações setoriais)."""
+    q = d.dt.to_period("Q")
+    fim = q.dt.end_time.dt.normalize()
+    ant = (q - 1).dt.end_time.dt.normalize()
+    return fim.where((fim - d).abs() <= (d - ant).abs(), ant).astype(d.dtype)
+
+
 def _cnpj(cik) -> str:
     """'CIK' + 11 dígitos = 14 caracteres, o tamanho do CNPJ (o app completa CNPJs com zeros à esquerda até 14)."""
     return "CIK" + str(int(cik)).zfill(11)
@@ -150,6 +160,18 @@ def liberar_memoria() -> None:
         pass
 
 
+# texto com poucos valores distintos: guardado como categoria (um valor por categoria, não por linha) — só depois do
+# enriquecimento, que preenche vazios com ""; economiza memória em cada filtro que as abas fazem na base
+CATEGORIAS = ("setor", "subsetor", "segmento", "periodo", "fonte", "regime_contabil")
+
+
+def categorizar(df: pd.DataFrame) -> pd.DataFrame:
+    for c in CATEGORIAS:
+        if c in df.columns and df[c].dtype != "category":
+            df[c] = df[c].astype("category")
+    return df
+
+
 def base_como_br() -> pd.DataFrame:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -189,6 +211,11 @@ def base_como_br() -> pd.DataFrame:
         b[c] = b[c].fillna("").astype(str)
     b["cnpj"] = _cik_de(b["cnpj"]).map(_cnpj)             # 'CIK' + 11 dígitos faz o papel do CNPJ
     b = b[b["exercicio"] >= INICIO.year]                     # exercícios 52/53 semanas encerrados em jan/2014 = 2013
+    # trimestral e LTM: data de fechamento alinhada ao trimestre civil mais próximo (a data real fica guardada)
+    b["dt_fim_original"] = b["dt_fim"]
+    tri = b["tipo"].isin(["trimestral", "ltm"])
+    b.loc[tri, "dt_fim"] = trimestre_civil(b.loc[tri, "dt_fim"])
+    b = b.drop_duplicates(["cnpj", "tipo", "dt_fim"], keep="last")   # troca de exercício fiscal (raro)
     b = compactar(b.drop(columns=["tipo_especial"]).reset_index(drop=True))
     liberar_memoria()
     return b
@@ -207,6 +234,10 @@ def multiplos() -> pd.DataFrame:
     m["cnpj"] = m["cik"].map(_cnpj)
     m["data"] = pd.to_datetime(m["data"], errors="coerce")
     m = m[m["data"] >= INICIO]
+    # mesmos trimestres civis da base (o ponto do último pregão, comum a todas as empresas, fica como está)
+    alinhar = (m["tipo"] == "trimestral") & (m["data"] != m["data"].max())
+    m.loc[alinhar, "data"] = trimestre_civil(m.loc[alinhar, "data"])
+    m = m.drop_duplicates(["cik", "tipo", "data"], keep="last")
     for c in ("ticker", "empresa", "notas", "periodo_base"):
         m[c] = m[c].fillna("").astype(str)
     return m.drop(columns=["cik"]).reset_index(drop=True)
@@ -252,7 +283,9 @@ segmento = descrição SIC de 4 dígitos.
 
 **Períodos.** Anual = 10-K (vale o arquivamento mais recente, inclusive 10-K/A e comparativos reapresentados).
 Trimestral: 3M reportado; sem ele, diferença dos acumulados (6M − 3M, 9M − 6M); 4T = anual − 9M.
-LTM = soma de 4 trimestres contíguos. Exercício = ano civil do encerramento (Walmart: ano fiscal até jan/2026 = 2026;
+LTM = soma de 4 trimestres contíguos. No trimestral e no LTM, a data de fechamento de cada empresa é alinhada ao fim de
+trimestre civil mais próximo (ex.: Apple 27/12 → 31/12; Walmart 31/10 → 30/09), para comparar empresas com calendários
+fiscais diferentes — o rótulo do período (ex.: 3T27) segue o exercício da empresa. Exercício = ano civil do encerramento (Walmart: ano fiscal até jan/2026 = 2026;
 anos de 52/53 semanas encerrados na 1ª semana de janeiro contam no ano anterior). A data da primeira divulgação de
 cada período fica na base do coletor (coluna *dt_arquivamento*) e será usada nos múltiplos históricos.
 
