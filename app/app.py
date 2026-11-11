@@ -56,6 +56,8 @@ METRICAS = {
     "margem_ebitda_pre_ifrs16": ("Margem EBITDA pré-IFRS 16", "pct", "Margens e retorno"),
     "margem_liquida": ("Margem líquida", "pct", "Margens e retorno"),
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
+    "roic_caixa": ("ROIC caixa (NOPAT + D&A − capex org. − arrend. ÷ CI)", "pct", "Margens e retorno"),
+    "roic_trad": ("ROIC tradicional (NOPAT ÷ CI c/ arrendamento)", "pct", "Margens e retorno"),
     "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
     "conversao_fco_ebitda": ("Conversão de caixa (FCO comparável ÷ EBITDA IFRS 16)", "pct", "Margens e retorno"),
     "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
@@ -204,10 +206,45 @@ def carregar(versao: tuple = ()):
     base = pd.read_csv(DADOS / "base.csv.gz", low_memory=False)
     base["dt_fim"] = pd.to_datetime(base["dt_fim"], errors="coerce")
     base["cnpj"] = base["cnpj"].astype(str).str.zfill(14)
-    base = enriquecer(base)
+    base = calc_roic(enriquecer(base))
     cob = pd.read_csv(DADOS / "cobertura.csv") if (DADOS / "cobertura.csv").exists() else pd.DataFrame()
     meta = pd.read_json(DADOS / "metadados.json", typ="series") if (DADOS / "metadados.json").exists() else None
     return _carregar_resto(base, cob, meta)
+
+
+# ROIC (variante Price Discovery, nov/2026). Só na base brasileira: a americana não passa por calc_roic e as
+# chaves saem de METRICAS no modo EUA (eua.SEM_EQUIVALENTE). Sem ajuste de goodwill nesta versão.
+#   NOPAT = EBIT × (1 − 34%) se EBIT > 0 (sem crédito fiscal sobre prejuízo)
+#   ROIC caixa = (NOPAT + D&A − capex orgânico − pagamento de arrendamento) ÷ (DL s/ arrend. + PL)
+#     sem pagamento identificado na DFC e com passivo de arrendamento: pagamento sai do numerador e
+#     2,5 × passivo de arrendamento entra no capital (roic_arrend_capitalizado = True)
+#   ROIC tradicional = NOPAT ÷ (DL s/ arrend. + passivo de arrendamento + PL)
+#   Capital no fim do período; vazio no trimestral (fluxo de 1 trimestre) e com capital ≤ 0.
+ALIQ_IR_BR = 0.34
+MULT_ARREND_FALLBACK = 2.5
+
+
+def calc_roic(base: pd.DataFrame) -> pd.DataFrame:
+    """ROIC caixa e tradicional. Coluna ausente ou qualquer erro -> métricas vazias (o app não cai)."""
+    try:
+        def num(c):
+            return pd.to_numeric(base[c], errors="coerce")
+        ebit, da, capex = num("ebit"), num("da"), num("capex_organico")
+        pag, passivo = num("pagamento_arrendamento"), num("passivo_arrendamento").fillna(0)
+        pl, dl = num("patrimonio_liquido"), num("div_liq_sem_arrend")
+        nopat = ebit.where(ebit <= 0, ebit * (1 - ALIQ_IR_BR))
+        capitaliza = pag.isna() & (passivo > 0)
+        num_caixa = nopat + da - capex - pag.fillna(0)
+        ci_caixa = dl + pl + (MULT_ARREND_FALLBACK * passivo).where(capitaliza, 0)
+        ci_trad = dl + passivo + pl
+        fluxo_ok = base["tipo"].astype(str) != "trimestral"
+        base["roic_caixa"] = (num_caixa / ci_caixa.where(ci_caixa > 0)).where(fluxo_ok)
+        base["roic_trad"] = (nopat / ci_trad.where(ci_trad > 0)).where(fluxo_ok)
+        base["roic_arrend_capitalizado"] = capitaliza & fluxo_ok
+    except Exception:
+        for c in ("roic_caixa", "roic_trad", "roic_arrend_capitalizado"):
+            base[c] = np.nan
+    return base
 
 
 def enriquecer(base: pd.DataFrame) -> pd.DataFrame:
