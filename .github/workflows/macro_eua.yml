@@ -1,0 +1,36 @@
+name: macro-eua
+
+on:
+  workflow_dispatch:
+  schedule:
+    # terça a sábado às 08:50 de Brasília (11:50 UTC): curva do Tesouro do pregão anterior já no FRED.
+    # CPI e PIB entram automaticamente quando BLS/BEA divulgam (as séries são relidas inteiras a cada execução).
+    - cron: "50 11 * * 2-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macro-eua
+  cancel-in-progress: false
+
+jobs:
+  macro-eua:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas numpy requests
+      - name: Baixar Treasuries, TIPS, CPI, PIB e dólar (FRED)
+        run: python macro_eua.py
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/eua_macro
+          git diff --cached --quiet || git commit -m "macro-eua: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
