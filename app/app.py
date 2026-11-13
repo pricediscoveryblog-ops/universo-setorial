@@ -1150,15 +1150,53 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     # ---- crescimento
     st.subheader("Crescimento")
     g = crescimento(d, ["receita", "ebitda", "ebit", "lucro_liquido"])
+    visao_cres = st.radio("Visão", ["Contra o ano anterior", "Acumulado (base 100)"], horizontal=True,
+                          key="emp_cres_visao")
+    series_cres = (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido"))
     fig = go.Figure()
-    for c, nome in (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido")):
-        fig.add_trace(go.Bar(x=g["periodo"], y=g["g_" + c], name=nome))
-    if not EUA:          # macro Brasil no mesmo recorte (PIB nominal, IPCA, R$/US$)
-        macro_aba = macro_mod()
-        macro_aba.comparar_aa(fig, g, 12, key="mac_cmp_emp")
-    fig.update_layout(barmode="group", height=360, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
-                      margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
-    st.plotly_chart(fig, width="stretch")
+    if visao_cres == "Contra o ano anterior":
+        for c, nome in series_cres:
+            fig.add_trace(go.Scatter(x=g["periodo"], y=g["g_" + c], name=nome, mode="lines+markers"))
+        if not EUA:          # macro Brasil no mesmo recorte (PIB nominal, IPCA, R$/US$)
+            macro_aba = macro_mod()
+            macro_aba.comparar_aa(fig, g, 12, key="mac_cmp_emp")
+        fig.add_hline(y=0, line_dash="dot", line_color="gray")
+        fig.update_layout(height=380, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
+                          margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
+        st.plotly_chart(fig, width="stretch")
+    else:
+        # base 100 no primeiro período com receita positiva; uma série com base ≤ 0 fica de fora, e um valor ≤ 0 no
+        # meio da série encerra a leitura dali em diante (índice sobre base negativa não tem leitura)
+        dd = d.sort_values("dt_fim").reset_index(drop=True)
+        ok_base = dd.index[pd.to_numeric(dd["receita"], errors="coerce") > 0]
+        if len(ok_base) < 2:
+            st.info("Receita positiva em menos de dois períodos: sem crescimento acumulado para mostrar.")
+        else:
+            dd = dd.loc[ok_base[0]:].reset_index(drop=True)
+            fora, cortadas = [], []
+            for c, nome in series_cres:
+                v = pd.to_numeric(dd[c], errors="coerce").to_numpy(dtype=float)
+                if not v[0] > 0:
+                    fora.append(nome)
+                    continue
+                idx = 100 * v / v[0]
+                ruim = np.flatnonzero(idx <= 0)
+                if len(ruim):
+                    idx[ruim[0]:] = np.nan
+                    cortadas.append(f"{nome} (a partir de {dd['periodo'].iloc[ruim[0]]})")
+                fig.add_trace(go.Scatter(x=list(dd["periodo"]), y=idx, name=nome, mode="lines+markers"))
+            if not EUA:      # macro Brasil no mesmo recorte, mesma base
+                macro_aba = macro_mod()
+                macro_aba.comparar_base100(fig, pd.Series(pd.to_datetime(dd["dt_fim"]).to_numpy(),
+                                                          index=dd["periodo"].to_numpy()), 12, False, key="mac_cmp_emp")
+            fig.add_hline(y=100, line_dash="dot", line_color="gray")
+            fig.update_layout(height=380, legend=dict(orientation="h", y=-0.2), yaxis_title=f"Base 100 = {dd['periodo'].iloc[0]}",
+                              margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento acumulado (valores {nota_t})")
+            st.plotly_chart(fig, width="stretch")
+            if fora:
+                st.caption(" e ".join(fora) + f" fora do gráfico: valor não positivo no período-base ({dd['periodo'].iloc[0]}).")
+            if cortadas:
+                st.caption("Linha interrompida por valor não positivo: " + "; ".join(cortadas) + ".")
     # ---- graus de alavancagem
     st.subheader("Graus de alavancagem operacional e financeira")
     ga = graus_alavancagem(g)
