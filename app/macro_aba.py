@@ -10,7 +10,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-ARQS = ["ipca_mensal.csv", "pib_trimestral.csv", "cambio_diario.csv", "metadados.json"]
+ARQS = ["ipca_mensal.csv", "pib_trimestral.csv", "pib_volume_trimestral.csv", "cambio_diario.csv", "metadados.json"]
+PASTA_PADRAO = Path(__file__).resolve().parent.parent / "saidas" / "macro"
 
 IPCA_MODOS = ["Trimestral", "12 meses (janela móvel mensal)", "Anual", "Mensal"]
 PIB_MODOS = {"Trimestre vs. trimestre anterior (dessazonalizado)": "pib_tri_vs_tri_anterior_dessaz",
@@ -32,7 +33,7 @@ def carregar(pasta: str, versao: tuple = ()):
     ler = lambda n, **k: pd.read_csv(p / n, **k) if (p / n).exists() else pd.DataFrame()  # noqa: E731
     meta = json.loads((p / "metadados.json").read_text()) if (p / "metadados.json").exists() else {}
     return (ler("ipca_mensal.csv"), ler("pib_trimestral.csv"),
-            ler("cambio_diario.csv", parse_dates=["data"]), meta)
+            ler("cambio_diario.csv", parse_dates=["data"]), meta, ler("pib_volume_trimestral.csv"))
 
 
 def _tri(per: pd.Period) -> str:
@@ -89,6 +90,147 @@ def calc_cambio(c: pd.DataFrame, modo: str) -> pd.DataFrame:
     return out[["periodo", "data", "ptax_venda"]]
 
 
+# ----------------------------------------------------------------------------- PIB nominal e comparação
+def ipca_indice(ipca: pd.DataFrame) -> pd.Series:
+    """Número-índice mensal do IPCA (base 100 no mês anterior ao primeiro da série), indexado pelo mês."""
+    per = pd.PeriodIndex(ipca["mes"], freq="M")
+    return pd.Series((1 + ipca["ipca_mensal"].to_numpy() / 100).cumprod() * 100, index=per)
+
+
+def media_ipca(idx: pd.Series, fim, meses: int) -> float:
+    """Nível médio de preços nos N (= meses) meses terminados no mês da data de fim (NaN se faltar algum mês)."""
+    f = pd.Period(pd.Timestamp(fim), freq="M")
+    janela = pd.period_range(f - meses + 1, f, freq="M")
+    return float(idx.reindex(janela).mean()) if idx.reindex(janela).notna().all() else np.nan
+
+
+def ipca_trimestral_medio(ipca: pd.DataFrame) -> pd.DataFrame:
+    """Nível médio de preços por trimestre e suas variações (base de deflação dos fluxos do PIB)."""
+    idx = ipca_indice(ipca)
+    q = idx.groupby(idx.index.asfreq("Q")).agg(["mean", "size"])
+    q = q[q["size"] == 3]["mean"]
+    out = pd.DataFrame({"p": q})
+    out["ano"], out["tri"] = out.index.year, out.index.quarter
+    out["ipca_tri_ant"] = out["p"] / out["p"].shift(1) - 1
+    out["ipca_mesmo_tri"] = out["p"] / out["p"].shift(4) - 1
+    s4 = out["p"].rolling(4).sum()
+    out["ipca_4_tri"] = s4 / s4.shift(4) - 1
+    return out.reset_index(drop=True)
+
+
+NOMINAL = {"pib_tri_vs_tri_anterior_dessaz": "ipca_tri_ant",
+           "pib_tri_vs_mesmo_tri_ano_anterior": "ipca_mesmo_tri",
+           "pib_acum_4_tri": "ipca_4_tri"}
+
+
+def calc_pib_nominal(pib: pd.DataFrame, ipca: pd.DataFrame, modo: str) -> pd.DataFrame:
+    """PIB nominal = (1 + PIB real) × (1 + IPCA no mesmo recorte) − 1, com o IPCA medido pelo nível médio de
+    preços de cada período (o PIB é fluxo). 'Anual' = acumulado em 4 trimestres no 4º trimestre."""
+    col = PIB_MODOS[modo]
+    real_col = "pib_acum_4_tri" if col == "anual" else col
+    j = pib.merge(ipca_trimestral_medio(ipca), on=["ano", "tri"], how="left")
+    infl = j[NOMINAL[real_col]] * 100
+    nom = ((1 + j[real_col] / 100) * (1 + infl / 100) - 1) * 100
+    out = pd.DataFrame({"periodo": j["trimestre"], "ano": j["ano"], "tri": j["tri"],
+                        "data": [pd.Period(year=a, quarter=t, freq="Q").to_timestamp(how="end").normalize()
+                                 for a, t in zip(j["ano"], j["tri"])],
+                        "pib_real_pct": j[real_col], "ipca_pct": infl.round(2), "pib_nominal_pct": nom.round(2)})
+    if col == "anual":
+        out = out[out["tri"] == 4].assign(periodo=lambda x: x["ano"].astype(str))
+    return out.drop(columns=["ano", "tri"]).dropna(subset=["pib_nominal_pct"]).reset_index(drop=True)
+
+
+def niveis_macro(fins: pd.Series, meses: int, estoque: bool = False, pasta: Path | None = None) -> pd.DataFrame:
+    """Nível de cada série macro por período das empresas (índice = rótulo do período, valor = data de fim).
+    Fluxos (receita, EBITDA, lucro...): média do período (IPCA, R$/US$) e soma dos trimestres (PIB nominal =
+    índice de volume × nível médio de preços). Estoques (ativo, PL): posição no fim do período."""
+    p = Path(pasta or PASTA_PADRAO)
+    ipca, _pib, cambio, _meta, vol = carregar(str(p), _versao(p))
+    fins = pd.to_datetime(fins)
+    out = pd.DataFrame(index=fins.index, columns=["PIB nominal", "IPCA", "R$/US$"], dtype=float)
+    if not ipca.empty:
+        idx = ipca_indice(ipca)
+        for k, f in fins.items():
+            fm = pd.Period(f, freq="M")
+            out.loc[k, "IPCA"] = (idx.get(fm, np.nan) if estoque else media_ipca(idx, f, meses))
+        if not vol.empty:
+            pq = ipca_trimestral_medio(ipca)[["ano", "tri", "p"]]
+            v = vol.merge(pq, on=["ano", "tri"], how="inner")
+            v.index = pd.PeriodIndex([pd.Period(year=a, quarter=t, freq="Q") for a, t in zip(v["ano"], v["tri"])])
+            nominal = v["indice_volume"] * v["p"]
+            nq = max(1, meses // 3)
+            for k, f in fins.items():
+                fq = pd.Period(f, freq="Q")
+                jan = nominal.reindex(pd.period_range(fq - nq + 1, fq, freq="Q"))
+                out.loc[k, "PIB nominal"] = jan.sum() if jan.notna().all() else np.nan
+    if not cambio.empty:
+        c = cambio.set_index("data")["ptax_venda"].sort_index()
+        for k, f in fins.items():
+            if estoque:
+                ate = c[:f]
+                out.loc[k, "R$/US$"] = ate.iloc[-1] if len(ate) and (f - ate.index[-1]).days <= 10 else np.nan
+            else:
+                ini = (pd.Period(f, freq="M") - meses + 1).to_timestamp()
+                jan = c[ini:f]
+                out.loc[k, "R$/US$"] = jan.mean() if len(jan) and (f - jan.index[-1]).days <= 10 else np.nan
+    return out
+
+
+CORES_MACRO = {"PIB nominal": "#2CA02C", "IPCA": "#D62728", "R$/US$": "#9467BD"}
+OPCOES_MACRO = list(CORES_MACRO)
+
+
+def _seletor(key: str) -> list:
+    return st.multiselect("Comparar com (macro Brasil)", OPCOES_MACRO, default=[], key=key,
+                          help="Linhas pontilhadas: PIB nominal, IPCA e R$/US$ no mesmo recorte de tempo das empresas.")
+
+
+def comparar_base100(fig, fins: pd.Series, meses: int, estoque: bool, key: str) -> list:
+    """Acrescenta ao gráfico de crescimento acumulado (base 100 no primeiro período) as séries macro escolhidas."""
+    sel = _seletor(key)
+    if not sel or fins.empty:
+        return sel
+    niv = niveis_macro(fins, meses, estoque)
+    for nome in sel:
+        s = niv[nome]
+        base = s.first_valid_index()
+        if base is None:
+            continue
+        y = 100 * s / s[base]
+        fig.add_trace(go_scatter(list(y.index), y.values, nome))
+    st.caption("Macro no mesmo recorte das empresas, base 100 no primeiro período com dado. "
+               + ("Estoque: posição no fim do período (IPCA = índice do mês; R$/US$ = PTAX do último pregão)."
+                  if estoque else
+                  "Fluxo: IPCA e R$/US$ pela média do período; PIB nominal = volume (IBGE, SIDRA 1620) × nível "
+                  "médio de preços (IPCA), somado nos trimestres do período.")
+               + " R$/US$ subindo = real se desvalorizando.")
+    return sel
+
+
+def comparar_aa(fig, g: pd.DataFrame, meses: int, key: str) -> list:
+    """Acrescenta ao gráfico de crescimento contra o ano anterior (em fração) a variação das séries macro escolhidas
+    no mesmo recorte (período de N meses terminado em cada data de fim contra o mesmo período um ano antes)."""
+    sel = _seletor(key)
+    if not sel or g.empty:
+        return sel
+    fins = pd.Series(pd.to_datetime(g["dt_fim"]).to_numpy(), index=g["periodo"].to_numpy())
+    atual = niveis_macro(fins, meses)
+    ant = niveis_macro(fins - pd.DateOffset(years=1), meses)
+    for nome in sel:
+        y = atual[nome] / ant[nome] - 1
+        fig.add_trace(go_scatter(list(y.index), y.values, nome))
+    st.caption("Macro: variação do período contra o mesmo período do ano anterior. IPCA e R$/US$ pela média do "
+               "período; PIB nominal = volume (IBGE) × nível médio de preços (IPCA). R$/US$ positivo = real se "
+               "desvalorizou.")
+    return sel
+
+
+def go_scatter(x, y, nome):
+    import plotly.graph_objects as go
+    return go.Scatter(x=x, y=y, name=nome, mode="lines+markers",
+                      line=dict(color=CORES_MACRO[nome], width=2.5, dash="dot"), marker=dict(size=6))
+
+
 # ----------------------------------------------------------------------------- tela
 def _grafico(df, y, titulo, tipo="barra", rot_y="%"):
     if tipo == "barra":
@@ -104,7 +246,7 @@ def _grafico(df, y, titulo, tipo="barra", rot_y="%"):
 
 
 def render(pasta: Path, excel_bytes):
-    ipca, pib, cambio, meta = carregar(str(pasta), _versao(pasta))
+    ipca, pib, cambio, meta, _vol = carregar(str(pasta), _versao(pasta))
     if ipca.empty and pib.empty and cambio.empty:
         st.info("Séries macro ainda não coletadas (saidas/macro/). Rode o workflow macro.")
         return
@@ -155,6 +297,29 @@ def render(pasta: Path, excel_bytes):
         st.caption("Fonte: IBGE, Contas Nacionais Trimestrais (SIDRA, tabela 5932), PIB a preços de mercado, "
                    "variação em volume. 'Anual' = acumulado em 4 trimestres no 4º trimestre. O IBGE revisa "
                    "trimestres anteriores a cada divulgação; a série é regravada inteira a cada coleta.")
+
+    # ---- PIB nominal
+    st.subheader("PIB crescimento nominal")
+    if pib.empty or ipca.empty:
+        st.warning("PIB nominal indisponível: depende do PIB e do IPCA.")
+    else:
+        modo = st.radio("Medida", list(PIB_MODOS), horizontal=True, key="mac_pibn_modo")
+        t = janela(calc_pib_nominal(pib, ipca, modo))
+        c1, c2 = st.columns([3, 1])
+        c1.plotly_chart(_grafico(t, "pib_nominal_pct", f"PIB nominal — {modo.lower()} (%)"), width="stretch")
+        if len(t):
+            c2.metric(f"Último: {t['periodo'].iloc[-1]}", f"{t['pib_nominal_pct'].iloc[-1]:.1f}%",
+                      f"real {t['pib_real_pct'].iloc[-1]:.1f}% · IPCA {t['ipca_pct'].iloc[-1]:.1f}%", delta_color="off")
+        c2.dataframe(t[["periodo", "pib_real_pct", "ipca_pct", "pib_nominal_pct"]].iloc[::-1], hide_index=True,
+                     height=260, column_config={"periodo": "Período",
+                                                "pib_real_pct": st.column_config.NumberColumn("Real %", format="%.1f"),
+                                                "ipca_pct": st.column_config.NumberColumn("IPCA %", format="%.2f"),
+                                                "pib_nominal_pct": st.column_config.NumberColumn("Nominal %", format="%.1f")})
+        exportar[f"PIB nominal {modo[:12]}"] = t.assign(data=t["data"].dt.date)
+        st.caption("Composição: (1 + PIB real) × (1 + IPCA) − 1. O IPCA usa o nível médio de preços de cada período, "
+                   "no mesmo recorte da taxa do PIB (o PIB é fluxo). Não é o deflator implícito do IBGE, que mede "
+                   "preços de toda a produção e costuma divergir do IPCA. Na medida dessazonalizada, o IPCA não tem "
+                   "ajuste sazonal.")
 
     # ---- Câmbio
     st.subheader("Câmbio — R$ por US$ (PTAX venda)")
