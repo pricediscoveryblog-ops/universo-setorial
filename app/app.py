@@ -572,6 +572,133 @@ def rotulo_remuneracao(r) -> str:
     return ind or "-"
 
 
+def classe_indexador(ind) -> str:
+    """Classe do indexador da debênture: CDI (pós-fixada), IPCA, PRÉ ou Outros (IGP-M, TR, câmbio, sem índice)."""
+    u = str(ind or "").strip().upper()
+    return "CDI" if u.startswith("DI") else "IPCA" if u.startswith("IPCA") else "PRÉ" if u.startswith("PR") else "Outros"
+
+
+def pct_di_para_spread(pct, cdi):
+    """%DI -> spread equivalente sobre o CDI (fração a.a., base 252), dado o CDI esperado no prazo (fração a.a.)."""
+    d = (1 + cdi) ** (1 / 252) - 1
+    return (1 + d * pct / 100) ** 252 / (1 + cdi) - 1
+
+
+CLASSES_CUSTO = {"CDI": ("CDI+ (pós-fixada)", "CDI"), "IPCA": ("IPCA+", "NTN-B (ETTJ real ANBIMA)"),
+                 "PRÉ": ("Prefixada", "LTN/NTN-F (ETTJ pré ANBIMA)"),
+                 "Outros": ("Outros (IGP-M, TR, câmbio, sem índice)", "-")}
+
+
+def custo_debentures(dd: pd.DataFrame, pj: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """Custo de cada debênture (% a.a., base 252) e a referência soberana no mesmo prazo, na curva ANBIMA da data
+    do preço (ou a mais recente antes dela).
+    - taxa_contratada: remuneração de emissão (CDI: spread sobre o CDI, com %DI convertido em spread equivalente;
+      IPCA: taxa real; PRÉ: taxa nominal). É o custo da dívida existente.
+    - taxa_mercado: taxa indicativa ANBIMA na mesma convenção (custo de refinanciar hoje).
+    - soberano: ETTJ real (IPCA) ou pré no prazo = duration ANBIMA (sem preço: prazo até o vencimento).
+    - premio_soberano: taxa de mercado − soberano (p.p.); no CDI, o próprio spread de mercado sobre o CDI.
+    - nominal_contratado / nominal_mercado: custo nominal equivalente com a curva de hoje
+      (CDI: (1 + pré no prazo) × (1 + spread); IPCA: (1 + real) × (1 + inflação implícita no prazo))."""
+    d = dd.copy()
+    d["classe"] = d["indice"].map(classe_indexador)
+    hoje = pd.Timestamp.today().normalize()
+    venc_anos = ((d["vencimento"] - hoje).dt.days / 365.25).clip(lower=1 / 12)
+    tem_dur = d["duration_anos"].notna() & (d["duration_anos"] > 0)
+    d["prazo_anos"] = d["duration_anos"].where(tem_dur, venc_anos)
+    d["prazo_por_vencimento"] = ~tem_dur
+    dt_c = pd.NaT
+    pre = real = np.full(len(d), np.nan)
+    if not pj.empty:
+        datas = sorted(pj["data"].unique())
+        ref = pd.to_datetime(d["data_anbima"], errors="coerce").max() if "data_anbima" in d else pd.NaT
+        cand = [x for x in datas if pd.isna(ref) or pd.Timestamp(x) <= ref]
+        dt_c = pd.Timestamp(cand[-1] if cand else datas[-1])
+        t = d["prazo_anos"].to_numpy(float)
+        pre, real = curva_juros(pj, dt_c, "pre", t), curva_juros(pj, dt_c, "ipca", t)
+    d["curva_pre"], d["curva_real"] = pre * 100, real * 100
+    impl = (1 + pre) / (1 + real) - 1
+    cl, pct, tx, mkt = d["classe"], d["percentual_indice"], d["taxa_emissao"], d["taxa_indicativa"]
+    ic = d["indice_correcao"].fillna("").astype(str) if "indice_correcao" in d else pd.Series("", index=d.index)
+    cdi = pd.Series(pre, index=d.index)              # CDI esperado no prazo ≈ curva prefixada
+    eh_cdi = cl == "CDI"
+    eh_pct = eh_cdi & pct.notna() & ~pct.isin([0, 100]) & (tx.isna() | (tx == 0))
+    mkt_pct = eh_cdi & ic.str.contains(r"%\s*(?:do\s+)?DI", case=False, regex=True)
+    contr = tx.where(~cl.isin(["IPCA", "PRÉ"]) | (tx != 0))       # CDI com taxa 0 = 100% do DI (spread zero)
+    contr = contr.where(~eh_pct, pct_di_para_spread(pct, cdi) * 100)
+    merc = mkt.where(~mkt_pct, pct_di_para_spread(mkt, cdi) * 100)
+    d["taxa_contratada"] = contr.where(cl != "Outros")
+    d["taxa_mercado"] = merc.where(cl != "Outros")
+    sob = pd.Series(np.nan, index=d.index)
+    sob = sob.mask(cl == "IPCA", d["curva_real"]).mask(cl == "PRÉ", d["curva_pre"])
+    d["soberano"] = sob
+    d["premio_soberano"] = (d["taxa_mercado"] - sob).where(~eh_cdi, d["taxa_mercado"])
+    d["contratada_vs_soberano"] = (d["taxa_contratada"] - sob).where(~eh_cdi, d["taxa_contratada"])
+    # remuneração que destoa da curva (ex.: prefixada muito abaixo do soberano): provável erro de cadastro no SND
+    d["taxa_suspeita"] = cl.isin(["IPCA", "PRÉ"]) & ((d["contratada_vs_soberano"] < -5) | (d["taxa_contratada"] < 0))
+
+    def nominal(taxa):
+        s = pd.Series(np.nan, index=d.index)
+        s = s.mask(eh_cdi, ((1 + cdi) * (1 + taxa / 100) - 1) * 100)
+        s = s.mask(cl == "IPCA", ((1 + taxa / 100) * (1 + pd.Series(impl, index=d.index)) - 1) * 100)
+        return s.mask(cl == "PRÉ", taxa)
+    d["nominal_contratado"] = nominal(d["taxa_contratada"]).where(~d["taxa_suspeita"])
+    d["nominal_mercado"] = nominal(d["taxa_mercado"])
+    return d, dt_c
+
+
+def resumo_custo(d: pd.DataFrame) -> pd.DataFrame:
+    """Médias ponderadas pelo saldo, por classe de indexador, mais a linha total (custo nominal equivalente).
+    Taxa de mercado, soberano e prêmio usam só as debêntures com preço ANBIMA (mesma amostra nas três)."""
+    def mp(v, w):
+        ok = v.notna() & w.notna() & (w > 0)
+        return float((v[ok] * w[ok]).sum() / w[ok].sum()) if ok.any() else np.nan
+    tot = d["saldo_rs_mm"].sum()
+    linhas = []
+    for c, (rot, ref) in CLASSES_CUSTO.items():
+        g = d[d["classe"] == c]
+        if g.empty:
+            continue
+        w, gv = g["saldo_rs_mm"], g[~g["taxa_suspeita"]]
+        m = g[g["taxa_mercado"].notna()]
+        linhas.append({"Indexador": rot, "Qtde": len(g), "Saldo (R$ mm)": w.sum(),
+                       "% das debêntures": w.sum() / tot if tot else np.nan,
+                       "Prazo médio (anos)": mp(g["prazo_anos"], w),
+                       "Custo contratado (% a.a.)": mp(gv["taxa_contratada"], gv["saldo_rs_mm"]),
+                       "Taxa de mercado (% a.a.)": mp(m["taxa_mercado"], m["saldo_rs_mm"]),
+                       "Referência": ref,
+                       "Soberano no prazo (% a.a.)": mp(m["soberano"], m["saldo_rs_mm"]),
+                       "Prêmio de mercado (p.p.)": mp(m["premio_soberano"], m["saldo_rs_mm"]),
+                       "Contratado − soberano hoje (p.p.)": mp(gv["contratada_vs_soberano"], gv["saldo_rs_mm"]),
+                       "Custo nominal contratado (% a.a.)": mp(gv["nominal_contratado"], gv["saldo_rs_mm"]),
+                       "Custo nominal a mercado (% a.a.)": mp(m["nominal_mercado"], m["saldo_rs_mm"]),
+                       "% do saldo com preço ANBIMA": m["saldo_rs_mm"].sum() / w.sum() if w.sum() else np.nan})
+    if linhas:
+        ok, m = d[~d["taxa_suspeita"]], d[d["taxa_mercado"].notna()]
+        linhas.append({"Indexador": "Total (custo nominal equivalente)", "Qtde": len(d), "Saldo (R$ mm)": tot,
+                       "% das debêntures": 1.0, "Prazo médio (anos)": mp(d["prazo_anos"], d["saldo_rs_mm"]),
+                       "Referência": "-",
+                       "Custo nominal contratado (% a.a.)": mp(ok["nominal_contratado"], ok["saldo_rs_mm"]),
+                       "Custo nominal a mercado (% a.a.)": mp(m["nominal_mercado"], m["saldo_rs_mm"]),
+                       "% do saldo com preço ANBIMA": m["saldo_rs_mm"].sum() / tot if tot else np.nan})
+    return pd.DataFrame(linhas)
+
+
+def custo_implicito_caixa(base: pd.DataFrame, cnpj: str) -> tuple[float, object]:
+    """Juros pagos da dívida nos últimos 12 meses (DFC, ex-arrendamento) ÷ dívida bruta média ex-arrendamento
+    (fim do LTM e um ano antes). Cobre a dívida toda (bancos, BNDES, externa), mas em regime de caixa."""
+    if "juros_pagos" not in base.columns:
+        return np.nan, None
+    lt = base[(base["cnpj"] == cnpj) & (base["tipo"] == "ltm")].sort_values("dt_fim")
+    lt = lt[lt["juros_pagos"].notna() & lt["divida_bruta_ex_arrend"].notna()]
+    if lt.empty:
+        return np.nan, None
+    fim = lt.iloc[-1]
+    ant = lt[lt["dt_fim"] <= fim["dt_fim"] - pd.Timedelta(days=330)].tail(1)
+    divs = [fim["divida_bruta_ex_arrend"]] + ([ant["divida_bruta_ex_arrend"].iloc[0]] if len(ant) else [])
+    dm_ = float(np.mean(divs))
+    return (float(fim["juros_pagos"]) / dm_ * 100 if dm_ > 0 else np.nan), fim["dt_fim"]
+
+
 PALETA_OV = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22",
              "#17becf"]
 
@@ -1785,6 +1912,9 @@ with aba_emp:
                 div_bal = ult_bal["divida_bruta_ex_arrend"].iloc[0] if len(ult_bal) else np.nan
                 dd["remuneracao"] = dd.apply(rotulo_remuneracao, axis=1)
                 dd["premio_mercado"] = dd["taxa_indicativa"] - dd["taxa_emissao"].where(dd["taxa_emissao"] != 0)
+                pj_c, _ = carregar_juros(versao_arquivos(DADOS.parent / "juros" / "parametros.csv",
+                                                         DADOS.parent / "juros" / "vertices.csv.gz"))
+                dd, dt_curva = custo_debentures(dd, pj_c)
                 na_data = dd[dd["data_emissao"] <= dt_bal] if pd.notna(dt_bal) else dd
                 tot_deb = na_data["saldo_rs_mm"].sum()
                 w = dd["saldo_rs_mm"].where(dd["duration_anos"].notna())
@@ -1803,7 +1933,8 @@ with aba_emp:
                     st.caption("⚠️ Debêntures acima da dívida do balanço: pode haver debênture de controlada não consolidada, "
                                "amortização recente não refletida no SND, ou diferença entre saldo estimado e valor contábil.")
                 cols_d = ["codigo", "emissor", "via_controlada", "data_emissao", "vencimento", "remuneracao", "taxa_indicativa",
-                          "premio_mercado", "pct_pu_par", "duration_anos", "saldo_rs_mm", "incentivada"]
+                          "premio_mercado", "soberano", "premio_soberano", "pct_pu_par", "duration_anos", "saldo_rs_mm",
+                          "incentivada"]
                 tab_d = dd[[c for c in cols_d if c in dd.columns]].sort_values("vencimento").assign(
                     data_emissao=lambda x: x["data_emissao"].dt.date, vencimento=lambda x: x["vencimento"].dt.date)
                 st.dataframe(tab_d, hide_index=True, width="stretch", column_config={
@@ -1811,6 +1942,9 @@ with aba_emp:
                     "data_emissao": "Emissão", "vencimento": "Vencimento", "remuneracao": "Remuneração (emissão)",
                     "taxa_indicativa": st.column_config.NumberColumn("Taxa indicativa ANBIMA", format="%.2f"),
                     "premio_mercado": st.column_config.NumberColumn("Mercado − emissão (p.p.)", format="%+.2f"),
+                    "soberano": st.column_config.NumberColumn("Soberano no prazo (% a.a.)", format="%.2f"),
+                    "premio_soberano": st.column_config.NumberColumn("Prêmio s/ soberano ou CDI (p.p.)",
+                                                                     format="%+.2f"),
                     "pct_pu_par": st.column_config.NumberColumn("% PU par", format="%.1f"),
                     "duration_anos": st.column_config.NumberColumn("Duration (anos)", format="%.1f"),
                     "saldo_rs_mm": st.column_config.NumberColumn("Saldo (R$ mm)", format="%,.1f"),
@@ -1826,6 +1960,82 @@ with aba_emp:
                 fig = px.pie(comp, names="Origem", values="R$ mm", hole=0.5)
                 fig.update_layout(title="Composição da dívida bruta", height=340, margin=dict(t=40, b=20, l=10, r=10))
                 g2.plotly_chart(fig, width="stretch")
+                # ---- custo médio das debêntures por indexador e prêmio sobre o soberano
+                st.markdown("##### Custo médio das debêntures por indexador")
+                res_c = resumo_custo(dd)
+                cust_impl, dt_impl = custo_implicito_caixa(base, cn_e)
+                tot_c = res_c[res_c["Indexador"].str.startswith("Total")]
+                ipca_c = res_c[res_c["Indexador"] == "IPCA+"]
+                f2 = lambda v, suf=" % a.a.": f"{v:.2f}".replace(".", ",") + suf if pd.notna(v) else "-"
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Custo nominal contratado (debêntures)",
+                          f2(tot_c["Custo nominal contratado (% a.a.)"].iloc[0]) if len(tot_c) else "-",
+                          help="Remuneração de emissão convertida em taxa nominal com a curva de hoje, ponderada pelo "
+                               "saldo. É o custo da dívida existente em debêntures.")
+                k2.metric("Custo nominal a mercado (debêntures)",
+                          f2(tot_c["Custo nominal a mercado (% a.a.)"].iloc[0]) if len(tot_c) else "-",
+                          help="Taxa indicativa ANBIMA convertida em taxa nominal: quanto custaria refinanciar hoje.")
+                k3.metric("Prêmio IPCA+ sobre a NTN-B (mercado)",
+                          f2(ipca_c["Prêmio de mercado (p.p.)"].iloc[0], " p.p.") if len(ipca_c) else "-",
+                          help="Taxa indicativa ANBIMA − ETTJ real no mesmo prazo (duration), ponderado pelo saldo.")
+                k4.metric("Custo implícito caixa da dívida toda" + (f" (LTM {dt_impl:%m/%Y})" if dt_impl is not None else ""),
+                          f2(cust_impl),
+                          help="Juros pagos da dívida em 12 meses (DFC, ex-arrendamento) ÷ dívida bruta média. Inclui "
+                               "a dívida bancária, mas é regime de caixa (ver nota abaixo).")
+                if res_c.empty:
+                    st.info("Sem debêntures para calcular o custo.")
+                else:
+                    st.dataframe(res_c, hide_index=True, width="stretch", column_config={
+                        "Saldo (R$ mm)": st.column_config.NumberColumn(format="%,.1f"),
+                        "% das debêntures": st.column_config.NumberColumn(format="percent"),
+                        "% do saldo com preço ANBIMA": st.column_config.NumberColumn(format="percent"),
+                        **{c: st.column_config.NumberColumn(format="%.2f") for c in
+                           ("Prazo médio (anos)", "Custo contratado (% a.a.)", "Taxa de mercado (% a.a.)",
+                            "Soberano no prazo (% a.a.)", "Custo nominal contratado (% a.a.)",
+                            "Custo nominal a mercado (% a.a.)")},
+                        **{c: st.column_config.NumberColumn(format="%+.2f") for c in
+                           ("Prêmio de mercado (p.p.)", "Contratado − soberano hoje (p.p.)")}})
+                    g3, g4 = st.columns(2)
+                    sc = dd[dd["classe"].isin(["IPCA", "PRÉ"]) & dd["premio_soberano"].notna()]
+                    if len(sc):
+                        fig = px.scatter(sc, x="prazo_anos", y="premio_soberano", color="classe", size="saldo_rs_mm",
+                                         hover_name="codigo",
+                                         hover_data={"taxa_mercado": ":.2f", "soberano": ":.2f", "saldo_rs_mm": ":,.0f",
+                                                     "incentivada": True},
+                                         labels={"prazo_anos": "Duration (anos)", "classe": "Indexador",
+                                                 "premio_soberano": "Prêmio sobre o soberano (p.p.)",
+                                                 "taxa_mercado": "Taxa ANBIMA", "soberano": "Soberano",
+                                                 "saldo_rs_mm": "Saldo (R$ mm)", "incentivada": "Incentivada"})
+                        fig.add_hline(y=0, line_dash="dot", line_color="gray")
+                        fig.update_layout(title="Prêmio de mercado sobre o soberano × prazo", height=340,
+                                          margin=dict(t=40, b=20, l=10, r=10))
+                        g3.plotly_chart(fig, width="stretch")
+                    else:
+                        g3.info("Sem debêntures IPCA+ ou prefixadas com preço ANBIMA.")
+                    comp_i = res_c[~res_c["Indexador"].str.startswith("Total")]
+                    fig = px.pie(comp_i, names="Indexador", values="Saldo (R$ mm)", hole=0.5)
+                    fig.update_layout(title="Debêntures por indexador (saldo)", height=340,
+                                      margin=dict(t=40, b=20, l=10, r=10))
+                    g4.plotly_chart(fig, width="stretch")
+                susp = dd.loc[dd["taxa_suspeita"], "codigo"].tolist()
+                st.caption(
+                    "Custo contratado = remuneração de emissão (CDI+: spread sobre o CDI, com %DI convertido em spread "
+                    "equivalente usando o CDI esperado no prazo pela curva prefixada; IPCA+: taxa real; prefixada: taxa "
+                    "nominal). Taxa de mercado = taxa indicativa ANBIMA na mesma convenção. Soberano = ETTJ ANBIMA "
+                    "(Svensson) de " + (f"{dt_curva:%d/%m/%Y}" if pd.notna(dt_curva) else "-") + " no prazo da duration "
+                    "(sem preço ANBIMA: prazo até o vencimento), real (NTN-B) para IPCA+ e prefixada (LTN/NTN-F) para "
+                    "pré. Prêmio de mercado = taxa de mercado − soberano, em p.p.; no CDI+ o prêmio é o próprio spread "
+                    "sobre o CDI. Custo nominal equivalente: CDI+ = (1 + pré no prazo) × (1 + spread) − 1; IPCA+ = "
+                    "(1 + real) × (1 + inflação implícita no prazo) − 1. Médias ponderadas pelo saldo estimado; taxa de "
+                    "mercado, soberano e prêmio só com as debêntures que têm preço ANBIMA. Debêntures incentivadas "
+                    "(Lei 12.431) são isentas de IR para pessoa física e por isso negociam com prêmio menor (às vezes "
+                    "negativo) sobre a NTN-B. A separação por indexador cobre só as debêntures: a dívida bancária, "
+                    "BNDES, CCB e externa não tem indexador nos dados estruturados da CVM. Custo implícito caixa = juros "
+                    "pagos da dívida em 12 meses (DFC, ex-arrendamento) ÷ dívida bruta média (fim do LTM e um ano antes): "
+                    "cobre a dívida toda, mas não inclui a correção monetária do principal IPCA ainda não paga nem os "
+                    "juros capitalizados, e oscila com o calendário de pagamento de cupons."
+                    + (f" ⚠️ Fora das médias de custo contratado por taxa incompatível com a curva (provável erro de "
+                       f"cadastro no SND): {', '.join(susp)}." if susp else ""))
                 st.caption("Fontes: SND/debentures.com.br (debêntures ativas, emissão, vencimento, quantidade em mercado, VNA, "
                            "remuneração e CNPJ do emissor), ANBIMA (mercado secundário: taxa indicativa, PU, % do PU par e "
                            "duration em dias úteis ÷ 252) e CVM/FRE item 9.1.c (controladas). Saldo estimado = quantidade em "
