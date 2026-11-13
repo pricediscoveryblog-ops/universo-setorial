@@ -1141,6 +1141,9 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     fig = go.Figure()
     for c, nome in (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido")):
         fig.add_trace(go.Bar(x=g["periodo"], y=g["g_" + c], name=nome))
+    if not EUA:          # macro Brasil no mesmo recorte (PIB nominal, IPCA, R$/US$)
+        import macro_aba
+        macro_aba.comparar_aa(fig, g, 12, key="mac_cmp_emp")
     fig.update_layout(barmode="group", height=360, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
                       margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
     st.plotly_chart(fig, width="stretch")
@@ -1385,6 +1388,12 @@ with aba_setor:
                 fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
                                          name=nome.split(" — ")[0] if " — " in nome else nome,
                                          line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
+            if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
+                import macro_aba
+                macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
+                                           3 if tipo == "trimestral" else 12,
+                                           col in ("ativo_total", "patrimonio_liquido"),
+                                           key=f"mac_cmp_set_{ind}_{tipo}")
             fig.add_hline(y=100, line_dash="dot", line_color="gray")
             fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
                               title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
