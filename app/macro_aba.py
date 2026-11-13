@@ -96,6 +96,7 @@ def _grafico(df, y, titulo, tipo="barra", rot_y="%"):
                      color=np.where(df[y] >= 0, "pos", "neg"),
                      color_discrete_map={"pos": "#2E6FBA", "neg": "#C0504D"})
         fig.update_layout(showlegend=False, xaxis_type="category")
+        fig.update_xaxes(categoryorder="array", categoryarray=list(df["periodo"]))   # ordem cronológica
     else:
         fig = px.line(df, x="data", y=y, title=titulo, labels={"data": "", y: rot_y})
     fig.update_layout(height=380, margin=dict(l=10, r=10, t=50, b=10))
@@ -109,7 +110,7 @@ def render(pasta: Path, excel_bytes):
         return
 
     ini_exib = pd.Timestamp(meta.get("janela", {}).get("inicio_exibicao")
-                            or f"{pd.Timestamp.today().year - 10}-01-01")
+                            or f"{pd.Timestamp.today().year - 11}-01-01")
     anos = list(range(ini_exib.year, pd.Timestamp.today().year + 1))
     a0, a1 = st.select_slider("Período exibido (anos)", options=anos, value=(anos[0], anos[-1]), key="mac_anos")
     janela = lambda df: df[(df["data"] >= pd.Timestamp(a0, 1, 1)) &  # noqa: E731
