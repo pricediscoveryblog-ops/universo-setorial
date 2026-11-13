@@ -1,6 +1,6 @@
 """
 macro.py — Price Discovery
-Séries macro do Brasil para a aba "Macro" do app, cobrindo a mesma janela da base de empresas (10 anos)
+Séries macro do Brasil para a aba "Macro" do app, cobrindo a mesma janela da base de empresas
 mais um ano extra, usado só como base de cálculo (variação em 12 meses e anual do primeiro ano exibido).
 
 Fontes:
@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-ANOS = 10                                   # mesma janela da base de empresas
+ANOS = 11                                   # mesma janela da base de empresas (hoje: 2015 em diante)
 SAIDA = Path("saidas/macro")
 CAB = {"User-Agent": "Mozilla/5.0 (compatible; pricediscovery-bot)", "Accept": "application/json"}
 SGS = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod}/dados"
@@ -32,7 +32,7 @@ SIDRA_PIB = "https://apisidra.ibge.gov.br/values/t/5932/n1/all/v/all/p/all/c1125
 
 
 def inicio_coleta(hoje: date) -> date:
-    """1º de janeiro do ano anterior à janela exibida (ex.: em 2026 exibe 2016+ e coleta 2015+)."""
+    """1º de janeiro do ano anterior à janela exibida (ex.: em 2026 exibe 2015+ e coleta 2014+)."""
     return date(hoje.year - ANOS - 1, 1, 1)
 
 
