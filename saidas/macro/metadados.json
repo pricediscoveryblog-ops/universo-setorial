@@ -1,0 +1,19 @@
+{
+  "ipca_mensal.csv": {
+    "atualizado_em": "2026-11-13T20:27:10",
+    "status": "ok, 142 linhas, último mes = 2026-10"
+  },
+  "pib_trimestral.csv": {
+    "atualizado_em": "2026-11-13T20:27:11",
+    "status": "ok, 46 linhas, último trimestre = 2T26"
+  },
+  "cambio_diario.csv": {
+    "atualizado_em": "2026-11-13T20:27:18",
+    "status": "ok, 2977 linhas, último data = 2026-11-13"
+  },
+  "janela": {
+    "inicio_coleta": "2015-01-01",
+    "inicio_exibicao": "2016-01-01",
+    "anos": 10
+  }
+}
