@@ -1,5 +1,5 @@
 """
-Price Discovery — Universo setorial (app Streamlit)
+Price Discovery Scanning (app Streamlit)
 Lê saidas/universo/ (gerado pelo workflow) e permite filtrar, comparar, plotar e baixar.
 """
 import io
@@ -174,7 +174,7 @@ FIN = {
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
 
-st.set_page_config(page_title="Price Discovery · Universo setorial", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Price Discovery Scanning", page_icon="📊", layout="wide")
 
 # ------------------------------------------------------------------ mercado: Brasil / EUA
 # No modo EUA o app carrega a base americana (coletor-eua, dados da SEC; módulo app/eua.py) no lugar da brasileira
@@ -713,7 +713,7 @@ def tabela_clicavel(dados: pd.DataFrame, rotulos, chave: str, alvo=None, **kw):
 
 
 # ------------------------------------------------------------------ barra lateral
-st.sidebar.title("🇺🇸 Universo EUA" if EUA else "📊 Universo setorial")
+st.sidebar.title("🇺🇸 Price Discovery Scanning · EUA" if EUA else "📊 Price Discovery Scanning")
 if meta is not None:
     st.sidebar.caption(f"Base gerada em {meta.get('gerado_em', '?')} · {meta.get('empresas_com_dados', '?')} empresas · "
                        + ("Fonte: SEC (10-K/10-Q, XBRL) + classificação SEC/SIC · US$ mm" if EUA else
