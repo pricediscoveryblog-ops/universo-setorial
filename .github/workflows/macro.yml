@@ -1,0 +1,36 @@
+name: macro
+
+on:
+  workflow_dispatch:
+  schedule:
+    # dias úteis às 22h20 de Brasília (01:20 UTC, terça a sábado): depois da PTAX do dia.
+    # IPCA e PIB entram automaticamente quando o IBGE divulga (a série inteira é relida a cada execução).
+    - cron: "20 1 * * 2-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macro
+  cancel-in-progress: false
+
+jobs:
+  macro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas requests
+      - name: Baixar IPCA, PIB e PTAX (BCB/IBGE)
+        run: python macro.py
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/macro
+          git diff --cached --quiet || git commit -m "macro: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
