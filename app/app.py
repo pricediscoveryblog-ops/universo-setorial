@@ -1210,11 +1210,11 @@ if EUA:
         st.session_state["aba_principal"] = "Visão do setor"
     aba_setor, aba_emp, aba_rank, aba_scr, aba_dados, aba_cob, aba_met = st.tabs(
         _abas_eua, key="aba_principal", on_change="rerun")
-    aba_var = aba_cal = aba_fin = aba_jur = None          # sem dados nos EUA (blocos abaixo ficam desligados)
+    aba_var = aba_cal = aba_fin = aba_jur = aba_mac = None          # sem dados nos EUA (blocos abaixo ficam desligados)
 else:
-    aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_dados, aba_cob, aba_met = st.tabs(
+    aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
-         "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Dados e download", "Cobertura", "Metodologia"],
+         "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Macro (inflação, PIB, câmbio)", "Dados e download", "Cobertura", "Metodologia"],
         key="aba_principal", on_change="rerun")
 st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
 
@@ -2466,6 +2466,12 @@ if not EUA:          # sem dados equivalentes nos EUA
                                    file_name=f"ettj_{tc}_historico.csv", mime="text/csv", key="jur_csv")
             st.caption("Curvas reconstruídas pelos parâmetros Svensson divulgados pela ANBIMA (reproduzem os vértices "
                        "publicados). Inflação implícita = (1 + prefixada) ÷ (1 + real) − 1.")
+
+# -------- Macro: inflação, PIB e câmbio (IBGE/BCB)
+if not EUA:          # sem dados equivalentes nos EUA
+    with aba_mac:
+        import macro_aba
+        macro_aba.render(DADOS.parent / "macro", excel_bytes)
 
 # -------- Dados e download
 with aba_dados:
