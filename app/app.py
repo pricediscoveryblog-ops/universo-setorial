@@ -179,7 +179,8 @@ st.set_page_config(page_title="Price Discovery Scanning", page_icon="📊", layo
 # ------------------------------------------------------------------ mercado: Brasil / EUA
 # No modo EUA o app carrega a base americana (coletor-eua, dados da SEC; módulo app/eua.py) no lugar da brasileira
 # e roda as MESMAS abas. Abas e seções que dependem de dados só brasileiros (altas e baixas, calendário da CVM,
-# bancos e seguradoras, juros ETTJ, debêntures, aluguel de ações) ficam ocultas.
+# bancos e seguradoras, debêntures, aluguel de ações) ficam ocultas. Juros e Macro têm versão própria dos EUA
+# (Treasuries, CPI, PIB e dólar via FRED; módulo app/eua_macro_aba.py).
 MERCADO = st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado")
 EUA = MERCADO == "EUA"
 if st.session_state.get("_mercado_ant") not in (None, MERCADO):
@@ -205,6 +206,17 @@ def macro_mod():
         macro_aba = importlib.reload(macro_aba)
         macro_aba._mtime_carregado = mt
     return macro_aba
+
+
+def eua_macro_mod():
+    """Módulo das abas Juros e Macro do modo EUA, recarregado quando o arquivo muda (mesma razão de macro_mod)."""
+    import importlib
+    import eua_macro_aba
+    mt = os.path.getmtime(eua_macro_aba.__file__)
+    if getattr(eua_macro_aba, "_mtime_carregado", None) != mt:
+        eua_macro_aba = importlib.reload(eua_macro_aba)
+        eua_macro_aba._mtime_carregado = mt
+    return eua_macro_aba
 
 
 def versao_arquivos(*arqs) -> tuple:
@@ -569,6 +581,16 @@ def alvo(cor: str) -> dict:
     return dict(symbol="circle-open-dot", size=18, color=cor, line=dict(width=3, color=cor))
 
 
+def fmt_escala(v) -> str:
+    """Valor em milhões com a ordem de grandeza ajustada ao tamanho: trilhão (4 casas), bilhão (2 casas) ou milhão
+    (sem casas). Usado nos valores de mercado e EV do modo EUA (ex.: US$ 3,8124 tri em vez de US$ 3.812.400 mi)."""
+    if pd.isna(v):
+        return "-"
+    a = abs(v)
+    n, un, casas = (v / 1e6, "tri", 4) if a >= 999_995 else (v / 1e3, "bi", 2) if a >= 999.5 else (v, "mi", 0)
+    return f"{MOEDA} " + f"{n:,.{casas}f}".replace(",", "X").replace(".", ",").replace("X", ".") + f" {un}"
+
+
 def painel_mercado(cnpj: str):
     """Valores e múltiplos de mercado na cotação mais recente (último pregão)."""
     if mult.empty:
@@ -579,7 +601,7 @@ def painel_mercado(cnpj: str):
     if h.empty:
         return
     h = h.iloc[0]
-    fmt_mm = lambda v: f"{MOEDA} {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-"
+    fmt_mm = fmt_escala if EUA else (lambda v: f"{MOEDA} {v:,.0f} mi".replace(",", ".") if pd.notna(v) else "-")
     fmt_x = lambda v: f"{v:.2f}x".replace(".", ",") if pd.notna(v) else "-"
     fmt_p = lambda v: f"{v:.1%}".replace(".", ",") if pd.notna(v) else "-"
     per = str(h.get("periodo_base") or "")
@@ -1257,13 +1279,13 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 # ------------------------------------------------------------------ abas
 if EUA:
-    _abas_eua = ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Dados e download", "Cobertura",
-                 "Metodologia"]
+    _abas_eua = ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Juros (Treasuries)",
+                 "Macro EUA (inflação, PIB, dólar)", "Dados e download", "Cobertura", "Metodologia"]
     if st.session_state.get("aba_principal") not in (None, *_abas_eua):
         st.session_state["aba_principal"] = "Visão do setor"
-    aba_setor, aba_emp, aba_rank, aba_scr, aba_dados, aba_cob, aba_met = st.tabs(
+    aba_setor, aba_emp, aba_rank, aba_scr, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         _abas_eua, key="aba_principal", on_change="rerun")
-    aba_var = aba_cal = aba_fin = aba_jur = aba_mac = None          # sem dados nos EUA (blocos abaixo ficam desligados)
+    aba_var = aba_cal = aba_fin = None          # sem dados nos EUA (blocos abaixo ficam desligados)
 else:
     aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
@@ -2525,6 +2547,13 @@ if not EUA:          # sem dados equivalentes nos EUA
                                    file_name=f"ettj_{tc}_historico.csv", mime="text/csv", key="jur_csv")
             st.caption("Curvas reconstruídas pelos parâmetros Svensson divulgados pela ANBIMA (reproduzem os vértices "
                        "publicados). Inflação implícita = (1 + prefixada) ÷ (1 + real) − 1.")
+
+# -------- Juros e macro dos EUA (Treasuries, CPI, PIB, dólar; FRED) — módulo app/eua_macro_aba.py
+if EUA:
+    with aba_jur:
+        eua_macro_mod().render_juros()
+    with aba_mac:
+        eua_macro_mod().render_macro(excel_bytes)
 
 # -------- Macro: inflação, PIB e câmbio (IBGE/BCB)
 if not EUA:          # sem dados equivalentes nos EUA
