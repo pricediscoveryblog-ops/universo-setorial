@@ -6,9 +6,11 @@ mais um ano extra, usado só como base de cálculo (variação em 12 meses e anu
 Fontes:
   IPCA   — Banco Central, SGS série 433 (variação % mensal; o IBGE é a fonte primária)
   PIB    — IBGE, SIDRA tabela 5932 (taxas de variação do índice de volume trimestral, PIB a preços de mercado)
+           e tabela 1620 (índice de volume trimestral sem ajuste sazonal, média 1995 = 100: nível para o PIB nominal)
   Câmbio — Banco Central, SGS série 1 (PTAX venda, R$ por US$, diária)
 
-Saídas em saidas/macro/: ipca_mensal.csv, pib_trimestral.csv, cambio_diario.csv, metadados.json
+Saídas em saidas/macro/: ipca_mensal.csv, pib_trimestral.csv, pib_volume_trimestral.csv, cambio_diario.csv,
+metadados.json
 
 Regras de robustez:
   - a API do SGS recusa janelas acima de 10 anos: as consultas são fatiadas em janelas de até 3 anos;
@@ -29,6 +31,7 @@ SAIDA = Path("saidas/macro")
 CAB = {"User-Agent": "Mozilla/5.0 (compatible; pricediscovery-bot)", "Accept": "application/json"}
 SGS = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod}/dados"
 SIDRA_PIB = "https://apisidra.ibge.gov.br/values/t/5932/n1/all/v/all/p/all/c11255/90707"
+SIDRA_VOL = "https://apisidra.ibge.gov.br/values/t/1620/n1/all/v/583/p/all/c11255/90707"
 
 
 def inicio_coleta(hoje: date) -> date:
@@ -120,6 +123,27 @@ def coletar_pib(ini: date) -> pd.DataFrame:
     return df
 
 
+def parse_sidra_volume(dados: list) -> pd.DataFrame:
+    cab, linhas = dados[0], dados[1:]
+    k_per = next(k for k, v in cab.items() if v.startswith("Trimestre (Código)"))
+    df = pd.DataFrame({"cod": [l[k_per] for l in linhas],
+                       "indice_volume": pd.to_numeric([l["V"] for l in linhas], errors="coerce")}).dropna()
+    df["ano"] = df["cod"].str[:4].astype(int)
+    df["tri"] = df["cod"].str[-2:].astype(int)
+    df["trimestre"] = df["tri"].astype(str) + "T" + df["ano"].astype(str).str[2:]
+    return df[["ano", "tri", "trimestre", "indice_volume"]].sort_values(["ano", "tri"]).reset_index(drop=True)
+
+
+def coletar_pib_volume(ini: date) -> pd.DataFrame:
+    df = parse_sidra_volume(get_json(SIDRA_VOL))
+    df = df[df["ano"] >= ini.year].reset_index(drop=True)
+    if df.empty or not df["indice_volume"].between(50, 1000).all():
+        raise ValueError("índice de volume do PIB vazio ou implausível")
+    if len(df) != (df["ano"].iloc[-1] - df["ano"].iloc[0]) * 4 + df["tri"].iloc[-1] - df["tri"].iloc[0] + 1:
+        raise ValueError("índice de volume do PIB com trimestres faltando")
+    return df
+
+
 def coletar_cambio(ini: date, fim: date) -> pd.DataFrame:
     df = sgs(1, ini, fim).rename(columns={"valor": "ptax_venda"})
     if df.empty or not df["ptax_venda"].between(0.5, 20).all():
@@ -147,6 +171,7 @@ def main() -> int:
     tarefas = {
         "ipca_mensal.csv": (lambda: coletar_ipca(ini, hoje), "mes"),
         "pib_trimestral.csv": (lambda: coletar_pib(ini), "trimestre"),
+        "pib_volume_trimestral.csv": (lambda: coletar_pib_volume(ini), "trimestre"),
         "cambio_diario.csv": (lambda: coletar_cambio(ini, hoje), "data"),
     }
     meta_p = SAIDA / "metadados.json"
