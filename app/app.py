@@ -195,6 +195,18 @@ if EUA:
 
 
 # ------------------------------------------------------------------ dados
+def macro_mod():
+    """Módulo da aba Macro, recarregado quando o arquivo muda (o Streamlit Cloud mantém módulos importados na
+    memória entre deploys; sem isso, uma versão nova de macro_aba.py só entraria após reiniciar o app)."""
+    import importlib
+    import macro_aba
+    mt = os.path.getmtime(macro_aba.__file__)
+    if getattr(macro_aba, "_mtime_carregado", None) != mt:
+        macro_aba = importlib.reload(macro_aba)
+        macro_aba._mtime_carregado = mt
+    return macro_aba
+
+
 def versao_arquivos(*arqs) -> tuple:
     """Data de modificação dos arquivos: entra como argumento das funções em cache, então o app relê os dados
     sozinho quando um workflow grava uma versão nova (sem depender de reiniciar o app)."""
@@ -1142,7 +1154,7 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     for c, nome in (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido")):
         fig.add_trace(go.Bar(x=g["periodo"], y=g["g_" + c], name=nome))
     if not EUA:          # macro Brasil no mesmo recorte (PIB nominal, IPCA, R$/US$)
-        import macro_aba
+        macro_aba = macro_mod()
         macro_aba.comparar_aa(fig, g, 12, key="mac_cmp_emp")
     fig.update_layout(barmode="group", height=360, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
                       margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
@@ -1389,7 +1401,7 @@ with aba_setor:
                                          name=nome.split(" — ")[0] if " — " in nome else nome,
                                          line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
             if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
-                import macro_aba
+                macro_aba = macro_mod()
                 macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
                                            3 if tipo == "trimestral" else 12,
                                            col in ("ativo_total", "patrimonio_liquido"),
@@ -2479,7 +2491,7 @@ if not EUA:          # sem dados equivalentes nos EUA
 # -------- Macro: inflação, PIB e câmbio (IBGE/BCB)
 if not EUA:          # sem dados equivalentes nos EUA
     with aba_mac:
-        import macro_aba
+        macro_aba = macro_mod()
         macro_aba.render(DADOS.parent / "macro", excel_bytes)
 
 # -------- Dados e download
