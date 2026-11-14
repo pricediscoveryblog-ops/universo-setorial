@@ -1,14 +1,14 @@
 {
   "ipca_mensal.csv": {
-    "atualizado_em": "2026-11-13T21:18:35",
+    "atualizado_em": "2026-11-14T07:40:58",
     "status": "ok, 154 linhas, último mes = 2026-10"
   },
   "pib_trimestral.csv": {
-    "atualizado_em": "2026-11-13T21:18:37",
+    "atualizado_em": "2026-11-14T07:40:59",
     "status": "ok, 50 linhas, último trimestre = 2T26"
   },
   "cambio_diario.csv": {
-    "atualizado_em": "2026-11-13T21:18:47",
+    "atualizado_em": "2026-11-14T07:41:07",
     "status": "ok, 3230 linhas, último data = 2026-11-13"
   },
   "janela": {
@@ -17,7 +17,7 @@
     "anos": 11
   },
   "pib_volume_trimestral.csv": {
-    "atualizado_em": "2026-11-13T21:18:38",
+    "atualizado_em": "2026-11-14T07:41:00",
     "status": "ok, 50 linhas, último trimestre = 2T26"
   }
 }
