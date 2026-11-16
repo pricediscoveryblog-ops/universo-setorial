@@ -1,0 +1,7 @@
+# tickers_antigos.yaml — trocas de código de negociação que o FCA da CVM não registra
+# Formato:  "CÓDIGO ANTIGO": "CÓDIGO ATUAL"
+# A maioria das trocas (CCRO3 -> MOTV3, EMBR3 -> EMBJ3, ELET3 -> AXIA3, VIIA3 -> BHIA3...) é ligada sozinha pelo
+# FCA, que registra o código por CNPJ em cada ano. Use este arquivo só para os casos que o FCA deixa de fora.
+# O código antigo só é usado até a data em que o atual começou a negociar (o coletor recusa se os dois negociaram juntos).
+
+"LVTC3": "WDCN3"   # WDC Networks — troca em 01/10/2025; o FCA da empresa informa o código como "N/A"
