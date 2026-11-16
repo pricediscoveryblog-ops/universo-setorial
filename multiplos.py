@@ -17,17 +17,61 @@ Regras (definidas pelo Artur):
   EV/EBITDA IFRS 16 = (VM + DL c/ arrendamento + minoritários) ÷ EBITDA IFRS 16
   EV/EBITDA pré-IFRS 16 = (VM + DL s/ arrendamento + minoritários) ÷ EBITDA pré-IFRS 16
 """
+import re
 import zipfile
 from bisect import bisect_right
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 import coletor_setorial as cs
 
 URLS = ["https://bvmf.bmfbovespa.com.br/InstDados/SerHist/COTAHIST_A{ano}.ZIP"]
 SUFIXOS = {b"3": "ON", b"4": "PN", b"5": "PN", b"6": "PN", b"7": "PN", b"8": "PN"}
 DIAS_PRECO_VELHO = 90
+
+
+FCA_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FCA/DADOS/fca_cia_aberta_{ano}.zip"
+DE_PARA_ARQ = Path("tickers_antigos.yaml")
+
+
+def codigos_antigos(anos: list[int], raiz_de: dict) -> dict:
+    """Códigos de negociação que cada empresa já usou -> raiz (4 letras) do código atual dela.
+    Fonte: FCA da CVM (valores mobiliários), que registra por CNPJ o código vigente em cada ano; complemento
+    manual em tickers_antigos.yaml para trocas que o FCA não registra (ex.: LVTC3 -> WDCN3).
+    Um código cuja raiz é a de outra empresa do universo é ignorado (FCA às vezes cita papéis de controladas)."""
+    por_cnpj = {re.sub(r"\D", "", str(c)): r for c, r in raiz_de.items() if r}
+    raizes = set(por_cnpj.values())
+    out = {}
+    for ano in anos:
+        try:
+            p = cs.baixar(FCA_URL.format(ano=ano), cs.CACHE / f"fca_cia_aberta_{ano}.zip",
+                          forcar=(ano >= max(anos) - 1 and not cs.OFFLINE))
+            if p is None:
+                continue
+            with zipfile.ZipFile(p) as z:
+                nome = next((n for n in z.namelist() if "valor_mobiliario" in n), None)
+                if nome is None:
+                    continue
+                fca = pd.read_csv(z.open(nome), sep=";", encoding="latin1", dtype=str,
+                                  usecols=["CNPJ_Companhia", "Codigo_Negociacao"])
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! FCA {ano}: {e}")
+            continue
+        for cn, cod in zip(fca["CNPJ_Companhia"], fca["Codigo_Negociacao"]):
+            r = por_cnpj.get(re.sub(r"\D", "", str(cn)))
+            cod = str(cod).strip().upper()
+            if r and len(cod) == 5 and cod[:4] not in raizes:
+                out.setdefault(cod, r)
+    if DE_PARA_ARQ.exists():
+        manual = yaml.safe_load(open(DE_PARA_ARQ, encoding="utf-8")) or {}
+        for antigo, novo in manual.items():
+            antigo, novo = str(antigo).strip().upper(), str(novo).strip().upper()
+            if novo[:4] in raizes and antigo[:4] != novo[:4]:
+                out[antigo] = novo[:4]
+    return out
 
 
 def _baixar(ano: int, forcar: bool):
@@ -40,9 +84,10 @@ def _baixar(ano: int, forcar: bool):
     return None
 
 
-def ler_cotacoes(anos: list[int], raizes: set[str]) -> tuple[pd.DataFrame, dict]:
+def ler_cotacoes(anos: list[int], raizes: set[str], antigos: dict | None = None) -> tuple[pd.DataFrame, dict]:
     """Fechamento diário (mercado à vista) dos papéis ON/PN. Retorna (cotações, ticker -> raiz atual).
-    Papéis que mudaram de código (ex.: CCRO3 -> MOTV3) são ligados à empresa pelo ISIN, que não muda."""
+    Papéis que mudaram de código são ligados à empresa pelo ISIN quando ele se mantém; quando a B3 troca o ISIN
+    junto com o código (ex.: CCRO3 -> MOTV3), pelo CNPJ: `antigos` (código antigo -> raiz atual, de codigos_antigos)."""
     tk, dt, pr, vol, isin = [], [], [], [], []
     for ano in anos:
         p = _baixar(ano, forcar=(ano == max(anos) and not cs.OFFLINE))
@@ -83,6 +128,28 @@ def ler_cotacoes(anos: list[int], raizes: set[str]) -> tuple[pd.DataFrame, dict]
     for c in df["ticker"].unique():           # papéis da raiz que não aparecem no período recente
         if c[:4] in raizes:
             mapa.setdefault(c, c[:4])
+    # códigos antigos da própria empresa que mudaram de ISIN junto com o código (CCRO3 -> MOTV3, EMBR3 -> EMBJ3,
+    # ELET3 -> AXIA3...): o ISIN não os liga; o CNPJ, via FCA da CVM ou tickers_antigos.yaml, sim
+    if antigos:
+        faixa = df.groupby("ticker")["data"].agg(["min", "max"])
+        def _cls(c):
+            return SUFIXOS.get(c[4:5].encode())
+        ligados, recusados = {}, []
+        for antigo, raiz in antigos.items():
+            if antigo in mapa or antigo not in faixa.index or _cls(antigo) is None:
+                continue
+            atuais = [c for c, r in mapa.items() if r == raiz and _cls(c) == _cls(antigo) and c in faixa.index]
+            ini = min((faixa.at[c, "min"] for c in atuais), default=None)
+            if ini is not None and faixa.at[antigo, "max"] > ini + pd.Timedelta(days=7):
+                recusados.append(f"{antigo}->{raiz}")   # negociou junto com o código atual: não é renomeação
+                continue
+            ligados[antigo] = raiz
+        mapa.update(ligados)
+        if ligados:
+            print(f"  códigos antigos ligados pelo CNPJ (FCA/tickers_antigos.yaml): {len(ligados)} "
+                  f"(ex.: {list(ligados.items())[:8]})")
+        if recusados:
+            print(f"  ! códigos do FCA recusados por negociarem junto com o código atual: {recusados[:10]}")
     df = df[df["ticker"].isin(mapa)]
     antigos = {c: r for c, r in mapa.items() if c[:4] != r}
     if antigos:
@@ -460,7 +527,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
     anos = list(range(int(b["exercicio"].min()) - 1, hoje.year + 1))
     anos = [a for a in anos if a >= hoje.year - n_anos - 1]
     raiz_de = {r["cnpj_cvm"]: str(r.get("issuingCompany") or "")[:4] for _, r in univ.iterrows()}
-    cot, mapa = ler_cotacoes(anos, set(r for r in raiz_de.values() if r))
+    cot, mapa = ler_cotacoes(anos, set(r for r in raiz_de.values() if r), codigos_antigos(anos, raiz_de))
     if cot.empty:
         print("  ! nenhuma cotação lida: múltiplos não calculados")
         return pd.DataFrame()
