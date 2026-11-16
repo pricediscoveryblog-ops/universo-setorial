@@ -184,7 +184,7 @@ st.set_page_config(page_title="Price Discovery Scanning", page_icon="📊", layo
 MERCADO = st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado")
 EUA = MERCADO == "EUA"
 if st.session_state.get("_mercado_ant") not in (None, MERCADO):
-    for _k in [k for k in st.session_state if k != "mercado"]:     # filtros e seleções não valem no outro mercado
+    for _k in [k for k in st.session_state if k != "mercado" and not k.startswith("_clk_ver_")]:  # filtros e seleções não valem no outro mercado
         del st.session_state[_k]
 st.session_state["_mercado_ant"] = MERCADO
 MOEDA = "US$" if EUA else "R$"
@@ -857,17 +857,26 @@ if _dest:
     st.session_state["aba_principal"] = "Empresa"           # abre a aba Empresa (st.tabs com chave)
 
 
+def chave_clicavel(chave: str) -> str:
+    """Chave versionada do widget clicável. A seleção de linha/ponto fica guardada no navegador, e apagar a
+    chave do session_state não a limpa: no rerun seguinte (trocar de empresa, de aba...) ela voltava e
+    disparava a navegação de novo, prendendo o usuário na empresa clicada. Trocar a versão cria um widget novo,
+    sem seleção."""
+    return f"{chave}__v{st.session_state.get('_clk_ver_' + chave, 0)}"
+
+
 def ir_para_empresa(rotulo, chave: str):
-    """Guarda a empresa clicada, limpa a seleção da tabela/gráfico e recarrega já na aba Empresa."""
+    """Guarda a empresa clicada, descarta a seleção da tabela/gráfico e recarrega já na aba Empresa."""
     if isinstance(rotulo, str) and " — " in rotulo:
         st.session_state["_ir_empresa"] = rotulo
-        st.session_state.pop(chave, None)
+        st.session_state.pop(chave_clicavel(chave), None)
+        st.session_state["_clk_ver_" + chave] = st.session_state.get("_clk_ver_" + chave, 0) + 1
         st.rerun()
 
 
 def tabela_clicavel(dados: pd.DataFrame, rotulos, chave: str, alvo=None, **kw):
     """st.dataframe com seleção de linha: clicar numa empresa abre a aba Empresa com ela."""
-    ev = (alvo or st).dataframe(dados, on_select="rerun", selection_mode="single-row", key=chave, **kw)
+    ev = (alvo or st).dataframe(dados, on_select="rerun", selection_mode="single-row", key=chave_clicavel(chave), **kw)
     linhas = list(getattr(getattr(ev, "selection", None), "rows", []) or [])
     if linhas:
         ir_para_empresa(list(rotulos)[linhas[0]], chave)
@@ -2307,7 +2316,7 @@ with aba_rank:
         fig.update_layout(height=max(350, 28 * len(d)), yaxis=dict(autorange="reversed"), legend_title_text="Segmento")
         if METRICAS[met][1] == "pct":
             fig.update_xaxes(tickformat=".0%")
-        ev_rk = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points", key="clk_rank")
+        ev_rk = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points", key=chave_clicavel("clk_rank"))
         pts = list(getattr(getattr(ev_rk, "selection", None), "points", []) or [])
         if pts:
             ir_para_empresa(pts[0].get("y"), "clk_rank")
