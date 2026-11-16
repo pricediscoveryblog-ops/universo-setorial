@@ -1373,10 +1373,11 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     # ---- graus de alavancagem
     st.subheader("Graus de alavancagem operacional e financeira")
     ga = graus_alavancagem(g)
+    ga_jan = graus_alavancagem(g_jan)          # gráfico no período da barra lateral (a tabela abaixo segue completa)
     fig = go.Figure()
     for c, nome in (("GAO", "GAO = Δ% EBIT ÷ Δ% receita"), ("GAF", "GAF = Δ% lucro ÷ Δ% EBIT"),
                     ("GAT", "GAT = Δ% lucro ÷ Δ% receita")):
-        fig.add_trace(go.Scatter(x=ga["periodo"], y=ga[c], mode="lines+markers", name=nome))
+        fig.add_trace(go.Scatter(x=ga_jan["periodo"], y=ga_jan[c], mode="lines+markers", name=nome))
     fig.update_layout(height=340, yaxis_ticksuffix="x", legend=dict(orientation="h", y=-0.2),
                       margin=dict(t=30, b=20, l=10, r=10))
     st.plotly_chart(fig, width="stretch")
