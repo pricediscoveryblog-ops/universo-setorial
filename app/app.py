@@ -906,11 +906,13 @@ emps = sorted(f3["rotulo"].unique())
 sel_emp = st.sidebar.multiselect("Empresas", emps, placeholder="Todas do filtro")
 
 setor_f = f3  # universo do setor filtrado (base da participação), antes do filtro de empresa
+JANELA = None  # período escolhido na barra lateral: (coluna, início, fim); usado também nos gráficos da aba Empresa
 if tipo == "anual":
     anos = sorted(setor_f["exercicio"].dropna().astype(int).unique())
     if anos:
         a0, a1 = st.sidebar.select_slider("Exercícios", options=anos, value=(anos[0], anos[-1]))
         setor_f = setor_f[setor_f["exercicio"].between(a0, a1)]
+        JANELA = ("exercicio", a0, a1)
 else:
     datas = sorted(setor_f["dt_fim"].dropna().unique())
     if datas:
@@ -919,6 +921,7 @@ else:
                                           value=(max(0, len(datas) - 12), len(datas) - 1),
                                           format_func=lambda i: rot_d[i])
         setor_f = setor_f[setor_f["dt_fim"].between(datas[i0], datas[i1])]
+        JANELA = ("dt_fim", datas[i0], datas[i1])
 
 if st.sidebar.checkbox("Esconder períodos com alerta de qualidade", value=False,
                        help="Trimestres com diferença implausível, acumulado ausente ou LTM que inclui esses trimestres."):
@@ -1308,16 +1311,28 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     # ---- crescimento
     st.subheader("Crescimento")
     g = crescimento(d, ["receita", "ebitda", "ebit", "lucro_liquido"])
-    visao_cres = st.radio("Visão", ["Contra o ano anterior", "Acumulado (base 100)"], horizontal=True,
-                          key="emp_cres_visao")
-    series_cres = (("receita", "Receita"), ("ebitda", "EBITDA"), ("lucro_liquido", "Lucro líquido"))
+    # recorte pelo período da barra lateral (Exercícios): o a/a do primeiro exercício da janela continua usando o
+    # ano anterior como base, e o acumulado começa (base 100) no primeiro exercício da janela
+    d_jan = d[d[JANELA[0]].between(JANELA[1], JANELA[2])] if JANELA else d
+    g_jan = g[g["dt_fim"].isin(d_jan["dt_fim"])]
+    cc_v, cc_s = st.columns([1, 2])
+    visao_cres = cc_v.radio("Visão", ["Contra o ano anterior", "Acumulado (base 100)"], horizontal=True,
+                            key="emp_cres_visao")
+    _todas_cres = {"Receita": "receita", "EBITDA": "ebitda", "Lucro líquido": "lucro_liquido"}
+    _sel_cres = cc_s.multiselect("Séries", list(_todas_cres), default=["Receita"], key="emp_cres_series",
+                                 help="Receita por padrão; EBITDA e lucro líquido são opcionais.")
+    series_cres = tuple((_todas_cres[n], n) for n in _todas_cres if n in _sel_cres)
     fig = go.Figure()
-    if visao_cres == "Contra o ano anterior":
+    if not series_cres:
+        st.info("Escolha ao menos uma série para o gráfico de crescimento.")
+    elif d_jan.empty:
+        st.info("Sem dados da empresa no período selecionado (Exercícios, na barra lateral).")
+    elif visao_cres == "Contra o ano anterior":
         for c, nome in series_cres:
-            fig.add_trace(go.Scatter(x=g["periodo"], y=g["g_" + c], name=nome, mode="lines+markers"))
+            fig.add_trace(go.Scatter(x=g_jan["periodo"], y=g_jan["g_" + c], name=nome, mode="lines+markers"))
         if not EUA:          # macro Brasil no mesmo recorte (PIB nominal, IPCA, R$/US$)
             macro_aba = macro_mod()
-            macro_aba.comparar_aa(fig, g, 12, key="mac_cmp_emp")
+            macro_aba.comparar_aa(fig, g_jan, 12, key="mac_cmp_emp")
         fig.add_hline(y=0, line_dash="dot", line_color="gray")
         fig.update_layout(height=380, yaxis_tickformat=".0%", legend=dict(orientation="h", y=-0.2),
                           margin=dict(t=30, b=20, l=10, r=10), title=f"Crescimento contra o ano anterior (valores {nota_t})")
@@ -1325,7 +1340,7 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
     else:
         # base 100 no primeiro período com receita positiva; uma série com base ≤ 0 fica de fora, e um valor ≤ 0 no
         # meio da série encerra a leitura dali em diante (índice sobre base negativa não tem leitura)
-        dd = d.sort_values("dt_fim").reset_index(drop=True)
+        dd = d_jan.sort_values("dt_fim").reset_index(drop=True)
         ok_base = dd.index[pd.to_numeric(dd["receita"], errors="coerce") > 0]
         if len(ok_base) < 2:
             st.info("Receita positiva em menos de dois períodos: sem crescimento acumulado para mostrar.")
