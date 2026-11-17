@@ -2533,26 +2533,68 @@ if not EUA:          # sem dados equivalentes nos EUA
             st.info("Base de bancos e seguradoras ainda não gerada (financeiras.csv.gz). Rode o workflow no modo universo.")
         else:
             st.caption("Base separada: bancos e seguradoras usam plano de contas próprio e não entram nas medianas das "
-                       "demais abas. Fonte: CVM (DFP anual; trimestral e LTM pelo ITR na aba Empresa). Métricas são "
-                       "definições próprias; conferir com os releases.")
+                       "demais abas. Fonte: CVM (DFP no anual; ITR no LTM e no trimestral, conforme a periodicidade da "
+                       "barra lateral). Métricas são definições próprias; conferir com os releases.")
             c1, c2, c3 = st.columns([1.2, 1.2, 1])
             grupos_f = {"Bancos e financeiras": ~fin["segmento"].str.contains("Segurad|Ressegurad", regex=True),
                         "Seguradoras e resseguradoras": fin["segmento"].str.contains("Segurad|Ressegurad", regex=True)}
             grp = c1.radio("Grupo", list(grupos_f), horizontal=True)
             ff = fin[grupos_f[grp]]
+            anual_f = tipo == "anual" or fin_per.empty or not (fin_per["tipo"] == tipo).any()
+            if not anual_f:
+                # LTM / trimestral (ITR), na periodicidade da barra lateral: fluxos LTM (4 trimestres somados) ou do
+                # trimestre e saldos do último trimestre; mercado no ponto no tempo (fim do trimestre)
+                cn_g = set(ff["cnpj"].astype(str).str.zfill(14))
+                ff = fin_per[(fin_per["tipo"] == tipo)
+                             & fin_per["cnpj"].astype(str).str.zfill(14).isin(cn_g)].dropna(subset=["dt_fim"]).copy()
+                ff["cnpj"] = ff["cnpj"].astype(str).str.zfill(14)
+                ff = ff.sort_values("dt_fim").drop_duplicates(["cnpj", "dt_fim"], keep="last")
+                ff = ff.drop(columns=[c for c in ("valor_mercado", "p_l") if c in ff.columns])
+                if not mult.empty:
+                    mq = mult[mult["tipo"] == "trimestral"][["cnpj", "data", "valor_mercado", "p_l"]].drop_duplicates(
+                        ["cnpj", "data"])
+                    ff = ff.merge(mq, left_on=["cnpj", "dt_fim"], right_on=["cnpj", "data"], how="left").drop(
+                        columns="data")
+                else:
+                    ff["valor_mercado"], ff["p_l"] = np.nan, np.nan
+                # P/L do grupo = Σ valor de mercado ÷ Σ lucro dos 12 meses implícito no P/L de cada instituição
+                ff["lucro_12m_pl"] = ff["valor_mercado"] / ff["p_l"].where(ff["p_l"] != 0)
+                st.caption("Periodicidade da barra lateral: " + (
+                    "LTM = fluxos dos últimos 4 trimestres somados; saldos (PL, ativo, carteira) do último trimestre."
+                    if tipo == "ltm" else
+                    "trimestral = fluxo do trimestre (diferença dos acumulados do ITR); ROE, ROA e custo do crédito "
+                    "anualizados ×4.") + " Valor de mercado e P/L na data de fim do trimestre (P/L com lucro 12m).")
+            elif tipo != "anual":
+                st.info("Sem ITRs de bancos e seguradoras na base: mostrando a série anual (DFP).")
             opcoes = [k for k in FIN if ff[k].notna().any()] if len(ff) else list(FIN)
             ind_f = c2.selectbox("Indicador", opcoes, format_func=lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]],
                                  key="fin_ind")
             rot_f, fmt_f, agg_f = FIN[ind_f]
+            if not anual_f and ind_f == "p_l":
+                agg_f = ("valor_mercado", "lucro_12m_pl")
             modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, disabled=(fmt_f != "mm"), key="fin_modo")
             pct_f = modo_f == "% do grupo" and fmt_f == "mm"
-            anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
-            if anos_f:
-                fa0, fa1 = st.select_slider("Exercícios", options=anos_f, value=(anos_f[0], anos_f[-1]), key="fin_anos")
-                ff = ff[ff["exercicio"].between(fa0, fa1)]
+            if anual_f:
+                anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
+                if anos_f:
+                    fa0, fa1 = st.select_slider("Exercícios", options=anos_f, value=(anos_f[0], anos_f[-1]), key="fin_anos")
+                    ff = ff[ff["exercicio"].between(fa0, fa1)]
+            else:
+                datas_f = sorted(ff["dt_fim"].unique())
+                if datas_f:
+                    rot_df = [pd.Timestamp(x).strftime("%m/%Y") for x in datas_f]
+                    fi0, fi1 = st.select_slider("Período (data de fechamento)", options=list(range(len(datas_f))),
+                                                value=(max(0, len(datas_f) - 12), len(datas_f) - 1),
+                                                format_func=lambda i: rot_df[i], key=f"fin_periodo_{tipo}")
+                    ff = ff[ff["dt_fim"].between(datas_f[fi0], datas_f[fi1])]
             sel_f = st.multiselect("Empresas (vazio = todas do grupo)", sorted(ff["rotulo"].unique()), key="fin_emp")
-            periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
-            ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
+            if anual_f:
+                periodos_f = [str(a) for a in sorted(ff["exercicio"].dropna().astype(int).unique())]
+                ff = ff.assign(_c=ff["exercicio"].astype(int).astype(str))
+            else:
+                periodos_f = [pd.Timestamp(x).strftime("%m/%Y") for x in sorted(ff["dt_fim"].unique())]
+                ff = ff.assign(_c=ff["dt_fim"].dt.strftime("%m/%Y"))
+            nome_per = "Exercício" if anual_f else "Período"
             if agg_f == "cresc":
                 # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
                 cn_ = CRESC_FIN[ind_f]
@@ -2567,6 +2609,8 @@ if not EUA:          # sem dados equivalentes nos EUA
                 ok = ff.dropna(subset=[n_, d_])
                 g_ = ok.groupby("_c")[[n_, d_]].sum()
                 tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
+                if not anual_f and tipo == "trimestral" and ind_f in ("roe", "roa", "custo_credito"):
+                    tot_f = tot_f * 4  # mesmo critério da série por instituição (anualizado ×4)
             else:
                 tot_f = pd.Series(dtype=float)
             tot_f = tot_f.reindex(periodos_f)
@@ -2602,8 +2646,10 @@ if not EUA:          # sem dados equivalentes nos EUA
             tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
                             height=min(650, 38 + 35 * len(vis_tab)))
             if agg_f == "cresc":
-                st.caption("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
-                           "os dois exercícios (amostra casada). Instituições por exercício: " +
+                st.caption(("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
+                            "os dois exercícios (amostra casada). Instituições por exercício: " if anual_f else
+                            "Grupo agregado = Σ valor ÷ Σ valor do mesmo período do ano anterior − 1, só com as "
+                            "instituições que têm os dois períodos (amostra casada). Instituições por período: ") +
                            " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
             if fmt_f != "mm" and isinstance(agg_f, tuple):
                 st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
@@ -2639,8 +2685,8 @@ if not EUA:          # sem dados equivalentes nos EUA
                     plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
                 elif sel_f and "Demais do grupo" in extra_f:
                     plotf["Demais do grupo"] = extra_f["Demais do grupo"]
-                lf = plotf.reset_index(names="Exercício").melt(id_vars="Exercício", var_name="Empresa", value_name="v")
-                fig = px.bar(lf, x="Exercício", y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
+                lf = plotf.reset_index(names=nome_per).melt(id_vars=nome_per, var_name="Empresa", value_name="v")
+                fig = px.bar(lf, x=nome_per, y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
                 fig.update_layout(barmode="relative", height=460, legend_title_text="")
                 if pct_f:
                     fig.update_yaxes(tickformat=".0%")
@@ -2679,7 +2725,7 @@ if not EUA:          # sem dados equivalentes nos EUA
                                              name=nome.split(" — ")[0] if " — " in nome else nome,
                                              line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
                 fig.add_hline(y=100, line_dash="dot", line_color="gray")
-                fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro exercício",
+                fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro " + ("exercício" if anual_f else "período"),
                                   title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
             else:
                 fig = go.Figure()
@@ -2691,11 +2737,14 @@ if not EUA:          # sem dados equivalentes nos EUA
                 fig.update_layout(height=460, legend_title_text="")
                 if fmt_f == "pct":
                     fig.update_yaxes(tickformat=".0%")
+            if not anual_f:
+                fig.update_xaxes(type="category", categoryorder="array", categoryarray=periodos_f)
             st.plotly_chart(fig, width="stretch")
             if agg_f == "cresc":
-                st.caption("Uma linha por instituição: valor ÷ valor do primeiro exercício × 100; a linha é interrompida "
+                st.caption("Uma linha por instituição: valor ÷ valor do primeiro período × 100; a linha é interrompida "
                            "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
-                           "amostra casada. A tabela acima mostra o crescimento de cada exercício contra o anterior.")
+                           "amostra casada. A tabela acima mostra o crescimento de cada período contra o mesmo período "
+                           "do ano anterior.")
             ex_f = full_f.reset_index()
             c1, c2 = st.columns(2)
             c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
@@ -2914,11 +2963,11 @@ Dividend yield = dividendos + JCP pagos nos 12 meses (DFC, regime de caixa, só 
 contas próprio). Contas identificadas por descrição, porque os códigos mudam entre instituições e anos.
 ROE = lucro dos controladores ÷ PL dos controladores (PL total − não controladores), no fim do ano.
 Eficiência e carteira de crédito são aproximações próprias. Basileia e inadimplência não constam da DFP.
-Na aba Empresa, a série segue a periodicidade da barra lateral: anual (DFP), trimestral (ITR; fluxo do trimestre
+Nas abas Financeiro e Empresa, a série segue a periodicidade da barra lateral: anual (DFP), trimestral (ITR; fluxo do trimestre
 por diferença dos acumulados; ROE, ROA e custo do crédito anualizados × 4) e LTM (4 trimestres somados, saldos do
 último trimestre). Múltiplos trimestrais no ponto no tempo: PL do último ITR/DFP divulgado e lucro LTM.
 Abertura do ativo: carteira de crédito bruta, (−) provisão, TVM e derivativos e demais ativos (resíduo).
-Crescimento (PL dos controladores, carteira de crédito, ativo total, despesa de PDD) = exercício ÷ exercício anterior − 1;
+Crescimento (PL dos controladores, carteira de crédito, ativo total, despesa de PDD) = exercício ÷ exercício anterior − 1 (LTM e trimestral: contra o mesmo período do ano anterior);
 o gráfico mostra o crescimento acumulado em base 100 (por instituição e agregado do grupo em amostra casada).
 
 **Limitações conhecidas.**
