@@ -45,6 +45,8 @@ ROTULOS_EUA = {
     "ev_ebitda_ifrs16": "EV/EBITDA equiv. IFRS 16 (c/ arrend.)",
     "ev_ebitda_pre_ifrs16": "EV/EBITDA após arrend. financeiros (s/ arrend.)",
     "dividend_yield": "Dividend yield (dividendos pagos 12m)",
+    "roic_caixa": "ROIC caixa (NOPAT + D&A − capex org. − arrend. financ. ÷ CI)",
+    "roic_trad": "ROIC tradicional (NOPAT aj. ÷ CI c/ arrendamentos)",
 }
 # métricas que só existem na base americana (entram na lista do app no modo EUA)
 EXTRAS_EUA = {
@@ -55,8 +57,7 @@ EXTRAS_EUA = {
     "retorno_acionista_caixa": ("Retorno ao acionista (dividendos + recompra − emissão)", "mm", "Caixa e investimento"),
 }
 # métricas brasileiras sem equivalente na SEC (FCO comparável e frota): saem da lista no modo EUA
-SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido",
-                   "roic_caixa", "roic_trad"]   # ROIC: só Brasil por enquanto
+SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido"]
 
 
 def ajustar_metricas(metricas: dict, agreg: dict) -> None:
@@ -142,6 +143,9 @@ COLUNAS = [
     "clientes", "estoques", "fornecedores", "cpv", "margem_bruta", "margem_ebitda", "margem_ebitda_pre_ifrs16",
     "margem_liquida", "roe_pl_final", "capex_org_receita", "capex_org_da", "div_liq_ebitda_ifrs16",
     "div_liq_ebitda_pre_ifrs16"]
+# ROIC: calculado no coletor (coletor_eua.derivar) e só lido aqui, se o parquet já tiver as colunas (calcular no app
+# estourou a memória do Streamlit gratuito)
+COLUNAS_ROIC = ["roic_caixa", "roic_trad"]
 
 
 def compactar(df: pd.DataFrame) -> pd.DataFrame:
@@ -179,7 +183,13 @@ def base_como_br() -> pd.DataFrame:
     # filtros já na leitura (datas ISO comparam como texto) e junção no Arrow: uma única conversão para pandas,
     # sem cópias intermediárias (pico de memória menor)
     filtros = [("dt_fim", ">=", INICIO.strftime("%Y-%m-%d")), ("tipo_especial", "!=", "financeira")]
-    tabs = [pq.read_table(io.BytesIO(_baixar(a)), columns=COLUNAS, filters=filtros) for a in ARQUIVOS]
+    tabs = []
+    for a in ARQUIVOS:
+        buf = _baixar(a)
+        nomes = set(pq.read_schema(io.BytesIO(buf)).names)  # parquet sem as colunas do ROIC: segue sem elas
+        tabs.append(pq.read_table(io.BytesIO(buf), columns=COLUNAS + [c for c in COLUNAS_ROIC if c in nomes],
+                                  filters=filtros))
+        del buf
     t = pa.concat_tables(tabs, promote_options="permissive")
     del tabs
     b = t.to_pandas(self_destruct=True)
@@ -223,7 +233,7 @@ def base_como_br() -> pd.DataFrame:
 
 
 def calc_roic(b: pd.DataFrame) -> pd.DataFrame:
-    """ROIC da base americana desligado temporariamente (memória do Streamlit gratuito): devolve a base como está."""
+    """ROIC da base americana já vem calculado do coletor (colunas roic_caixa e roic_trad): nada a fazer aqui."""
     return b
 
 
@@ -311,6 +321,18 @@ e tende a ficar abaixo da brasileira por incluir os juros.
 **Cobertura da dívida.** Mesmas fórmulas da base brasileira; *arrend.* = pagamentos de arrendamento financeiro; IR =
 imposto de renda pago (divulgação suplementar do fluxo de caixa; muitas empresas só divulgam no 10-K, então os
 índices trimestrais/LTM podem ficar vazios).
+
+**ROIC (variante Price Discovery, ajustada ao US GAAP).** Calculado no coletor. NOPAT = EBIT × (1 − 25%) quando o
+EBIT é positivo (21% federal + média dos impostos estaduais; sem crédito fiscal sobre prejuízo). Capital no fim do
+período; só anual e LTM; vazio com capital ≤ 0. Como o arrendamento operacional fica no opex (ASC 842), ele já está
+descontado no EBIT:
+- ROIC caixa = (NOPAT + D&A − capex orgânico − pagamentos de arrendamento financeiro) ÷ (DL s/ arrendamento + PL).
+  Sem pagamento de arrendamento financeiro divulgado e com passivo financeiro, 2,5 × esse passivo entra no capital.
+- ROIC tradicional = NOPAT ajustado ÷ (DL s/ arrendamento + passivos de arrendamento financeiro e operacional + PL).
+  NOPAT ajustado soma ao EBIT os juros implícitos do arrendamento operacional (passivo operacional × custo da dívida da
+  empresa, juros pagos ÷ dívida bruta, entre 3% e 12%; sem dado, 6%; nunca acima do custo de arrendamento operacional
+  divulgado), para o EBIT ficar no critério do IFRS 16 e comparável ao ROIC tradicional brasileiro.
+- Sem ajuste de goodwill (igual à base brasileira).
 
 **Dívida e caixa.** Dívida bruta = LongTermDebt (inclui a parcela corrente) + empréstimos de curto prazo +
 commercial paper (com alternativas por empresa). Caixa = caixa e equivalentes + aplicações de curto prazo.
