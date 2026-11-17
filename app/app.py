@@ -236,8 +236,8 @@ def carregar(versao: tuple = ()):
     return _carregar_resto(base, cob, meta)
 
 
-# ROIC (variante Price Discovery, nov/2026). Só na base brasileira: a americana não passa por calc_roic e as
-# chaves saem de METRICAS no modo EUA (eua.SEM_EQUIVALENTE). Sem ajuste de goodwill nesta versão.
+# ROIC (variante Price Discovery, nov/2026). Esta função é a da base brasileira (IFRS 16); a americana usa
+# eua.calc_roic (US GAAP / ASC 842: arrend. operacional no opex, alíquota de 25%). Sem ajuste de goodwill.
 #   NOPAT = EBIT × (1 − 34%) se EBIT > 0 (sem crédito fiscal sobre prejuízo)
 #   ROIC caixa = (NOPAT + D&A − capex orgânico − pagamento de arrendamento) ÷ (DL s/ arrend. + PL)
 #     sem pagamento identificado na DFC e com passivo de arrendamento: pagamento sai do numerador e
@@ -815,7 +815,7 @@ def carregar_eua(versao: str):
     """Base da SEC no formato da CVM. cache_resource (sem cópia por sessão): a base americana é ~10x a brasileira
     e o Streamlit gratuito tem pouca memória. As abas só filtram a base, não a alteram."""
     b = eua.base_como_br()
-    b = eua.compactar(enriquecer(b))                  # derivadas em float32 já na saída do enriquecimento
+    b = eua.compactar(eua.calc_roic(enriquecer(b)))                  # derivadas e ROIC em float32 já na saída do enriquecimento
     eua.liberar_memoria()
     m = eua.multiplos()
     if not m.empty:                                   # mesmo tratamento dos múltiplos brasileiros
@@ -880,6 +880,15 @@ def tabela_clicavel(dados: pd.DataFrame, rotulos, chave: str, alvo=None, **kw):
     linhas = list(getattr(getattr(ev, "selection", None), "rows", []) or [])
     if linhas:
         ir_para_empresa(list(rotulos)[linhas[0]], chave)
+
+
+def multiselect_seguro(alvo, rotulo: str, opcoes: list, padrao: list, key: str, **kw) -> list:
+    """Multiselect que tolera a troca da lista de opções (grupo, periodicidade): descarta da seleção guardada o
+    que não existe mais e só passa o padrão na primeira vez (evita erro e aviso do Streamlit)."""
+    if key in st.session_state:
+        st.session_state[key] = [k for k in st.session_state[key] if k in opcoes]
+        return alvo.multiselect(rotulo, opcoes, key=key, **kw)
+    return alvo.multiselect(rotulo, opcoes, default=[k for k in padrao if k in opcoes], key=key, **kw)
 
 
 # ------------------------------------------------------------------ barra lateral
@@ -1493,178 +1502,195 @@ with aba_setor:
         st.info("Nenhum dado para o filtro.")
     else:
         c1, c2 = st.columns([2, 1])
-        ind = c1.selectbox("Indicador", list(METRICAS), index=list(METRICAS).index("receita"),
-                           format_func=lambda k: ROT[k] + {"mm": f" ({UN})", "pct": " (%)", "x": " (x)", "d": " (dias)"}[METRICAS[k][1]])
-        fmt = METRICAS[ind][1]
-        modo = c2.radio("Mostrar", ["Valores", "% do setor"], horizontal=True, disabled=(fmt != "mm"),
+        rot_ind = lambda k: ROT[k] + {"mm": f" ({UN})", "pct": " (%)", "x": " (x)", "d": " (dias)"}[METRICAS[k][1]]
+        inds = multiselect_seguro(c1, "Indicadores", list(METRICAS), ["receita"], "set_inds", format_func=rot_ind,
+                                  help="Escolha um ou mais: cada indicador aparece em sequência, com tabela, "
+                                       "gráfico e download próprios.")
+        modo = c2.radio("Mostrar", ["Valores", "% do setor"], horizontal=True, key="set_modo",
+                        disabled=not any(METRICAS[k][1] == "mm" for k in inds),
                         help="Participação = valor da empresa ÷ total do setor filtrado (setor/subsetor/segmento), "
-                             f"no mesmo período. Disponível para indicadores em {MOEDA}.")
-        pct_setor = (modo == "% do setor") and fmt == "mm"
+                             f"no mesmo período. Vale para os indicadores em {MOEDA}; os demais seguem em valores.")
+        if not inds:
+            st.info("Escolha ao menos um indicador.")
         periodos = ordem_periodos(setor_f)
         d_set = setor_f.assign(_c=col_periodo(setor_f))
-        total = agregado_setor(setor_f, ind).reindex(periodos)
-        mediana = d_set.groupby("_c")[ind].median().reindex(periodos)
-        n_emp = d_set.dropna(subset=[ind]).groupby("_c")["cnpj"].nunique().reindex(periodos).fillna(0).astype(int)
-
         d_emp = filtrado.assign(_c=col_periodo(filtrado))
-        tab = d_emp.pivot_table(index="rotulo", columns="_c", values=ind, aggfunc="first").reindex(columns=periodos)
-        # ordena pelo último período em que a maioria das empresas já tem dado (evita que um ano com poucas
-        # empresas, como exercícios encerrados em março, defina a ordem)
-        ult = [p for p in periodos[::-1] if p in tab.columns and n_emp.get(p, 0) >= 0.5 * n_emp.max()] or \
-              [p for p in periodos[::-1] if p in tab.columns and tab[p].notna().any()]
-        if ult:
-            tab = tab.sort_values(ult[0], ascending=False)
-        if pct_setor:
-            tab = tab.div(total, axis=1)
-        linhas_extra = {}
-        if fmt == "mm":
-            if sel_emp:
-                demais = total - d_emp.groupby("_c")[ind].sum(min_count=1).reindex(periodos).fillna(0)
-                linhas_extra["Demais empresas do setor"] = demais / total if pct_setor else demais
-            linhas_extra["TOTAL DO SETOR (filtro)"] = total / total if pct_setor else total
-        else:
-            linhas_extra["SETOR AGREGADO"] = total
-        if not pct_setor:
-            linhas_extra["Mediana do setor"] = mediana
-        tab_full = pd.concat([tab, pd.DataFrame(linhas_extra).T.reindex(columns=periodos)])
-        tab_full.index.name = "Empresa"
+        exp_todos = {}
+        for ind in inds:
+            fmt = METRICAS[ind][1]
+            if len(inds) > 1:
+                st.divider()
+                st.subheader(rot_ind(ind))
+            pct_setor = (modo == "% do setor") and fmt == "mm"
+            total = agregado_setor(setor_f, ind).reindex(periodos)
+            mediana = d_set.groupby("_c")[ind].median().reindex(periodos)
+            n_emp = d_set.dropna(subset=[ind]).groupby("_c")["cnpj"].nunique().reindex(periodos).fillna(0).astype(int)
 
-        if pct_setor:
-            cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
-            vis = tab_full * 100
-        elif fmt == "pct":
-            cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
-            vis = tab_full * 100
-        elif fmt == "x":
-            cfg = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos}
-            vis = tab_full
-        elif fmt == "d":
-            cfg = {p: st.column_config.NumberColumn(p, format="%.0f dias") for p in periodos}
-            vis = tab_full
-        else:
-            cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
-            vis = tab_full
-        tabela_clicavel(vis, vis.index, "clk_setor", column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
-        st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
-                   ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
-        if fmt == "mm" and (setor_f[ind] < 0).any():
-            st.caption("⚠️ Há valores negativos neste indicador; a participação percentual pode não fazer sentido.")
-        if fmt != "mm":
-            st.caption("Setor agregado = soma do numerador ÷ soma do denominador das empresas com os dois dados "
-                       "(ex.: margem EBITDA = Σ EBITDA ÷ Σ receita).")
-
-        # gráfico
-        if fmt == "mm":
-            top = tab.index[:10] if not sel_emp else tab.index
-            plot = tab.loc[top].T if len(tab) else pd.DataFrame()
-            if not sel_emp and len(tab) > 10:
-                plot["Demais"] = tab.drop(index=top).sum(min_count=1)
-            elif sel_emp:
-                plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
-            longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
-            fig = px.bar(longo, x="Período", y="v", color="Empresa",
-                         labels={"v": "% do setor" if pct_setor else ROT[ind] + f" ({UN})"})
-            fig.update_layout(barmode="relative", height=480, legend_title_text="")
+            tab = d_emp.pivot_table(index="rotulo", columns="_c", values=ind, aggfunc="first").reindex(columns=periodos)
+            # ordena pelo último período em que a maioria das empresas já tem dado (evita que um ano com poucas
+            # empresas, como exercícios encerrados em março, defina a ordem)
+            ult = [p for p in periodos[::-1] if p in tab.columns and n_emp.get(p, 0) >= 0.5 * n_emp.max()] or \
+                  [p for p in periodos[::-1] if p in tab.columns and tab[p].notna().any()]
+            if ult:
+                tab = tab.sort_values(ult[0], ascending=False)
             if pct_setor:
-                fig.update_yaxes(tickformat=".0%")
-            st.plotly_chart(fig, width="stretch")
-            if not sel_emp and len(tab) > 10:
-                st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
-                           "Selecione empresas na barra lateral para vê-las isoladamente.")
-        elif ind.startswith("cresc_"):
-            # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
-            col = ind[6:]
-            niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
-            por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
-            linhas_idx = {}
-            if por_setor:
-                mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
-                for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
-                    if str(st_nome).strip():
-                        linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+                tab = tab.div(total, axis=1)
+            linhas_extra = {}
+            if fmt == "mm":
+                if sel_emp:
+                    demais = total - d_emp.groupby("_c")[ind].sum(min_count=1).reindex(periodos).fillna(0)
+                    linhas_extra["Demais empresas do setor"] = demais / total if pct_setor else demais
+                linhas_extra["TOTAL DO SETOR (filtro)"] = total / total if pct_setor else total
             else:
-                vis_rot = tab.index if sel_emp else niv.index
-                for r in vis_rot:
-                    v = niv.loc[r]
-                    ini = v.first_valid_index()
-                    if ini is None or v[ini] <= 0:
-                        continue
-                    idx = 100 * v / v[ini]
-                    neg = idx[idx <= 0].index
-                    if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
-                        idx[idx.index >= neg[0]] = np.nan
-                    linhas_idx[r] = idx
-                linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
-            nomes = list(linhas_idx)
-            if por_setor:
-                padrao_l = nomes
-            else:
-                ult_p = ult[0] if ult else periodos[-1]
-                tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
-                padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
-            chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
-                                                                  tuple(sel_emp)))))
-            sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
-                                   help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-            fig = go.Figure()
-            for nome in sel_l:
-                y = linhas_idx[nome]
-                fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
-                                         name=nome.split(" — ")[0] if " — " in nome else nome,
-                                         line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
-            if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
-                macro_aba = macro_mod()
-                macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
-                                           3 if tipo == "trimestral" else 12,
-                                           col in ("ativo_total", "patrimonio_liquido"),
-                                           key=f"mac_cmp_set_{ind}_{tipo}")
-            fig.add_hline(y=100, line_dash="dot", line_color="gray")
-            fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
-                              title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
-            st.plotly_chart(fig, width="stretch")
-            st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
-                        "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
-                        "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
-                        "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
-                       + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
-        elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
-            # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
-            linhas_g = {}
-            for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
-                linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
-            linhas_g["Todas as empresas"] = total
-            sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
-                                   key=f"graus_linhas_{ind}_{tipo}",
-                                   help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-            fig = go.Figure()
-            for nome in sel_g:
-                y = linhas_g[nome]
-                fig.add_trace(go.Scatter(x=periodos, y=y.values, mode="lines+markers", name=nome,
-                                         line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
-            fig.add_hline(y=1, line_dash="dot", line_color="gray")
-            fig.update_layout(height=480, legend_title_text="", yaxis_ticksuffix="x",
-                              title=f"{ROT[ind]} por setor")
-            st.plotly_chart(fig, width="stretch")
-            st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
-                       "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
-                       "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
-        else:
-            fig = go.Figure()
-            for r in tab.index[:10]:
-                fig.add_trace(go.Scatter(x=periodos, y=tab.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
-            fig.add_trace(go.Scatter(x=periodos, y=total, mode="lines", name="Setor agregado", line=dict(width=4, dash="dash")))
-            fig.add_trace(go.Scatter(x=periodos, y=mediana, mode="lines", name="Mediana", line=dict(dash="dot")))
-            fig.update_layout(height=480, legend_title_text="")
-            if fmt == "pct":
-                fig.update_yaxes(tickformat=".0%")
-            st.plotly_chart(fig, width="stretch")
+                linhas_extra["SETOR AGREGADO"] = total
+            if not pct_setor:
+                linhas_extra["Mediana do setor"] = mediana
+            tab_full = pd.concat([tab, pd.DataFrame(linhas_extra).T.reindex(columns=periodos)])
+            tab_full.index.name = "Empresa"
 
-        exp_t = tab_full.reset_index()
-        c1, c2 = st.columns(2)
-        c1.download_button("⬇️ Tabela (CSV)", exp_t.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                           file_name=f"setor_{ind}_{tipo}.csv", mime="text/csv")
-        c2.download_button("⬇️ Tabela (XLSX)", excel_bytes({ROT[ind][:31]: exp_t}), file_name=f"setor_{ind}_{tipo}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            if pct_setor:
+                cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
+                vis = tab_full * 100
+            elif fmt == "pct":
+                cfg = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos}
+                vis = tab_full * 100
+            elif fmt == "x":
+                cfg = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos}
+                vis = tab_full
+            elif fmt == "d":
+                cfg = {p: st.column_config.NumberColumn(p, format="%.0f dias") for p in periodos}
+                vis = tab_full
+            else:
+                cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
+                vis = tab_full
+            tabela_clicavel(vis, vis.index, f"clk_setor_{ind}", column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
+            st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
+                       ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
+            if fmt == "mm" and (setor_f[ind] < 0).any():
+                st.caption("⚠️ Há valores negativos neste indicador; a participação percentual pode não fazer sentido.")
+            if fmt != "mm":
+                st.caption("Setor agregado = soma do numerador ÷ soma do denominador das empresas com os dois dados "
+                           "(ex.: margem EBITDA = Σ EBITDA ÷ Σ receita).")
+
+            # gráfico
+            if fmt == "mm":
+                top = tab.index[:10] if not sel_emp else tab.index
+                plot = tab.loc[top].T if len(tab) else pd.DataFrame()
+                if not sel_emp and len(tab) > 10:
+                    plot["Demais"] = tab.drop(index=top).sum(min_count=1)
+                elif sel_emp:
+                    plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
+                longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
+                fig = px.bar(longo, x="Período", y="v", color="Empresa",
+                             labels={"v": "% do setor" if pct_setor else ROT[ind] + f" ({UN})"})
+                fig.update_layout(barmode="relative", height=480, legend_title_text="")
+                if pct_setor:
+                    fig.update_yaxes(tickformat=".0%")
+                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                if not sel_emp and len(tab) > 10:
+                    st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
+                               "Selecione empresas na barra lateral para vê-las isoladamente.")
+            elif ind.startswith("cresc_"):
+                # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
+                col = ind[6:]
+                niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
+                por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
+                linhas_idx = {}
+                if por_setor:
+                    mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
+                    for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
+                        if str(st_nome).strip():
+                            linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+                else:
+                    vis_rot = tab.index if sel_emp else niv.index
+                    for r in vis_rot:
+                        v = niv.loc[r]
+                        ini = v.first_valid_index()
+                        if ini is None or v[ini] <= 0:
+                            continue
+                        idx = 100 * v / v[ini]
+                        neg = idx[idx <= 0].index
+                        if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
+                            idx[idx.index >= neg[0]] = np.nan
+                        linhas_idx[r] = idx
+                    linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
+                nomes = list(linhas_idx)
+                if por_setor:
+                    padrao_l = nomes
+                else:
+                    ult_p = ult[0] if ult else periodos[-1]
+                    tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
+                    padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
+                chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
+                                                                      tuple(sel_emp)))))
+                sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
+                                       help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                fig = go.Figure()
+                for nome in sel_l:
+                    y = linhas_idx[nome]
+                    fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                             name=nome.split(" — ")[0] if " — " in nome else nome,
+                                             line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
+                if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
+                    macro_aba = macro_mod()
+                    macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
+                                               3 if tipo == "trimestral" else 12,
+                                               col in ("ativo_total", "patrimonio_liquido"),
+                                               key=f"mac_cmp_set_{ind}_{tipo}")
+                fig.add_hline(y=100, line_dash="dot", line_color="gray")
+                fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
+                                  title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
+                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
+                            "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
+                            "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
+                            "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
+                           + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
+            elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
+                # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
+                linhas_g = {}
+                for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
+                    linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
+                linhas_g["Todas as empresas"] = total
+                sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
+                                       key=f"graus_linhas_{ind}_{tipo}",
+                                       help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                fig = go.Figure()
+                for nome in sel_g:
+                    y = linhas_g[nome]
+                    fig.add_trace(go.Scatter(x=periodos, y=y.values, mode="lines+markers", name=nome,
+                                             line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
+                fig.add_hline(y=1, line_dash="dot", line_color="gray")
+                fig.update_layout(height=480, legend_title_text="", yaxis_ticksuffix="x",
+                                  title=f"{ROT[ind]} por setor")
+                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
+                           "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
+                           "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
+            else:
+                fig = go.Figure()
+                for r in tab.index[:10]:
+                    fig.add_trace(go.Scatter(x=periodos, y=tab.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+                fig.add_trace(go.Scatter(x=periodos, y=total, mode="lines", name="Setor agregado", line=dict(width=4, dash="dash")))
+                fig.add_trace(go.Scatter(x=periodos, y=mediana, mode="lines", name="Mediana", line=dict(dash="dot")))
+                fig.update_layout(height=480, legend_title_text="")
+                if fmt == "pct":
+                    fig.update_yaxes(tickformat=".0%")
+                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+
+            exp_t = tab_full.reset_index()
+            exp_todos[f"{len(exp_todos) + 1}. {ROT[ind]}"] = exp_t
+            c1, c2 = st.columns(2)
+            c1.download_button("⬇️ Tabela (CSV)", exp_t.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                               file_name=f"setor_{ind}_{tipo}.csv", mime="text/csv", key=f"set_csv_{ind}")
+            c2.download_button("⬇️ Tabela (XLSX)", excel_bytes({ROT[ind][:31]: exp_t}), file_name=f"setor_{ind}_{tipo}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"set_xlsx_{ind}")
+        if len(inds) > 1:
+            st.divider()
+            st.download_button("⬇️ Todos os indicadores selecionados (XLSX, uma aba por indicador)",
+                               excel_bytes(exp_todos), file_name=f"setor_{len(inds)}_indicadores_{tipo}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="set_xlsx_todos")
 
         with st.expander("Dispersão entre dois indicadores (um período)"):
             ref_opts = periodos[::-1]
@@ -2567,13 +2593,12 @@ if not EUA:          # sem dados equivalentes nos EUA
             elif tipo != "anual":
                 st.info("Sem ITRs de bancos e seguradoras na base: mostrando a série anual (DFP).")
             opcoes = [k for k in FIN if ff[k].notna().any()] if len(ff) else list(FIN)
-            ind_f = c2.selectbox("Indicador", opcoes, format_func=lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]],
-                                 key="fin_ind")
-            rot_f, fmt_f, agg_f = FIN[ind_f]
-            if not anual_f and ind_f == "p_l":
-                agg_f = ("valor_mercado", "lucro_12m_pl")
-            modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, disabled=(fmt_f != "mm"), key="fin_modo")
-            pct_f = modo_f == "% do grupo" and fmt_f == "mm"
+            rot_ind_f = lambda k: FIN[k][0] + {"mm": " (R$ mm)", "pct": " (%)", "x": " (x)"}[FIN[k][1]]
+            inds_f = multiselect_seguro(c2, "Indicadores", opcoes, opcoes[:1], "fin_inds", format_func=rot_ind_f,
+                                        help="Escolha um ou mais: cada indicador aparece em sequência, com tabela, "
+                                             "gráfico e download próprios.")
+            modo_f = c3.radio("Mostrar", ["Valores", "% do grupo"], horizontal=True, key="fin_modo",
+                              disabled=not any(FIN[k][1] == "mm" for k in inds_f))
             if anual_f:
                 anos_f = sorted(ff["exercicio"].dropna().astype(int).unique())
                 if anos_f:
@@ -2595,164 +2620,176 @@ if not EUA:          # sem dados equivalentes nos EUA
                 periodos_f = [pd.Timestamp(x).strftime("%m/%Y") for x in sorted(ff["dt_fim"].unique())]
                 ff = ff.assign(_c=ff["dt_fim"].dt.strftime("%m/%Y"))
             nome_per = "Exercício" if anual_f else "Período"
-            if agg_f == "cresc":
-                # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
-                cn_ = CRESC_FIN[ind_f]
-                ok = ff[(ff[cn_ + "_ant"] > 0) & ff[cn_].notna()]
-                g_ = ok.groupby("_c")[[cn_, cn_ + "_ant"]].sum()
-                tot_f = g_[cn_] / g_[cn_ + "_ant"] - 1
-                n_cresc = ok.groupby("_c")["cnpj"].nunique().reindex(periodos_f).fillna(0).astype(int)
-            elif agg_f == "soma":
-                tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
-            elif isinstance(agg_f, tuple):
-                n_, d_ = agg_f
-                ok = ff.dropna(subset=[n_, d_])
-                g_ = ok.groupby("_c")[[n_, d_]].sum()
-                tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
-                if not anual_f and tipo == "trimestral" and ind_f in ("roe", "roa", "custo_credito"):
-                    tot_f = tot_f * 4  # mesmo critério da série por instituição (anualizado ×4)
-            else:
-                tot_f = pd.Series(dtype=float)
-            tot_f = tot_f.reindex(periodos_f)
-            med_f = ff.groupby("_c")[ind_f].median().reindex(periodos_f)
-            vis_f = ff[ff["rotulo"].isin(sel_f)] if sel_f else ff
-            tab_f = vis_f.pivot_table(index="rotulo", columns="_c", values=ind_f, aggfunc="first").reindex(columns=periodos_f)
-            ultf = [p for p in periodos_f[::-1] if p in tab_f.columns and tab_f[p].notna().any()]
-            if ultf:
-                tab_f = tab_f.sort_values(ultf[0], ascending=False)
-            if pct_f:
-                tab_f = tab_f.div(tot_f, axis=1)
-            extra_f = {}
-            if fmt_f == "mm":
-                if sel_f:
-                    dem = tot_f - vis_f.groupby("_c")[ind_f].sum(min_count=1).reindex(periodos_f).fillna(0)
-                    extra_f["Demais do grupo"] = dem / tot_f if pct_f else dem
-                extra_f["TOTAL DO GRUPO"] = tot_f / tot_f if pct_f else tot_f
-            elif len(tot_f.dropna()):
-                extra_f["GRUPO AGREGADO"] = tot_f
-            if not pct_f:
-                extra_f["Mediana do grupo"] = med_f
-            full_f = pd.concat([tab_f, pd.DataFrame(extra_f).T.reindex(columns=periodos_f)])
-            full_f.index.name = "Empresa"
-            if pct_f or fmt_f == "pct":
-                cfg_f = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos_f}
-                vis_tab = full_f * 100
-            elif fmt_f == "x":
-                cfg_f = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos_f}
-                vis_tab = full_f
-            else:
-                cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
-                vis_tab = full_f
-            tabela_clicavel(vis_tab, vis_tab.index, "clk_fin", column_config=cfg_f, width="stretch",
-                            height=min(650, 38 + 35 * len(vis_tab)))
-            if agg_f == "cresc":
-                st.caption(("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
-                            "os dois exercícios (amostra casada). Instituições por exercício: " if anual_f else
-                            "Grupo agregado = Σ valor ÷ Σ valor do mesmo período do ano anterior − 1, só com as "
-                            "instituições que têm os dois períodos (amostra casada). Instituições por período: ") +
-                           " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
-            if fmt_f != "mm" and isinstance(agg_f, tuple):
-                st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
-            notas_fin = {
-                "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
-                                     "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
-                                     "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
-                "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
-                                    "pode diferir da carteira ampliada divulgada.",
-                "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
-                "custo_credito": "PDD do período ÷ carteira de crédito bruta no fim do período (aproximação).",
-                "carteira_credito_bruta": "Operações de crédito do balanço, com a provisão somada de volta quando vem "
-                                          "dentro da conta (COSIF). Sob IFRS a conta já é bruta.",
-                "provisao_carteira": "Saldo redutor de PDD / perdas esperadas ligado à carteira. Sob IFRS pode incluir "
-                                     "perdas esperadas de TVM ao custo amortizado.",
-                "tvm": "Títulos e valores mobiliários e derivativos, somando todas as categorias (custo amortizado, "
-                       "VJORA e VJR).",
-                "demais_ativos": "Resíduo: ativo total − carteira líquida − TVM (caixa, aplicações interfinanceiras, "
-                                 "compulsórios, tributos, investimentos etc.).",
-                "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
-                "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
-                                          "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
-                                          "'Carteira de crédito'.",
-                "cresc_pdd": "Despesa de PDD do exercício contra a do anterior, em módulo. Exercícios com reversão "
-                             "líquida (PDD positiva na DRE) e bancos que não abrem a PDD na DRE ficam vazios.",
-            }
-            if ind_f in notas_fin:
-                st.caption("ℹ️ " + notas_fin[ind_f])
-            if fmt_f == "mm":
-                topf = tab_f.index[:10] if not sel_f else tab_f.index
-                plotf = tab_f.loc[topf].T if len(tab_f) else pd.DataFrame()
-                if not sel_f and len(tab_f) > 10:
-                    plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
-                elif sel_f and "Demais do grupo" in extra_f:
-                    plotf["Demais do grupo"] = extra_f["Demais do grupo"]
-                lf = plotf.reset_index(names=nome_per).melt(id_vars=nome_per, var_name="Empresa", value_name="v")
-                fig = px.bar(lf, x=nome_per, y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
-                fig.update_layout(barmode="relative", height=460, legend_title_text="")
+            if not inds_f:
+                st.info("Escolha ao menos um indicador.")
+            tabs_fin = {}
+            for ind_f in inds_f:
+                if len(inds_f) > 1:
+                    st.divider()
+                    st.subheader(rot_ind_f(ind_f))
+                rot_f, fmt_f, agg_f = FIN[ind_f]
+                if not anual_f and ind_f == "p_l":
+                    agg_f = ("valor_mercado", "lucro_12m_pl")
+                pct_f = modo_f == "% do grupo" and fmt_f == "mm"
+                if agg_f == "cresc":
+                    # crescimento do grupo: Σ atual ÷ Σ anterior − 1, só com instituições que têm os dois exercícios
+                    cn_ = CRESC_FIN[ind_f]
+                    ok = ff[(ff[cn_ + "_ant"] > 0) & ff[cn_].notna()]
+                    g_ = ok.groupby("_c")[[cn_, cn_ + "_ant"]].sum()
+                    tot_f = g_[cn_] / g_[cn_ + "_ant"] - 1
+                    n_cresc = ok.groupby("_c")["cnpj"].nunique().reindex(periodos_f).fillna(0).astype(int)
+                elif agg_f == "soma":
+                    tot_f = ff.groupby("_c")[ind_f].sum(min_count=1)
+                elif isinstance(agg_f, tuple):
+                    n_, d_ = agg_f
+                    ok = ff.dropna(subset=[n_, d_])
+                    g_ = ok.groupby("_c")[[n_, d_]].sum()
+                    tot_f = g_[n_].abs() / g_[d_].where(g_[d_] != 0) if ind_f == "custo_credito" else g_[n_] / g_[d_].where(g_[d_] != 0)
+                    if not anual_f and tipo == "trimestral" and ind_f in ("roe", "roa", "custo_credito"):
+                        tot_f = tot_f * 4  # mesmo critério da série por instituição (anualizado ×4)
+                else:
+                    tot_f = pd.Series(dtype=float)
+                tot_f = tot_f.reindex(periodos_f)
+                med_f = ff.groupby("_c")[ind_f].median().reindex(periodos_f)
+                vis_f = ff[ff["rotulo"].isin(sel_f)] if sel_f else ff
+                tab_f = vis_f.pivot_table(index="rotulo", columns="_c", values=ind_f, aggfunc="first").reindex(columns=periodos_f)
+                ultf = [p for p in periodos_f[::-1] if p in tab_f.columns and tab_f[p].notna().any()]
+                if ultf:
+                    tab_f = tab_f.sort_values(ultf[0], ascending=False)
                 if pct_f:
-                    fig.update_yaxes(tickformat=".0%")
-            elif agg_f == "cresc":
-                # crescimento acumulado, base 100 no primeiro exercício (mesma lógica da Visão do setor): uma linha por
-                # instituição (valor ÷ primeiro valor × 100) e o agregado do grupo encadeado em amostra casada
-                cn_ = CRESC_FIN[ind_f]
-                niv_f = ff.pivot_table(index="rotulo", columns="_c", values=cn_, aggfunc="first").reindex(columns=periodos_f)
-                idx_f = {}
-                for r in (tab_f.index if sel_f else niv_f.index):
-                    if r not in niv_f.index:
-                        continue
-                    v = niv_f.loc[r]
-                    ini = v.first_valid_index()
-                    if ini is None or v[ini] <= 0:
-                        continue
-                    idx = 100 * v / v[ini]
-                    neg = idx[idx <= 0].index
-                    if len(neg):  # base negativa no meio da série: o índice deixa de ter leitura
-                        idx[idx.index >= neg[0]] = np.nan
-                    idx_f[r] = idx
-                if periodos_f:
-                    idx_f["Agregado do grupo"] = indice_acumulado(niv_f)
-                nomes_f = list(idx_f)
-                ult_pf = ultf[0] if ultf and ultf[0] in niv_f.columns else (periodos_f[-1] if periodos_f else None)
-                tam_f = niv_f[ult_pf].sort_values(ascending=False) if ult_pf else pd.Series(dtype=float)
-                padrao_f = [r for r in (tab_f.index if sel_f else tam_f.index[:12]) if r in idx_f]
-                padrao_f += [n for n in ("Agregado do grupo",) if n in idx_f]
-                chave_lf = f"fin_cres_linhas_{ind_f}_{grp}_" + str(abs(hash((tuple(sel_f), tuple(periodos_f)))))
-                sel_lf = st.multiselect("Linhas no gráfico", nomes_f, default=padrao_f, key=chave_lf,
-                                        help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-                fig = go.Figure()
-                for nome in sel_lf:
-                    y = idx_f[nome]
-                    fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
-                                             name=nome.split(" — ")[0] if " — " in nome else nome,
-                                             line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
-                fig.add_hline(y=100, line_dash="dot", line_color="gray")
-                fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro " + ("exercício" if anual_f else "período"),
-                                  title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
-            else:
-                fig = go.Figure()
-                for r in tab_f.index[:10]:
-                    fig.add_trace(go.Scatter(x=periodos_f, y=tab_f.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
-                if len(tot_f.dropna()):
-                    fig.add_trace(go.Scatter(x=periodos_f, y=tot_f, mode="lines", name="Grupo agregado", line=dict(width=4, dash="dash")))
-                fig.add_trace(go.Scatter(x=periodos_f, y=med_f, mode="lines", name="Mediana", line=dict(dash="dot")))
-                fig.update_layout(height=460, legend_title_text="")
-                if fmt_f == "pct":
-                    fig.update_yaxes(tickformat=".0%")
-            if not anual_f:
-                fig.update_xaxes(type="category", categoryorder="array", categoryarray=periodos_f)
-            st.plotly_chart(fig, width="stretch")
-            if agg_f == "cresc":
-                st.caption("Uma linha por instituição: valor ÷ valor do primeiro período × 100; a linha é interrompida "
-                           "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
-                           "amostra casada. A tabela acima mostra o crescimento de cada período contra o mesmo período "
-                           "do ano anterior.")
-            ex_f = full_f.reset_index()
-            c1, c2 = st.columns(2)
-            c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                               file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key="fin_csv")
+                    tab_f = tab_f.div(tot_f, axis=1)
+                extra_f = {}
+                if fmt_f == "mm":
+                    if sel_f:
+                        dem = tot_f - vis_f.groupby("_c")[ind_f].sum(min_count=1).reindex(periodos_f).fillna(0)
+                        extra_f["Demais do grupo"] = dem / tot_f if pct_f else dem
+                    extra_f["TOTAL DO GRUPO"] = tot_f / tot_f if pct_f else tot_f
+                elif len(tot_f.dropna()):
+                    extra_f["GRUPO AGREGADO"] = tot_f
+                if not pct_f:
+                    extra_f["Mediana do grupo"] = med_f
+                full_f = pd.concat([tab_f, pd.DataFrame(extra_f).T.reindex(columns=periodos_f)])
+                full_f.index.name = "Empresa"
+                if pct_f or fmt_f == "pct":
+                    cfg_f = {p: st.column_config.NumberColumn(p, format="%.1f%%") for p in periodos_f}
+                    vis_tab = full_f * 100
+                elif fmt_f == "x":
+                    cfg_f = {p: st.column_config.NumberColumn(p, format="%.2fx") for p in periodos_f}
+                    vis_tab = full_f
+                else:
+                    cfg_f = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos_f}
+                    vis_tab = full_f
+                tabela_clicavel(vis_tab, vis_tab.index, f"clk_fin_{ind_f}", column_config=cfg_f, width="stretch",
+                                height=min(650, 38 + 35 * len(vis_tab)))
+                if agg_f == "cresc":
+                    st.caption(("Grupo agregado = Σ valor ÷ Σ valor do exercício anterior − 1, só com as instituições que têm "
+                                "os dois exercícios (amostra casada). Instituições por exercício: " if anual_f else
+                                "Grupo agregado = Σ valor ÷ Σ valor do mesmo período do ano anterior − 1, só com as "
+                                "instituições que têm os dois períodos (amostra casada). Instituições por período: ") +
+                               " · ".join(f"{p}: {n}" for p, n in n_cresc.items()) + ".")
+                if fmt_f != "mm" and isinstance(agg_f, tuple):
+                    st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
+                notas_fin = {
+                    "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
+                                         "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
+                                         "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
+                    "carteira_credito": "Aproximação pelas contas de operações de crédito / empréstimos a clientes do balanço; "
+                                        "pode diferir da carteira ampliada divulgada.",
+                    "despesa_pdd": "Vazio quando a PDD não aparece separada na DRE (ex.: Santander).",
+                    "custo_credito": "PDD do período ÷ carteira de crédito bruta no fim do período (aproximação).",
+                    "carteira_credito_bruta": "Operações de crédito do balanço, com a provisão somada de volta quando vem "
+                                              "dentro da conta (COSIF). Sob IFRS a conta já é bruta.",
+                    "provisao_carteira": "Saldo redutor de PDD / perdas esperadas ligado à carteira. Sob IFRS pode incluir "
+                                         "perdas esperadas de TVM ao custo amortizado.",
+                    "tvm": "Títulos e valores mobiliários e derivativos, somando todas as categorias (custo amortizado, "
+                           "VJORA e VJR).",
+                    "demais_ativos": "Resíduo: ativo total − carteira líquida − TVM (caixa, aplicações interfinanceiras, "
+                                     "compulsórios, tributos, investimentos etc.).",
+                    "cresc_pl_controladores": "PL dos controladores (PL total − não controladores), mesmo critério do ROE.",
+                    "cresc_carteira_credito": "Carteira aproximada pelo balanço: quebras de captura (conta que muda de nome "
+                                              "ou exercício sem dado) aparecem como saltos ou lacunas; confira os níveis em "
+                                              "'Carteira de crédito'.",
+                    "cresc_pdd": "Despesa de PDD do exercício contra a do anterior, em módulo. Exercícios com reversão "
+                                 "líquida (PDD positiva na DRE) e bancos que não abrem a PDD na DRE ficam vazios.",
+                }
+                if ind_f in notas_fin:
+                    st.caption("ℹ️ " + notas_fin[ind_f])
+                if fmt_f == "mm":
+                    topf = tab_f.index[:10] if not sel_f else tab_f.index
+                    plotf = tab_f.loc[topf].T if len(tab_f) else pd.DataFrame()
+                    if not sel_f and len(tab_f) > 10:
+                        plotf["Demais"] = tab_f.drop(index=topf).sum(min_count=1)
+                    elif sel_f and "Demais do grupo" in extra_f:
+                        plotf["Demais do grupo"] = extra_f["Demais do grupo"]
+                    lf = plotf.reset_index(names=nome_per).melt(id_vars=nome_per, var_name="Empresa", value_name="v")
+                    fig = px.bar(lf, x=nome_per, y="v", color="Empresa", labels={"v": "% do grupo" if pct_f else rot_f + " (R$ mm)"})
+                    fig.update_layout(barmode="relative", height=460, legend_title_text="")
+                    if pct_f:
+                        fig.update_yaxes(tickformat=".0%")
+                elif agg_f == "cresc":
+                    # crescimento acumulado, base 100 no primeiro exercício (mesma lógica da Visão do setor): uma linha por
+                    # instituição (valor ÷ primeiro valor × 100) e o agregado do grupo encadeado em amostra casada
+                    cn_ = CRESC_FIN[ind_f]
+                    niv_f = ff.pivot_table(index="rotulo", columns="_c", values=cn_, aggfunc="first").reindex(columns=periodos_f)
+                    idx_f = {}
+                    for r in (tab_f.index if sel_f else niv_f.index):
+                        if r not in niv_f.index:
+                            continue
+                        v = niv_f.loc[r]
+                        ini = v.first_valid_index()
+                        if ini is None or v[ini] <= 0:
+                            continue
+                        idx = 100 * v / v[ini]
+                        neg = idx[idx <= 0].index
+                        if len(neg):  # base negativa no meio da série: o índice deixa de ter leitura
+                            idx[idx.index >= neg[0]] = np.nan
+                        idx_f[r] = idx
+                    if periodos_f:
+                        idx_f["Agregado do grupo"] = indice_acumulado(niv_f)
+                    nomes_f = list(idx_f)
+                    ult_pf = ultf[0] if ultf and ultf[0] in niv_f.columns else (periodos_f[-1] if periodos_f else None)
+                    tam_f = niv_f[ult_pf].sort_values(ascending=False) if ult_pf else pd.Series(dtype=float)
+                    padrao_f = [r for r in (tab_f.index if sel_f else tam_f.index[:12]) if r in idx_f]
+                    padrao_f += [n for n in ("Agregado do grupo",) if n in idx_f]
+                    chave_lf = f"fin_cres_linhas_{ind_f}_{grp}_" + str(abs(hash((tuple(sel_f), tuple(periodos_f)))))
+                    sel_lf = st.multiselect("Linhas no gráfico", nomes_f, default=padrao_f, key=chave_lf,
+                                            help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                    fig = go.Figure()
+                    for nome in sel_lf:
+                        y = idx_f[nome]
+                        fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                                 name=nome.split(" — ")[0] if " — " in nome else nome,
+                                                 line=dict(width=4, dash="dash") if nome == "Agregado do grupo" else None))
+                    fig.add_hline(y=100, line_dash="dot", line_color="gray")
+                    fig.update_layout(height=460, legend_title_text="", yaxis_title="Base 100 = primeiro " + ("exercício" if anual_f else "período"),
+                                      title=f"{ROT_NIVEL_FIN[cn_]}: crescimento acumulado (base 100)")
+                else:
+                    fig = go.Figure()
+                    for r in tab_f.index[:10]:
+                        fig.add_trace(go.Scatter(x=periodos_f, y=tab_f.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+                    if len(tot_f.dropna()):
+                        fig.add_trace(go.Scatter(x=periodos_f, y=tot_f, mode="lines", name="Grupo agregado", line=dict(width=4, dash="dash")))
+                    fig.add_trace(go.Scatter(x=periodos_f, y=med_f, mode="lines", name="Mediana", line=dict(dash="dot")))
+                    fig.update_layout(height=460, legend_title_text="")
+                    if fmt_f == "pct":
+                        fig.update_yaxes(tickformat=".0%")
+                if not anual_f:
+                    fig.update_xaxes(type="category", categoryorder="array", categoryarray=periodos_f)
+                st.plotly_chart(fig, width="stretch", key=f"fin_fig_{ind_f}")
+                if agg_f == "cresc":
+                    st.caption("Uma linha por instituição: valor ÷ valor do primeiro período × 100; a linha é interrompida "
+                               "se o valor fica zero ou negativo. 'Agregado do grupo' encadeia a soma das instituições em "
+                               "amostra casada. A tabela acima mostra o crescimento de cada período contra o mesmo período "
+                               "do ano anterior.")
+                ex_f = full_f.reset_index()
+                tabs_fin[f"{len(tabs_fin) + 1}. {rot_f}"] = ex_f
+                c1, c2 = st.columns(2)
+                c1.download_button("⬇️ Tabela (CSV)", ex_f.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                                   file_name=f"financeiro_{ind_f}.csv", mime="text/csv", key=f"fin_csv_{ind_f}")
             bruto_f = ff.drop(columns=["_c", "rotulo", "nivel_pdd"] + [c for c in ff.columns if c.endswith("_ant")],
                               errors="ignore")
-            c2.download_button("⬇️ Base completa do grupo (XLSX)", excel_bytes({"tabela": ex_f, "base": bruto_f}),
-                               file_name="financeiro_base.xlsx", key="fin_xlsx",
+            st.download_button("⬇️ Base completa do grupo (XLSX: uma aba por indicador + base)",
+                               excel_bytes({**tabs_fin, "base": bruto_f}), file_name="financeiro_base.xlsx", key="fin_xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # -------- Juros: estrutura a termo (ANBIMA)
