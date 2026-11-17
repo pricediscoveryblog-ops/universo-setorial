@@ -17,7 +17,6 @@ import json
 import os
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -46,8 +45,6 @@ ROTULOS_EUA = {
     "ev_ebitda_ifrs16": "EV/EBITDA equiv. IFRS 16 (c/ arrend.)",
     "ev_ebitda_pre_ifrs16": "EV/EBITDA após arrend. financeiros (s/ arrend.)",
     "dividend_yield": "Dividend yield (dividendos pagos 12m)",
-    "roic_caixa": "ROIC caixa (NOPAT + D&A − capex org. − arrend. financ. ÷ CI)",
-    "roic_trad": "ROIC tradicional (NOPAT aj. ÷ CI c/ arrendamentos)",
 }
 # métricas que só existem na base americana (entram na lista do app no modo EUA)
 EXTRAS_EUA = {
@@ -58,7 +55,8 @@ EXTRAS_EUA = {
     "retorno_acionista_caixa": ("Retorno ao acionista (dividendos + recompra − emissão)", "mm", "Caixa e investimento"),
 }
 # métricas brasileiras sem equivalente na SEC (FCO comparável e frota): saem da lista no modo EUA
-SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido"]
+SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido",
+                   "roic_caixa", "roic_trad"]   # ROIC: só Brasil por enquanto
 
 
 def ajustar_metricas(metricas: dict, agreg: dict) -> None:
@@ -144,9 +142,6 @@ COLUNAS = [
     "clientes", "estoques", "fornecedores", "cpv", "margem_bruta", "margem_ebitda", "margem_ebitda_pre_ifrs16",
     "margem_liquida", "roe_pl_final", "capex_org_receita", "capex_org_da", "div_liq_ebitda_ifrs16",
     "div_liq_ebitda_pre_ifrs16"]
-# só para o ROIC (lidas se existirem no parquet; saem da base depois do cálculo)
-COLUNAS_ROIC = ["passivo_arrend_financeiro", "passivo_arrend_operacional", "pag_arrend_principal",
-                "pag_arrend_juros", "custo_arrend_operacional"]
 
 
 def compactar(df: pd.DataFrame) -> pd.DataFrame:
@@ -184,13 +179,7 @@ def base_como_br() -> pd.DataFrame:
     # filtros já na leitura (datas ISO comparam como texto) e junção no Arrow: uma única conversão para pandas,
     # sem cópias intermediárias (pico de memória menor)
     filtros = [("dt_fim", ">=", INICIO.strftime("%Y-%m-%d")), ("tipo_especial", "!=", "financeira")]
-    tabs = []
-    for a in ARQUIVOS:
-        buf = _baixar(a)
-        nomes = set(pq.read_schema(io.BytesIO(buf)).names)  # parquet antigo sem as colunas do ROIC: não cai
-        tabs.append(pq.read_table(io.BytesIO(buf), columns=COLUNAS + [c for c in COLUNAS_ROIC if c in nomes],
-                                  filters=filtros))
-        del buf
+    tabs = [pq.read_table(io.BytesIO(_baixar(a)), columns=COLUNAS, filters=filtros) for a in ARQUIVOS]
     t = pa.concat_tables(tabs, promote_options="permissive")
     del tabs
     b = t.to_pandas(self_destruct=True)
@@ -233,60 +222,8 @@ def base_como_br() -> pd.DataFrame:
     return b
 
 
-# ------------------------------------------------------------------ ROIC (US GAAP / ASC 842)
-# Mesma variante Price Discovery da base brasileira (app.calc_roic, IFRS 16), ajustada ao tratamento de
-# arrendamentos dos EUA. No ASC 842 o arrendamento OPERACIONAL continua no opex (o EBIT já desconta o aluguel e a
-# D&A não inclui a amortização do direito de uso); só o FINANCEIRO segue a lógica do IFRS 16 (amortização na D&A,
-# juros abaixo do EBIT).
-# NOPAT = EBIT × (1 − 25%) se EBIT > 0 (21% federal + média estadual; sem crédito fiscal sobre prejuízo)
-# ROIC caixa = (NOPAT + D&A − capex orgânico − pagamentos de arrend. financeiro) ÷ (DL s/ arrend. + PL)
-#   operacional: custo já no EBIT, fora do capital. Sem pagamento de arrend. financeiro na DFC e com passivo
-#   financeiro: 2,5 × passivo financeiro entra no capital (mesmo fallback da base brasileira)
-# ROIC tradicional = NOPAT ajustado ÷ (DL s/ arrend. + passivo de arrend. financeiro + operacional + PL)
-#   NOPAT ajustado: EBIT + juros implícitos do arrend. operacional (passivo operacional × custo da dívida da
-#   empresa = juros pagos ÷ dívida bruta, limitado a 3%–12%; sem dado, 6%; nunca acima do custo de arrend.
-#   operacional divulgado) — deixa o EBIT no critério do IFRS 16, como na base brasileira.
-# Capital no fim do período; vazio no trimestral (fluxo de 1 trimestre) e com capital ≤ 0.
-ALIQ_IR_EUA = 0.25
-MULT_ARREND_FALLBACK = 2.5
-TAXA_ARREND_OP_PADRAO = 0.06
-TAXA_ARREND_OP_LIM = (0.03, 0.12)
-
-
 def calc_roic(b: pd.DataFrame) -> pd.DataFrame:
-    """ROIC caixa e tradicional (float32). Coluna ausente ou qualquer erro -> métricas vazias (o app não cai)."""
-    try:
-        vazio = pd.Series(np.nan, index=b.index, dtype="float32")  # float32: base grande, memória curta
-
-        def num(c):
-            return pd.to_numeric(b[c], errors="coerce").astype("float32") if c in b.columns else vazio
-
-        ebit, da, capex = num("ebit"), num("da"), num("capex_organico")
-        pl, dl = num("patrimonio_liquido"), num("div_liq_sem_arrend")
-        p_fin, p_op = num("passivo_arrend_financeiro").fillna(0), num("passivo_arrend_operacional").fillna(0)
-        pag_fin = num("pagamento_arrendamento").fillna(0)  # coletor: principal + juros do arrend. financeiro
-        sem_pag = (num("pag_arrend_principal").isna() & num("pag_arrend_juros").isna()) \
-            if "pag_arrend_principal" in b.columns else pd.Series(False, index=b.index)
-        capitaliza = sem_pag & (p_fin > 0)
-        nopat = ebit.where(ebit <= 0, ebit * (1 - ALIQ_IR_EUA))
-        num_caixa = nopat + da - capex - pag_fin
-        ci_caixa = dl + pl + (MULT_ARREND_FALLBACK * p_fin).where(capitaliza, 0)
-        divida = num("divida_bruta_ex_arrend")
-        taxa = (num("juros_pagos").abs() / divida.where(divida > 0)).clip(*TAXA_ARREND_OP_LIM) \
-            .fillna(TAXA_ARREND_OP_PADRAO)
-        juros_op = p_op * taxa
-        custo_op = num("custo_arrend_operacional")
-        juros_op = juros_op.where(custo_op.isna(), np.minimum(juros_op, custo_op.clip(lower=0)))
-        ebit_aj = ebit + juros_op
-        nopat_aj = ebit_aj.where(ebit_aj <= 0, ebit_aj * (1 - ALIQ_IR_EUA))
-        ci_trad = dl + p_fin + p_op + pl
-        fluxo_ok = b["tipo"].astype(str) != "trimestral"
-        b["roic_caixa"] = (num_caixa / ci_caixa.where(ci_caixa > 0)).where(fluxo_ok).astype("float32")
-        b["roic_trad"] = (nopat_aj / ci_trad.where(ci_trad > 0)).where(fluxo_ok).astype("float32")
-    except Exception:
-        b["roic_caixa"] = np.float32(np.nan)
-        b["roic_trad"] = np.float32(np.nan)
-    b.drop(columns=[c for c in COLUNAS_ROIC if c in b.columns], inplace=True)  # sem cópia da base
+    """ROIC da base americana desligado temporariamente (memória do Streamlit gratuito): devolve a base como está."""
     return b
 
 
@@ -374,17 +311,6 @@ e tende a ficar abaixo da brasileira por incluir os juros.
 **Cobertura da dívida.** Mesmas fórmulas da base brasileira; *arrend.* = pagamentos de arrendamento financeiro; IR =
 imposto de renda pago (divulgação suplementar do fluxo de caixa; muitas empresas só divulgam no 10-K, então os
 índices trimestrais/LTM podem ficar vazios).
-
-**ROIC (variante Price Discovery, ajustada ao US GAAP).** NOPAT = EBIT × (1 − 25%) quando o EBIT é positivo
-(21% federal + média dos impostos estaduais; sem crédito fiscal sobre prejuízo). Capital no fim do período; vazio no
-trimestral e com capital ≤ 0. Como o arrendamento operacional fica no opex (ASC 842), ele já está descontado no EBIT:
-- ROIC caixa = (NOPAT + D&A − capex orgânico − pagamentos de arrendamento financeiro) ÷ (DL s/ arrendamento + PL).
-  Sem pagamento de arrendamento financeiro divulgado e com passivo financeiro, 2,5 × esse passivo entra no capital.
-- ROIC tradicional = NOPAT ajustado ÷ (DL s/ arrendamento + passivos de arrendamento financeiro e operacional + PL).
-  NOPAT ajustado soma ao EBIT os juros implícitos do arrendamento operacional (passivo operacional × custo da dívida da
-  empresa, juros pagos ÷ dívida bruta, entre 3% e 12%; sem dado, 6%; nunca acima do custo de arrendamento operacional
-  divulgado), para o EBIT ficar no critério do IFRS 16 e comparável ao ROIC tradicional brasileiro.
-- Sem ajuste de goodwill (igual à base brasileira).
 
 **Dívida e caixa.** Dívida bruta = LongTermDebt (inclui a parcela corrente) + empréstimos de curto prazo +
 commercial paper (com alternativas por empresa). Caixa = caixa e equivalentes + aplicações de curto prazo.
