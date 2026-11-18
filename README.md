@@ -39,6 +39,11 @@ na B3 (exceto setor financeiro) e grava em `saidas/universo/`:
 - `diagnostico_dfc.csv.gz` — linhas da DFC dos anos em que a busca não achou D&A, capex ou
   pagamento de arrendamento (para calibrar os filtros).
 
+Concessões do modelo do intangível (segmentos rodovias, saneamento, apoio e armazenagem, ferrovias e hidrovias;
+`SEG_CONSTRUCAO` em `universo.py`): a receita de construção (ICPC 01) sai da receita e do CPV, e a margem de
+construção sai do lucro bruto, EBIT, EBITDA e (líquida de 34% de IR/CS) do lucro líquido. Fonte: subconta da DRE →
+DVA 7.01.03 → custo da DRE + margem da DFC. Reportados em `*_reportado(a)`; origem em `fonte_construcao`.
+
 `sucessoes.yaml` emenda séries de empresas que trocaram de CNPJ (ex.: JBS S.A. → JBS N.V.).
 Se o CNPJ informado pela B3 não existir no cadastro da CVM, o universo usa o CNPJ de mesma raiz.
 

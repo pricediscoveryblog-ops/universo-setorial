@@ -47,7 +47,7 @@ B3_CACHE_DIAS = int(os.environ.get("B3_CACHE_DIAS", "30"))
 B3_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36", "Accept": "application/json"}
 B3_NAO_CLASSIF = "nao classificados"
-DEMOS = ["DRE", "BPA", "BPP", "DFC_MI", "DFC_MD"]
+DEMOS = ["DRE", "BPA", "BPP", "DFC_MI", "DFC_MD", "DVA"]  # DVA: receita de construção (7.01.03) das concessões
 COLS = ["CNPJ_CIA", "DT_REFER", "VERSAO", "DENOM_CIA", "ESCALA_MOEDA",
         "ORDEM_EXERC", "DT_INI_EXERC", "DT_FIM_EXERC", "CD_CONTA", "DS_CONTA", "VL_CONTA"]
 LIMIAR_REAPRES = 0.005  # 0,5% de diferença entre original e reapresentado
@@ -425,6 +425,17 @@ RX_FCO_REC = re.compile(r"\breceb(?:ido|idos|ida|idas|imentos?)\b|recebiment")
 RX_FCO_ACCR = re.compile(r"a pagar|a recolher|\bretid|a receber|provis|apropri|incorrid|capitaliz|acruad|nao pag|nao receb|"
                          r"propost|calculad|variac|atualizac|reversa|declarad|deliberad|descontinuad")
 RX_FCO_ACCR_FORTE = re.compile(r"provis|apropri|incorrid|capitaliz|acruad|nao pag|nao receb|variac")
+# Concessões (ICPC 01 / modelo do intangível): receita e custo de construção da infraestrutura
+RX_CONSTR = re.compile(r"constru")
+RX_CONSTR_EXC = re.compile(r"construcao civil|incorpora|imobiliari|provis|perda|ineficien|naval|embarcac|manutenc")
+RX_MARGEM_CONSTR = re.compile(r"margem.{0,40}constru")
+RX_MARGEM_CONSTR_EXC = re.compile(r"transmiss|remunerac|ativos? de contrato|operac")
+IR_CS_CONSTRUCAO = 0.34  # alíquota nominal de IR + CS usada para retirar a margem de construção do lucro líquido
+# campos reportados preservados antes do ajuste de construção (o principal passa a ser o ajustado)
+REPORTADOS = {"receita": "receita_reportada", "cpv": "cpv_reportado", "lucro_bruto": "lucro_bruto_reportado",
+              "ebit": "ebit_reportado", "ebitda": "ebitda_reportado",
+              "ebitda_pre_ifrs16": "ebitda_pre_ifrs16_reportado", "lucro_liquido": "lucro_liquido_reportado",
+              "lucro_controladores": "lucro_controladores_reportado"}
 
 
 def classe_jur_div_fco(desc: str, vl: float, ajuste_nao_caixa: bool):
@@ -799,8 +810,128 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
         m["ebitda_pre_ifrs16"] = np.nan
         notas.append("pagamento de arrendamento não identificado")
 
+    # Construção (concessões): valores identificados; o ajuste só é aplicado no universo (ajustar_construcao)
+    m.update(construcao(sub, m["receita"], registrar))
+    for k, rep in REPORTADOS.items():
+        m[rep] = m.get(k)
+
     derivadas(m)
     m["notas"] = "; ".join(notas)
+    return m
+
+
+def _nz(x):
+    """NaN para ausente ou zero (linha que existe na DFP, mas vem zerada)."""
+    return x if pd.notna(x) and abs(x) > 1e-9 else np.nan
+
+
+def construcao(sub: pd.DataFrame, receita_dre, registrar=None) -> dict:
+    """Receita e custo de construção de infraestrutura de concessão (ICPC 01), em R$ mm, positivos.
+    Ordem de busca:
+      receita: DRE (subconta de 3.01 com "construção") > DVA (7.01.xx com "construção", só quando a receita
+               líquida da DRE a comporta: DRE − construção entre 70% e 105% das vendas brutas da DVA, e DRE acima
+               das vendas brutas ou custo de construção nos insumos da DVA) > custo + margem da DFC
+      custo:   DRE (subconta de 3.02) > receita − margem da DFC > DVA (insumo 7.02.xx) > receita (sem margem)
+      margem da DFC: ajuste não-caixa "margem de construção" (6.01.xx), com sinal trocado
+    """
+    def linhas(demo, rx_cod):
+        d = sub[(sub["DEMO"] == demo) & sub["CD_CONTA"].str.match(rx_cod) & sub["DESC"].str.contains(RX_CONSTR)
+                & ~sub["DESC"].str.contains(RX_CONSTR_EXC)]
+        return topo(d)
+
+    def soma(rows):
+        return _nz(rows["VL"].sum()) if len(rows) else np.nan
+
+    r_dre_l, c_dre_l = linhas("DRE", r"^3\.01\."), linhas("DRE", r"^3\.02\.")
+    r_dva_l, c_dva_l = linhas("DVA", r"^7\.01\."), linhas("DVA", r"^7\.02\.")
+    r_dre, c_dre = soma(r_dre_l), soma(c_dre_l)
+    r_dva, c_dva = soma(r_dva_l), soma(c_dva_l)
+    c_dre = -c_dre if pd.notna(c_dre) else np.nan
+    c_dva = -c_dva if pd.notna(c_dva) else np.nan
+    dfc = sub[sub["DEMO"].isin(["DFC_MI", "DFC_MD"]) & sub["CD_CONTA"].str.match(r"^6\.01\.")]
+    mg_l = topo(dfc[dfc["DESC"].str.contains(RX_MARGEM_CONSTR) & ~dfc["DESC"].str.contains(RX_MARGEM_CONSTR_EXC)])
+    mg = mg_l["VL"].sum() if len(mg_l) else np.nan
+    mg = -mg if pd.notna(mg) else np.nan  # na DFC a margem é deduzida do lucro (valor negativo)
+
+    # DVA: a receita de construção de ativos próprios nem sempre está na DRE (ex.: ferrovias que constroem o
+    # próprio imobilizado). Só vale quando a receita líquida da DRE a comporta.
+    if pd.notna(r_dva):
+        vendas = conta(sub, "DVA", "7.01.01")
+        # a construção cabe na receita da DRE (receita líquida − construção = 70% a 105% das vendas brutas) e há
+        # evidência de que passa pelo resultado: receita líquida acima das vendas brutas ou custo de construção
+        # nos insumos da DVA
+        ok = pd.notna(receita_dre) and pd.notna(vendas) and vendas > 0 and \
+            0.70 <= (receita_dre - r_dva) / vendas <= 1.05 and (receita_dre > vendas or pd.notna(c_dva))
+        if not ok:
+            r_dva = c_dva = np.nan
+    fonte = []
+    rc, cc = r_dre, c_dre
+    if pd.notna(rc):
+        fonte.append("receita DRE")
+        if registrar:
+            registrar(r_dre_l, "receita_construcao")
+    elif pd.notna(r_dva):
+        rc = r_dva
+        fonte.append("receita DVA")
+        if registrar:
+            registrar(r_dva_l, "receita_construcao")
+    if pd.notna(cc):
+        fonte.append("custo DRE")
+        if registrar:
+            registrar(c_dre_l, "custo_construcao")
+    elif pd.notna(c_dva) and pd.notna(rc) and pd.isna(mg):  # com margem na DFC, custo = receita − margem
+        cc = c_dva
+        fonte.append("custo DVA")
+        if registrar:
+            registrar(c_dva_l, "custo_construcao")
+    if pd.notna(mg) and registrar:
+        registrar(mg_l, "margem_construcao_dfc")
+    m0 = mg if pd.notna(mg) else 0.0
+    if pd.isna(rc) and pd.notna(cc):
+        rc = cc + m0
+        fonte.append("receita = custo + margem DFC" if pd.notna(mg) else "receita = custo (sem margem)")
+    elif pd.notna(rc) and pd.isna(cc):
+        cc = rc - m0
+        fonte.append("custo = receita − margem DFC" if pd.notna(mg) else "custo = receita (sem margem)")
+    elif pd.isna(rc) and pd.notna(mg):
+        fonte.append("só margem DFC")
+    return {"receita_construcao": rc, "custo_construcao": cc, "margem_construcao_dfc": mg,
+            "fonte_construcao": "; ".join(fonte)}
+
+
+def ajustar_construcao(m: dict, ativo: bool) -> dict:
+    """Retira a construção da concessão dos resultados (só quando ativo=True, concessões do modelo intangível).
+    Receita líquida e CPV saem pelo valor da construção; lucro bruto, EBIT e EBITDA saem pela margem
+    (receita − custo); lucro líquido sai pela margem líquida de IR/CS (34%). Sem receita de construção
+    identificada, mas com margem na DFC, só a margem sai dos lucros (a receita fica a reportada).
+    Idempotente: parte sempre dos campos *_reportado*."""
+    for k, rep in REPORTADOS.items():
+        if pd.isna(m.get(rep)) and pd.notna(m.get(k)):
+            m[rep] = m[k]
+        m[k] = m.get(rep)
+    m["margem_construcao"] = 0.0
+    if not ativo:
+        return m
+    rc, cc, mg = m.get("receita_construcao"), m.get("custo_construcao"), m.get("margem_construcao_dfc")
+    rc = rc if rc is not None and pd.notna(rc) else np.nan
+    cc = cc if cc is not None and pd.notna(cc) else np.nan
+    if pd.notna(rc) and pd.notna(cc):
+        marg = rc - cc
+        for k, v in (("receita", rc), ("cpv", cc)):
+            if pd.notna(m.get(k)):
+                m[k] = m[k] - v
+    elif mg is not None and pd.notna(mg):
+        marg = mg
+    else:
+        return m
+    m["margem_construcao"] = marg
+    if marg:
+        for k in ("lucro_bruto", "ebit", "ebitda", "ebitda_pre_ifrs16"):
+            if pd.notna(m.get(k)):
+                m[k] = m[k] - marg
+        for k in ("lucro_liquido", "lucro_controladores"):
+            if pd.notna(m.get(k)):
+                m[k] = m[k] - marg * (1 - IR_CS_CONSTRUCAO)
     return m
 
 

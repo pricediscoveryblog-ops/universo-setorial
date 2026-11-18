@@ -38,7 +38,15 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "aquisicoes_participacoes", "capex_total", "capex_total_liquido", "ativo_contrato_no_fco",
           "fcl_pos_arrend", "dividendos_pagos", "resultado_financeiro", "receitas_financeiras",
           "despesas_financeiras", "ir_csll_pagos", "juros_pagos", "principal_pago", "servico_divida_pago",
-          "servico_div_arrend_misto", "capex_frota_fco", "baixa_frota_valor_contabil", "capex_frota_liquido"]
+          "servico_div_arrend_misto", "capex_frota_fco", "baixa_frota_valor_contabil", "capex_frota_liquido",
+          # construção de concessões (ICPC 01) e valores reportados antes do ajuste
+          "receita_construcao", "custo_construcao", "margem_construcao_dfc",
+          *cs.REPORTADOS.values()]
+# Segmentos B3 de concessões do modelo do intangível (sem ativo financeiro da concessão): a construção sai da
+# receita, do CPV e dos lucros (cs.ajustar_construcao). Energia elétrica fica de fora (transmissão = ativo de
+# contrato/financeiro; distribuição = bifurcação com ativo financeiro indenizável).
+SEG_CONSTRUCAO = {"exploracao de rodovias", "agua e saneamento", "servicos de apoio e armazenagem",
+                  "transporte ferroviario", "transporte hidroviario"}
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
@@ -203,7 +211,7 @@ def snapshots(df: pd.DataFrame, doc: str, aud: list) -> list[dict]:
     for (cnpj, _dt_ref, ordem), g in df.groupby(["CNPJ_NUM", "DT_REFER", "ORDEM"], sort=False):
         base = "con" if ((g["BASE"] == "con") & (g["DEMO"] == "DRE")).any() else "ind"
         g = g[g["BASE"] == base]
-        fluxo = g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD"])
+        fluxo = g["DEMO"].isin(["DRE", "DFC_MI", "DFC_MD", "DVA"])
         if not fluxo.any() or g.loc[fluxo, "DT_INI"].isna().all():
             continue
         dt_ini = g.loc[fluxo, "DT_INI"].min()           # início do exercício (acumulado no ano)
@@ -244,6 +252,7 @@ def _linha(s: dict, tipo: str, m: dict, periodo: str, fonte: str, notas: list) -
             "periodo": periodo, "dt_ini": s["dt_ini"].date(), "dt_fim": s["dt_fim"].date(),
             "fonte": fonte, "base": s["base"], "regime_contabil": m.get("regime_contabil"),
             **{k: m.get(k) for k in FLUXOS + ESTOQUES + DERIVADAS},
+            "margem_construcao": m.get("margem_construcao"), "fonte_construcao": m.get("fonte_construcao") or "",
             "notas": "; ".join(x for x in extra if x)}
 
 
@@ -256,8 +265,14 @@ DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta",
              "dscr_pos_capex", "dscr_capex_arrend_den", "dscr_ebitda_arrend_den"]
 
 
-def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
-    """Retorna (linhas, auditoria, info) para uma empresa."""
+def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False) -> tuple[list, list, list]:
+    """Retorna (linhas, auditoria, info) para uma empresa. construcao=True: concessão do modelo do intangível,
+    a construção sai da receita, do CPV e dos lucros (ver cs.ajustar_construcao)."""
+    def ajc(m):
+        m = cs.ajustar_construcao(m, construcao)
+        if construcao and not m.get("fonte_construcao"):
+            m["fonte_construcao"] = "não identificada (DRE/DVA/DFC)"
+        return m
     linhas, aud = [], []
     dfp = [s for s in snaps if s["doc"] == "DFP"]
     itr = [s for s in snaps if s["doc"] == "ITR"]
@@ -272,7 +287,7 @@ def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
     anos = sorted(anual)[-n_anos:]
     for ex in anos:
         s = anual[ex]
-        m = cs.derivadas(dict(s["m"]), anual=True)
+        m = cs.derivadas(ajc(dict(s["m"])), anual=True)
         linhas.append(_linha(s, "anual", m, str(ex), f"DFP {s['arq_ano']} ({s['tipo']})", []))
         aud += [{**a, "periodo": str(ex), "tipo_linha": "anual"} for a in s["aud"]]
     ano_min = anos[0] if anos else 9999
@@ -303,7 +318,7 @@ def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
         if neg:
             notas.append("trimestre implausível (negativo): " + ", ".join(neg) +
                          " — provável mudança de conta entre acumulados")
-        m = cs.derivadas(m, anual=False)
+        m = cs.derivadas(ajc(m), anual=False)
         periodo = f"{k}T{str(ex)[2:]}"
         fonte = f"{s['doc']} {s['arq_ano']}" + ("" if k == 1 else " (dif. de acumulados)")
         row = _linha(s, "trimestral", m, periodo, fonte, notas)
@@ -323,7 +338,7 @@ def montar_empresa(snaps: list[dict], n_anos: int) -> tuple[list, list, list]:
         for f in FLUXOS:
             vals = [t[1].get(f) for t in janela]
             m[f] = float(np.sum(vals)) if all(pd.notna(v) for v in vals) else np.nan
-        m = cs.derivadas(m, anual=True)
+        m = cs.derivadas(ajc(m), anual=True)
         problemas = [t[2]["periodo"] for t in janela if "implausível" in t[2]["notas"] or "ausente" in t[2]["notas"]]
         notas = [f"LTM inclui trimestres com alerta: {', '.join(problemas)}"] if problemas else []
         linhas.append(_linha(s, "ltm", m, f"LTM {s['trimestre']}T{str(s['exercicio'])[2:]}",
@@ -401,6 +416,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
                 # bancos e seguradoras: DFP e ITR, período corrente. Nos fluxos fica o acumulado no exercício (a DRE
                 # do ITR também traz o trimestre isolado, descartado como nas demais empresas); balanço na data
                 f = prep[prep["CNPJ_NUM"].isin(fin_cnpjs) & (prep["ORDEM"] == "ultimo")]
+                f = f[f["DEMO"] != "DVA"]
                 for (cn, _ref), g in f.groupby(["CNPJ_NUM", "DT_REFER"]):
                     b = "con" if ((g["BASE"] == "con") & (g["DEMO"] == "DRE")).any() else "ind"
                     g = g[g["BASE"] == b]
@@ -450,7 +466,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             continue
         for s in snaps[cnpj]:
             diag += [{**d, "empresa": meta["empresa"], "ticker": meta["ticker"]} for d in s.get("diag", [])]
-        l, a, info = montar_empresa(snaps[cnpj], n_anos)
+        l, a, info = montar_empresa(snaps[cnpj], n_anos, construcao=cs.norm(r["segmento"]) in SEG_CONSTRUCAO)
         linhas += [{**meta, **x} for x in l]
         aud += [{"cnpj": cnpj, "empresa": meta["empresa"], **x} for x in a]
         cad_e = cad[cad["CNPJ_NUM"] == cnpj]
