@@ -21,7 +21,7 @@ import pandas as pd
 warnings.filterwarnings("ignore", message="This pattern is interpreted as a regular expression")
 
 # fluxos: acumulados no exercício no documento; viram trimestre por diferença e LTM por soma
-FLUXOS = ["receita_total", "lucro_liquido", "lucro_controladores", "resultado_bruto_intermediacao", "despesa_pdd",
+FLUXOS = ["receita_total", "lucro_antes_ir", "lucro_liquido", "lucro_controladores", "resultado_bruto_intermediacao", "despesa_pdd",
           "receita_servicos", "receita_servicos_fora", "despesas_pessoal_adm", "margem_financeira_antes_pdd",
           "dividendos_pagos"]
 # saldos: posição na data do documento
@@ -172,6 +172,13 @@ def metricas_documento(g: pd.DataFrame) -> tuple[dict, list]:
               "seguradora" if ("seguradora" in d301 or "operacoes" in d301) else "geral")
     m["layout_dfp"] = layout
     m["receita_total"] = r301["valor_rs_mm"].iloc[0] if len(r301) else np.nan
+
+    # lucro antes de IR/CS: conta de nível 2 "resultado antes dos tributos sobre o lucro" (IFRS) ou
+    # "resultado antes tributação/participações" (COSIF). Fora o EBIT do layout geral ("antes do resultado
+    # financeiro e dos tributos") e o lucro antes das participações estatutárias (já depois do IR)
+    lair = _um(dre, r"antes (?:d[aoe]s? )?(?:tributo|tributac|impost)", nivel=2, excl=r"resultado financeiro")
+    m["lucro_antes_ir"] = lair["valor_rs_mm"] if lair is not None else np.nan
+    reg("lucro_antes_ir", lair)
 
     # lucro líquido consolidado (nível 2, sem "antes") e parcela dos controladores
     ll = _um(dre, r"lucro|prejuizo|resultado liquido", nivel=2,
