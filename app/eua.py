@@ -57,7 +57,10 @@ EXTRAS_EUA = {
     "retorno_acionista_caixa": ("Retorno ao acionista (dividendos + recompra − emissão)", "mm", "Caixa e investimento"),
 }
 # métricas brasileiras sem equivalente na SEC (FCO comparável e frota): saem da lista no modo EUA
-SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido"]
+SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido",
+                   # ajuste de construção de concessões (ICPC 01): só Brasil
+                   "receita_construcao", "custo_construcao", "margem_construcao", "receita_reportada",
+                   "lucro_bruto_reportado", "ebit_reportado", "ebitda_reportado", "lucro_liquido_reportado"]
 
 
 def ajustar_metricas(metricas: dict, agreg: dict) -> None:

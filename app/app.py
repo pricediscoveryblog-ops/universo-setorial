@@ -26,6 +26,16 @@ METRICAS = {
     "ebitda_pre_ifrs16": ("EBITDA pré-IFRS 16", "mm", "Resultado"),
     "lucro_liquido": ("Lucro líquido", "mm", "Resultado"),
     "resultado_financeiro": ("Resultado financeiro líquido", "mm", "Resultado"),
+    # concessões do modelo do intangível (rodovias, saneamento, portos/aeroportos, ferrovias, hidrovias): a receita
+    # de construção (ICPC 01) sai da receita e do CPV, e a margem de construção sai dos lucros (ver Metodologia)
+    "receita_construcao": ("Receita de construção (concessão)", "mm", "Concessões (construção)"),
+    "custo_construcao": ("Custo de construção (concessão)", "mm", "Concessões (construção)"),
+    "margem_construcao": ("Margem de construção retirada dos lucros", "mm", "Concessões (construção)"),
+    "receita_reportada": ("Receita líquida reportada (c/ construção)", "mm", "Concessões (construção)"),
+    "lucro_bruto_reportado": ("Lucro bruto reportado", "mm", "Concessões (construção)"),
+    "ebit_reportado": ("EBIT reportado", "mm", "Concessões (construção)"),
+    "ebitda_reportado": ("EBITDA reportado (IFRS 16)", "mm", "Concessões (construção)"),
+    "lucro_liquido_reportado": ("Lucro líquido reportado", "mm", "Concessões (construção)"),
     "fco": ("FCO comparável (sem juros e dividendos)", "mm", "Caixa e investimento"),
     "fco_reportado": ("FCO reportado (DFC)", "mm", "Caixa e investimento"),
     "fco_juros_no_fco": ("Juros pagos/recebidos dentro do FCO (líq.)", "mm", "Caixa e investimento"),
@@ -2892,6 +2902,8 @@ with aba_dados:
     todas = st.checkbox("Incluir todas as métricas no download (não só as selecionadas)")
     if todas:
         cols_out = [c for c in IDENT if c in filtrado.columns] + list(METRICAS) + ["notas"]
+    if "fonte_construcao" in filtrado.columns and filtrado["fonte_construcao"].fillna("").ne("").any():
+        cols_out.append("fonte_construcao")
     saida = filtrado[cols_out].sort_values(["empresa", "dt_fim"])
     mets_vis = [c for c in cols_out if c in METRICAS]
     # base americana: ~10x a brasileira; tabela na tela limitada e arquivos gerados só sob pedido (cada interação
@@ -2957,6 +2969,16 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   financeiros, inclusive ágio; fora recebíveis, estoques, tributos e ativos biológicos). Quando a DFC junta D&A e
   impairment numa linha, o impairment está dentro da D&A (com nota). Não inclui outros ajustes que as empresas divulgam.
 - EBITDA pré-IFRS 16 = EBITDA − pagamentos de arrendamento (principal + juros) da DFC; antes de 2019 = EBITDA.
+- Concessões do modelo do intangível (segmentos B3: exploração de rodovias, água e saneamento, serviços de apoio e
+  armazenagem, transporte ferroviário e hidroviário; energia elétrica fica de fora por ter ativo financeiro/de
+  contrato): a receita de construção da infraestrutura (ICPC 01) sai da receita líquida e o custo de construção sai
+  do CPV. Se a empresa reconhece margem de construção (receita > custo), a margem sai do lucro bruto, EBIT, EBITDA e
+  (líquida de 34% de IR/CS) do lucro líquido; múltiplos, margens e ROIC usam os valores ajustados. Fonte, em ordem:
+  subconta da DRE (3.01/3.02) → DVA (7.01.03 "Receitas refs. à construção de ativos próprios", aceita só quando a
+  receita líquida da DRE a comporta; o custo vem da DVA ou é receita − margem da DFC) → custo da DRE + margem da DFC
+  (sem margem identificada, receita = custo). Sem receita de construção identificada, só a margem de construção da DFC
+  (se houver) sai dos lucros. Coluna `fonte_construcao` mostra a origem; os valores reportados seguem disponíveis
+  (grupo "Concessões (construção)").
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
 - Capex orgânico = saídas para imobilizado (inclui propriedade para investimento), intangível e ativo de
   contrato/concessão no bloco de investimento.
