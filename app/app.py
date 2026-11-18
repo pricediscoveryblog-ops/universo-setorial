@@ -136,6 +136,7 @@ TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trim
 # agregação: "soma" | (numerador, denominador) para razão das somas | None (só mediana)
 FIN = {
     "lucro_controladores": ("Lucro líquido (controladores)", "mm", "soma"),
+    "lucro_antes_ir": ("Lucro antes de IR/CS", "mm", "soma"),
     "pl_controladores": ("PL (controladores)", "mm", "soma"),
     "ativo_total": ("Ativo total", "mm", "soma"),
     "receita_total": ("Receita total (linha 3.01)", "mm", "soma"),
@@ -2690,6 +2691,9 @@ if not EUA:          # sem dados equivalentes nos EUA
                 if fmt_f != "mm" and isinstance(agg_f, tuple):
                     st.caption(f"Grupo agregado = Σ {agg_f[0]} ÷ Σ {agg_f[1]} das instituições com os dois dados.")
                 notas_fin = {
+                    "lucro_antes_ir": "Linha da DRE 'Resultado antes dos tributos sobre o lucro' (IFRS) ou 'Resultado "
+                                      "antes da tributação/participações' (COSIF), consolidado (inclui não controladores). "
+                                      "No COSIF vem antes da participação nos lucros (PLR); no IFRS a PLR já está nas despesas.",
                     "indice_eficiencia": "Definição própria: |pessoal + administrativas| ÷ (margem financeira antes da PDD + "
                                          "serviços fora da intermediação). Difere do índice divulgado por cada banco; use para "
                                          "comparar tendência, não nível. Vazio quando o banco não abre a PDD na DRE.",
