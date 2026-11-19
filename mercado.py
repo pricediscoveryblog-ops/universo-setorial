@@ -90,7 +90,46 @@ def proventos() -> pd.DataFrame:
         if i % 50 == 0:
             print(f"  {i}/{len(emp)} ({len(linhas)} eventos)", flush=True)
         time.sleep(0.25)
+    # histórico de proventos em dinheiro: o complemento acima só traz os últimos ~12 meses; a consulta paginada de
+    # proventos em dinheiro da mesma página da B3 (GetListedCashDividends) traz o histórico, por espécie (ON/PN/UNT)
+    hist, falhas_h = [], []
+    for i, r in enumerate(emp.itertuples(), 1):
+        pag, tot = 1, 1
+        while pag <= tot and pag <= 30:
+            d = cs._b3_get("GetListedCashDividends", {"language": "pt-br", "pageNumber": pag, "pageSize": 120,
+                                                      "tradingName": r.tradingName})
+            if not isinstance(d, dict):
+                falhas_h.append(r.issuingCompany)
+                break
+            tot = int((d.get("page") or {}).get("totalPages") or 1)
+            for x in d.get("results") or []:
+                hist.append({"raiz": r.issuingCompany, "cnpj": r.cnpj, "tipo": "dinheiro",
+                             "evento": str(x.get("corporateAction") or "").strip().upper(),
+                             "isin": "", "classe_b3": str(x.get("typeStock") or "").strip().upper(),
+                             "data_com": _data(x.get("lastDatePriorEx")), "data_aprovacao": _data(x.get("dateApproval")),
+                             "data_pagamento": pd.NaT, "valor": _num(x.get("valueCash")), "fator_b3": np.nan,
+                             "referente": "", "valor_b3": str(x.get("valueCash") or ""), "fator_b3_txt": "",
+                             "obs": f"preço de fechamento na data-com (B3): {x.get('closingPricePriorExDate') or ''}; "
+                                    f"fator B3: {x.get('corporateActionPrice') or ''}"})
+            pag += 1
+            time.sleep(0.25)
+        if i % 50 == 0:
+            print(f"  histórico {i}/{len(emp)} ({len(hist)} proventos)", flush=True)
+    print(f"  histórico de proventos em dinheiro: {len(hist)} linhas; falhas: {len(falhas_h)} {falhas_h[:15]}")
+    h = pd.DataFrame(hist)
+    if len(h):
+        h = h[h["data_com"].notna() & (h["valor"] > 0)]
+        print(h["classe_b3"].value_counts().head(12).to_string())
+        print("anos:", h["data_com"].dt.year.value_counts().sort_index().to_dict())
     df = pd.DataFrame(linhas)
+    if len(h) and len(df):
+        # complemento recente: entra só o que o histórico ainda não tem (mesma empresa, data-com e valor)
+        k = lambda x: x["raiz"] + "|" + x["data_com"].dt.strftime("%Y-%m-%d") + "|" + x["valor"].round(8).astype(str)  # noqa: E731
+        din = df[df["tipo"] == "dinheiro"]
+        novos = din[~k(din).isin(set(k(h)))]
+        df = pd.concat([df[df["tipo"] == "acoes"], h, novos], ignore_index=True)
+    elif len(h):
+        df = h
     if df.empty:
         raise SystemExit("B3 não devolveu proventos: arquivo anterior mantido")
     df = df.drop_duplicates(["raiz", "tipo", "evento", "isin", "data_com", "valor", "fator_b3"])

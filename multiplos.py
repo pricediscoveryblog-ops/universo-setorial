@@ -89,6 +89,7 @@ def ler_cotacoes(anos: list[int], raizes: set[str], antigos: dict | None = None)
     Papéis que mudaram de código são ligados à empresa pelo ISIN quando ele se mantém; quando a B3 troca o ISIN
     junto com o código (ex.: CCRO3 -> MOTV3), pelo CNPJ: `antigos` (código antigo -> raiz atual, de codigos_antigos)."""
     tk, dt, pr, vol, isin = [], [], [], [], []
+    u_tk, u_dt, u_pr, u_vol, u_isin = [], [], [], [], []
     for ano in anos:
         p = _baixar(ano, forcar=(ano == max(anos) and not cs.OFFLINE))
         if p is None:
@@ -100,6 +101,11 @@ def ler_cotacoes(anos: list[int], raizes: set[str], antigos: dict | None = None)
                         if ln[:2] != b"01" or ln[24:27] != b"010":
                             continue
                         cod = ln[12:24].strip()
+                        if len(cod) == 6 and cod[4:6] == b"11" and cod[:4].decode() in raizes:   # units (só gráfico)
+                            u_tk.append(cod.decode()); u_dt.append(ln[2:10].decode())
+                            u_pr.append(int(ln[108:121]) / 100 / (int(ln[210:217] or b"1") or 1))
+                            u_vol.append(int(ln[170:188]) / 100); u_isin.append(ln[230:242].decode().strip())
+                            continue
                         if len(cod) != 5 or cod[4:5] not in SUFIXOS:
                             continue
                         fat = int(ln[210:217] or b"1") or 1
@@ -151,6 +157,12 @@ def ler_cotacoes(anos: list[int], raizes: set[str], antigos: dict | None = None)
         if recusados:
             print(f"  ! códigos do FCA recusados por negociarem junto com o código atual: {recusados[:10]}")
     df = df[df["ticker"].isin(mapa)]
+    # preços diários brutos (sem ajuste) para o gráfico de cotação do app: ON/PN ligados à empresa + units
+    un = pd.DataFrame({"ticker": u_tk, "data": pd.to_datetime(u_dt, format="%Y%m%d"), "preco": u_pr,
+                       "volume": u_vol, "isin": u_isin})
+    un["raiz"] = un["ticker"].str[:4]
+    PRECOS.clear()
+    PRECOS.append(pd.concat([df.assign(raiz=df["ticker"].map(mapa)), un], ignore_index=True))
     antigos = {c: r for c, r in mapa.items() if c[:4] != r}
     if antigos:
         print(f"  códigos antigos ligados pelo ISIN: {len(antigos)} (ex.: {list(antigos.items())[:5]})")
@@ -276,6 +288,9 @@ def _linha(meta, tipo, d, fund, flu, on, pn, px, raiz, notas_base):
 
 
 DIAG_ACOES: list[dict] = []   # diagnóstico da série de ações (gravado pelo universo)
+PRECOS: list[pd.DataFrame] = []     # cotações diárias brutas por papel (gravadas pelo universo em saidas/mercado/)
+EV_BASE: dict = {}             # cnpj -> (datas de divulgação, DL c/ arrend., DL s/ arrend., minoritários), ponto no tempo
+INICIO_DIARIO = pd.Timestamp("2015-01-01")   # início das séries diárias (preço, valor de mercado e EV)
 SERIE_VM: list[pd.DataFrame] = []   # valor de mercado por pregão e empresa (gravado pelo universo)
 
 
@@ -557,6 +572,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
         return f
 
     series_acoes = {}
+    EV_BASE.clear()
     DIAG_ACOES.clear()
     SERIE_VM.clear()
 
@@ -602,6 +618,21 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
         anu = g[g["tipo"] == "anual"].set_index("dt_fim")
         docs = sorted(set(tri.index) | set(anu.index))
         disp = [(divulgado(dfim), dfim) for dfim in docs]          # ((data_divulgação, nota), dt_fim)
+        # EV diário (ponto no tempo): a partir da divulgação de cada documento vale a dívida líquida e os
+        # minoritários do documento mais recente (maior dt_fim) já divulgado — mesma regra dos múltiplos trimestrais
+        ev_d, ev_c, ev_s, ev_n, melhor = [], [], [], [], None
+        for (dd, _), dfim in sorted(disp, key=lambda x: (x[0][0], x[1])):
+            if melhor is not None and dfim <= melhor:
+                continue
+            melhor = dfim
+            f_ = tri.loc[dfim] if dfim in tri.index else anu.loc[dfim]
+            f_ = f_.iloc[-1] if isinstance(f_, pd.DataFrame) else f_
+            nc_ = f_.get("nao_controladores")
+            ev_d.append(dd); ev_c.append(f_.get("div_liq_com_arrend")); ev_s.append(f_.get("div_liq_sem_arrend"))
+            ev_n.append(0.0 if pd.isna(nc_) else nc_)
+        if ev_d:
+            EV_BASE[cnpj] = (np.array(ev_d, dtype="datetime64[ns]"), np.array(ev_c, dtype=float),
+                             np.array(ev_s, dtype=float), np.array(ev_n, dtype=float))
         for d in datas_tri:
             vis = [x for x in disp if x[0][0] <= d]                    # documentos já divulgados em d
             if not vis:
@@ -634,7 +665,7 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
     # ---- valor de mercado por pregão (base das variações de preço no app).
     # Usa as ações vigentes em cada data: desdobramentos e grupamentos não aparecem como variação, porque o
     # preço cai (ou sobe) e a quantidade muda na mesma proporção. Emissões e recompras aparecem, como devem.
-    ini_vm = hoje - pd.DateOffset(years=min(n_anos, 6))
+    ini_vm = INICIO_DIARIO
     for cnpj, raiz in raiz_de.items():
         tl = series_acoes.get(cnpj)
         if not tl or raiz not in px.por_raiz:
@@ -681,8 +712,17 @@ def calcular(base: pd.DataFrame, univ: pd.DataFrame, disponib: dict, compos: dic
         p_on = np.where(np.isnan(p_on), p_pn, p_on)
         p_pn = np.where(np.isnan(p_pn), p_on, p_pn)
         vm = (np.nan_to_num(on * p_on) + np.nan_to_num(pn * p_pn)) / 1e6
-        SERIE_VM.append(pd.DataFrame({"data": pr.index, "cnpj": cnpj, "raiz": raiz,
-                                      "valor_mercado": np.where(vm > 0, vm, np.nan)}))
+        vm = np.where(vm > 0, vm, np.nan)
+        ev_c = ev_s = np.full(len(pr), np.nan)
+        if cnpj in EV_BASE:
+            e_d, e_c, e_s, e_n = EV_BASE[cnpj]
+            k_ = np.searchsorted(e_d, pr.index.to_numpy(), side="right") - 1
+            ok_ = k_ >= 0
+            kk = np.where(ok_, k_, 0)
+            ev_c = np.where(ok_, vm + e_c[kk] + e_n[kk], np.nan)
+            ev_s = np.where(ok_, vm + e_s[kk] + e_n[kk], np.nan)
+        SERIE_VM.append(pd.DataFrame({"data": pr.index, "cnpj": cnpj, "raiz": raiz, "valor_mercado": vm,
+                                      "ev_com_arrend": ev_c, "ev_sem_arrend": ev_s}))
     out = pd.DataFrame(linhas)
     if len(out):
         out = out.sort_values(["cnpj", "tipo", "data"])

@@ -265,6 +265,16 @@ DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta",
              "dscr_pos_capex", "dscr_capex_arrend_den", "dscr_ebitda_arrend_den"]
 
 
+def gravar_por_ano(df: pd.DataFrame, prefixo: str) -> None:
+    """Série diária particionada por ano em saidas/mercado/<prefixo>_<ano>.parquet. Anos fechados quase não mudam,
+    então o Git só guarda de novo o arquivo do ano corrente (parquet sem carimbo de data: mesmo dado, mesmos bytes)."""
+    pasta = Path("saidas/mercado")
+    pasta.mkdir(parents=True, exist_ok=True)
+    df = df.sort_values([c for c in ("cnpj", "ticker", "data") if c in df.columns])
+    for ano, g in df.groupby(df["data"].dt.year):
+        g.reset_index(drop=True).to_parquet(pasta / f"{prefixo}_{ano}.parquet", index=False, compression="zstd")
+
+
 def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False) -> tuple[list, list, list]:
     """Retorna (linhas, auditoria, info) para uma empresa. construcao=True: concessão do modelo do intangível,
     a construção sai da receita, do CPV e dos lucros (ver cs.ajustar_construcao)."""
@@ -526,9 +536,16 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             print(f"  -> multiplos.csv.gz ({len(mult)} linhas, {mult['cnpj'].nunique()} empresas)")
         if multiplos.SERIE_VM:
             vm = pd.concat(multiplos.SERIE_VM, ignore_index=True).dropna(subset=["valor_mercado"])
-            vm.to_csv(SAIDA / "valor_mercado_diario.csv.gz", index=False, compression="gzip", date_format="%Y-%m-%d")
-            print(f"  -> valor_mercado_diario.csv.gz ({len(vm)} linhas, {vm['cnpj'].nunique()} empresas, "
+            gravar_por_ano(vm.astype({"valor_mercado": "float32", "ev_com_arrend": "float32",
+                                      "ev_sem_arrend": "float32"}), "vm_ev")
+            (SAIDA / "valor_mercado_diario.csv.gz").unlink(missing_ok=True)   # substituído por mercado/vm_ev_<ano>
+            print(f"  -> mercado/vm_ev_<ano>.parquet ({len(vm)} linhas, {vm['cnpj'].nunique()} empresas, "
                   f"{vm['data'].min()} a {vm['data'].max()})")
+        if multiplos.PRECOS:
+            px_ = multiplos.PRECOS[0]
+            px_ = px_[px_["data"] >= multiplos.INICIO_DIARIO][["data", "ticker", "raiz", "isin", "preco", "volume"]]
+            gravar_por_ano(px_.astype({"preco": "float64", "volume": "float64"}), "precos")
+            print(f"  -> mercado/precos_<ano>.parquet ({len(px_)} linhas, {px_['ticker'].nunique()} papéis)")
         if ENTREGAS:
             en = pd.DataFrame([(c, d, r, rb, lk) for (c, d, r), (rb, lk) in ENTREGAS.items()],
                               columns=["cnpj", "documento", "dt_refer", "dt_receb", "link"])
