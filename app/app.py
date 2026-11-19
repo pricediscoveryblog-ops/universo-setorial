@@ -185,19 +185,23 @@ FIN = {
 IDENT = ["empresa", "ticker", "setor", "subsetor", "segmento", "cnpj", "tipo", "periodo", "exercicio",
          "trimestre", "dt_fim", "fonte", "regime_contabil"]
 
-st.set_page_config(page_title="Price Discovery Scanning", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Price Discovery Scanning " + ("USA" if globals().get("MERCADO_FIXO") == "EUA" else "BR"),
+                   page_icon="📊", layout="wide")
 
 # ------------------------------------------------------------------ mercado: Brasil / EUA
 # No modo EUA o app carrega a base americana (coletor-eua, dados da SEC; módulo app/eua.py) no lugar da brasileira
 # e roda as MESMAS abas. Abas e seções que dependem de dados só brasileiros (altas e baixas, calendário da CVM,
 # bancos e seguradoras, debêntures, aluguel de ações) ficam ocultas. Juros e Macro têm versão própria dos EUA
 # (Treasuries, CPI, PIB e dólar via FRED; módulo app/eua_macro_aba.py).
-MERCADO = st.sidebar.radio("Mercado", ["Brasil", "EUA"], horizontal=True, key="mercado")
+# Dois apps (nov/2026): Price Discovery Scanning BR (entrada app/app.py) e Price Discovery Scanning USA (entrada
+# app/app_eua.py, que roda este mesmo arquivo com MERCADO_FIXO = "EUA"). Cada um carrega só a sua base.
+MERCADO = globals().get("MERCADO_FIXO") or os.environ.get("PDS_MERCADO", "Brasil")
 EUA = MERCADO == "EUA"
-if st.session_state.get("_mercado_ant") not in (None, MERCADO):
-    for _k in [k for k in st.session_state if k != "mercado" and not k.startswith("_clk_ver_")]:  # filtros e seleções não valem no outro mercado
-        del st.session_state[_k]
-st.session_state["_mercado_ant"] = MERCADO
+URL_APP = {"Brasil": os.environ.get("PDS_URL_BR", "https://pricediscovery-scanning-br.streamlit.app"),
+           "EUA": os.environ.get("PDS_URL_EUA", "https://pricediscovery-scanning-usa.streamlit.app")}
+st.sidebar.markdown(f"### {'🇺🇸 Price Discovery Scanning USA' if EUA else '🇧🇷 Price Discovery Scanning BR'}")
+st.sidebar.link_button("Ir para o app dos EUA 🇺🇸" if not EUA else "Ir para o app do Brasil 🇧🇷",
+                       URL_APP["Brasil" if EUA else "EUA"], width="stretch")
 MOEDA = "US$" if EUA else "R$"
 UN = f"{MOEDA} mm"
 if EUA:
@@ -228,6 +232,17 @@ def eua_macro_mod():
         eua_macro_aba = importlib.reload(eua_macro_aba)
         eua_macro_aba._mtime_carregado = mt
     return eua_macro_aba
+
+
+def mercado_mod():
+    """Módulo das seções de cotação, mapa de calor, estrutura societária e modelo de negócio (mesma razão de macro_mod)."""
+    import importlib
+    import mercado_aba
+    mt = os.path.getmtime(mercado_aba.__file__)
+    if getattr(mercado_aba, "_mtime_carregado", None) != mt:
+        mercado_aba = importlib.reload(mercado_aba)
+        mercado_aba._mtime_carregado = mt
+    return mercado_aba
 
 
 def versao_arquivos(*arqs) -> tuple:
@@ -1250,6 +1265,16 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
     st.caption("Série na periodicidade da barra lateral (anual: DFP; LTM e trimestral: ITR). Base 100 compara o "
                "comportamento relativo desde o primeiro ponto; em valores, "
                f"{UN} à esquerda e múltiplos/% à direita. ◎ = valor calculado com o preço do último pregão, na cor da curva.")
+    # ---- cotação, estrutura societária e modelo de negócio (mesmas seções das não financeiras)
+    _mm = mercado_mod()
+    _cn = str(d["cnpj"].iloc[0]).zfill(14)
+    _tk = str(d["ticker"].iloc[0] or "")
+    st.divider()
+    _mm.secao_cotacao(_tk[:4], _cn, emp_f, moeda=MOEDA, chave="cot_f")
+    st.divider()
+    _mm.secao_estrutura(_cn, emp_f.split(" — ")[-1] if " — " in emp_f else emp_f, chave="soc_f")
+    st.divider()
+    _mm.secao_modelo(_tk[:4], emp_f)
 
 
 def add_medias(fig, x, y, ym=None, rotulo=""):
@@ -1451,16 +1476,16 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 # ------------------------------------------------------------------ abas
 if EUA:
-    _abas_eua = ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Juros (Treasuries)",
+    _abas_eua = ["Altas e baixas", "Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Juros (Treasuries)",
                  "Macro EUA (inflação, PIB, dólar)", "Dados e download", "Cobertura", "Metodologia"]
     if st.session_state.get("aba_principal") not in (None, *_abas_eua):
-        st.session_state["aba_principal"] = "Visão do setor"
-    aba_setor, aba_emp, aba_rank, aba_scr, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
+        st.session_state["aba_principal"] = "Altas e baixas"
+    aba_var, aba_setor, aba_emp, aba_rank, aba_scr, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         _abas_eua, key="aba_principal", on_change="rerun")
-    aba_var = aba_cal = aba_fin = None          # sem dados nos EUA (blocos abaixo ficam desligados)
+    aba_cal = aba_fin = None          # sem dados nos EUA (blocos abaixo ficam desligados)
 else:
-    aba_setor, aba_emp, aba_rank, aba_scr, aba_var, aba_cal, aba_fin, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
-        ["Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Altas e baixas", "Calendário de resultados",
+    aba_var, aba_setor, aba_emp, aba_rank, aba_scr, aba_cal, aba_fin, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
+        ["Altas e baixas", "Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Calendário de resultados",
          "Financeiro (bancos e seguradoras)", "Juros (ETTJ)", "Macro (inflação, PIB, câmbio)", "Dados e download", "Cobertura", "Metodologia"],
         key="aba_principal", on_change="rerun")
 st.caption("Dica: clique numa empresa nas tabelas ou no gráfico do Ranking para abri-la na aba Empresa.")
@@ -1527,11 +1552,14 @@ with aba_setor:
         d_set = setor_f.assign(_c=col_periodo(setor_f))
         d_emp = filtrado.assign(_c=col_periodo(filtrado))
         exp_todos = {}
+        area_g = st.container()          # gráficos no topo da página
+        area_t = st.container()          # tabelas e downloads no fim da página
+        if inds:
+            with area_t:
+                st.divider()
+                st.subheader("Tabelas")
         for ind in inds:
             fmt = METRICAS[ind][1]
-            if len(inds) > 1:
-                st.divider()
-                st.subheader(rot_ind(ind))
             pct_setor = (modo == "% do setor") and fmt == "mm"
             total = agregado_setor(setor_f, ind).reindex(periodos)
             mediana = d_set.groupby("_c")[ind].median().reindex(periodos)
@@ -1574,158 +1602,167 @@ with aba_setor:
             else:
                 cfg = {p: st.column_config.NumberColumn(p, format="%,.1f") for p in periodos}
                 vis = tab_full
-            tabela_clicavel(vis, vis.index, f"clk_setor_{ind}", column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
-            st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
-                       ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
-            if fmt == "mm" and (setor_f[ind] < 0).any():
-                st.caption("⚠️ Há valores negativos neste indicador; a participação percentual pode não fazer sentido.")
-            if fmt != "mm":
-                st.caption("Setor agregado = soma do numerador ÷ soma do denominador das empresas com os dois dados "
-                           "(ex.: margem EBITDA = Σ EBITDA ÷ Σ receita).")
+            with area_t:
+                if len(inds) > 1:
+                    st.markdown(f"**{rot_ind(ind)}**")
+                tabela_clicavel(vis, vis.index, f"clk_setor_{ind}", column_config=cfg, width="stretch", height=min(650, 38 + 35 * len(vis)))
+                st.caption("Empresas com dado por período: " + " · ".join(f"{p}: {n}" for p, n in n_emp.items()) +
+                           ". Mudanças no total também refletem entrada de empresas (IPOs) na base.")
+                if fmt == "mm" and (setor_f[ind] < 0).any():
+                    st.caption("⚠️ Há valores negativos neste indicador; a participação percentual pode não fazer sentido.")
+                if fmt != "mm":
+                    st.caption("Setor agregado = soma do numerador ÷ soma do denominador das empresas com os dois dados "
+                               "(ex.: margem EBITDA = Σ EBITDA ÷ Σ receita).")
 
-            # gráfico
-            if fmt == "mm":
-                top = tab.index[:10] if not sel_emp else tab.index
-                plot = tab.loc[top].T if len(tab) else pd.DataFrame()
-                if not sel_emp and len(tab) > 10:
-                    plot["Demais"] = tab.drop(index=top).sum(min_count=1)
-                elif sel_emp:
-                    plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
-                longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
-                fig = px.bar(longo, x="Período", y="v", color="Empresa",
-                             labels={"v": "% do setor" if pct_setor else ROT[ind] + f" ({UN})"})
-                fig.update_layout(barmode="relative", height=480, legend_title_text="")
-                if pct_setor:
-                    fig.update_yaxes(tickformat=".0%")
-                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
-                if not sel_emp and len(tab) > 10:
-                    st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
-                               "Selecione empresas na barra lateral para vê-las isoladamente.")
-            elif ind.startswith("cresc_"):
-                # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
-                col = ind[6:]
-                niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
-                por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
-                linhas_idx = {}
-                if por_setor:
-                    mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
-                    for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
-                        if str(st_nome).strip():
-                            linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+                exp_t = tab_full.reset_index()
+                exp_todos[f"{len(exp_todos) + 1}. {ROT[ind]}"] = exp_t
+                c1, c2 = st.columns(2)
+                c1.download_button("⬇️ Tabela (CSV)", exp_t.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                                   file_name=f"setor_{ind}_{tipo}.csv", mime="text/csv", key=f"set_csv_{ind}")
+                c2.download_button("⬇️ Tabela (XLSX)", excel_bytes({ROT[ind][:31]: exp_t}), file_name=f"setor_{ind}_{tipo}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"set_xlsx_{ind}")
+            with area_g:
+                if len(inds) > 1:
+                    st.divider()
+                    st.subheader(rot_ind(ind))
+                # gráfico
+                if fmt == "mm":
+                    top = tab.index[:10] if not sel_emp else tab.index
+                    plot = tab.loc[top].T if len(tab) else pd.DataFrame()
+                    if not sel_emp and len(tab) > 10:
+                        plot["Demais"] = tab.drop(index=top).sum(min_count=1)
+                    elif sel_emp:
+                        plot["Demais empresas do setor"] = linhas_extra["Demais empresas do setor"]
+                    longo = plot.reset_index(names="Período").melt(id_vars="Período", var_name="Empresa", value_name="v")
+                    fig = px.bar(longo, x="Período", y="v", color="Empresa",
+                                 labels={"v": "% do setor" if pct_setor else ROT[ind] + f" ({UN})"})
+                    fig.update_layout(barmode="relative", height=480, legend_title_text="")
+                    if pct_setor:
+                        fig.update_yaxes(tickformat=".0%")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    if not sel_emp and len(tab) > 10:
+                        st.caption("Gráfico mostra as 10 maiores do último período e agrupa o restante em 'Demais'. "
+                                   "Selecione empresas na barra lateral para vê-las isoladamente.")
+                elif ind.startswith("cresc_"):
+                    # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
+                    col = ind[6:]
+                    niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
+                    por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
+                    linhas_idx = {}
+                    if por_setor:
+                        mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
+                        for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
+                            if str(st_nome).strip():
+                                linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+                    else:
+                        vis_rot = tab.index if sel_emp else niv.index
+                        for r in vis_rot:
+                            v = niv.loc[r]
+                            ini = v.first_valid_index()
+                            if ini is None or v[ini] <= 0:
+                                continue
+                            idx = 100 * v / v[ini]
+                            neg = idx[idx <= 0].index
+                            if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
+                                idx[idx.index >= neg[0]] = np.nan
+                            linhas_idx[r] = idx
+                        linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
+                    nomes = list(linhas_idx)
+                    if por_setor:
+                        padrao_l = nomes
+                    else:
+                        ult_p = ult[0] if ult else periodos[-1]
+                        tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
+                        padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
+                    chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
+                                                                          tuple(sel_emp)))))
+                    sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
+                                           help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                    fig = go.Figure()
+                    for nome in sel_l:
+                        y = linhas_idx[nome]
+                        fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
+                                                 name=nome.split(" — ")[0] if " — " in nome else nome,
+                                                 line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
+                    if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
+                        macro_aba = macro_mod()
+                        macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
+                                                   3 if tipo == "trimestral" else 12,
+                                                   col in ("ativo_total", "patrimonio_liquido"),
+                                                   key=f"mac_cmp_set_{ind}_{tipo}")
+                    fig.add_hline(y=100, line_dash="dot", line_color="gray")
+                    fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
+                                      title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
+                                "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
+                                "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
+                                "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
+                               + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
+                elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
+                    # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
+                    linhas_g = {}
+                    for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
+                        linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
+                    linhas_g["Todas as empresas"] = total
+                    sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
+                                           key=f"graus_linhas_{ind}_{tipo}",
+                                           help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                    fig = go.Figure()
+                    for nome in sel_g:
+                        y = linhas_g[nome]
+                        fig.add_trace(go.Scatter(x=periodos, y=y.values, mode="lines+markers", name=nome,
+                                                 line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
+                    fig.add_hline(y=1, line_dash="dot", line_color="gray")
+                    fig.update_layout(height=480, legend_title_text="", yaxis_ticksuffix="x",
+                                      title=f"{ROT[ind]} por setor")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
+                               "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
+                               "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
                 else:
-                    vis_rot = tab.index if sel_emp else niv.index
-                    for r in vis_rot:
-                        v = niv.loc[r]
-                        ini = v.first_valid_index()
-                        if ini is None or v[ini] <= 0:
-                            continue
-                        idx = 100 * v / v[ini]
-                        neg = idx[idx <= 0].index
-                        if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
-                            idx[idx.index >= neg[0]] = np.nan
-                        linhas_idx[r] = idx
-                    linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
-                nomes = list(linhas_idx)
-                if por_setor:
-                    padrao_l = nomes
+                    fig = go.Figure()
+                    for r in tab.index[:10]:
+                        fig.add_trace(go.Scatter(x=periodos, y=tab.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
+                    fig.add_trace(go.Scatter(x=periodos, y=total, mode="lines", name="Setor agregado", line=dict(width=4, dash="dash")))
+                    fig.add_trace(go.Scatter(x=periodos, y=mediana, mode="lines", name="Mediana", line=dict(dash="dot")))
+                    fig.update_layout(height=480, legend_title_text="")
+                    if fmt == "pct":
+                        fig.update_yaxes(tickformat=".0%")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+
+        with area_t:
+            if len(inds) > 1:
+                st.divider()
+                st.download_button("⬇️ Todos os indicadores selecionados (XLSX, uma aba por indicador)",
+                                   excel_bytes(exp_todos), file_name=f"setor_{len(inds)}_indicadores_{tipo}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="set_xlsx_todos")
+
+        with area_g:
+            with st.expander("Dispersão entre dois indicadores (um período)"):
+                ref_opts = periodos[::-1]
+                ref = st.selectbox("Período", ref_opts, key="disp_per")
+                snap = filtrado[col_periodo(filtrado) == ref]
+                c1, c2, c3 = st.columns(3)
+                x = c1.selectbox("Eixo X", list(METRICAS), index=list(METRICAS).index("div_liq_ebitda_ifrs16"), format_func=lambda k: ROT[k])
+                y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
+                tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
+                                   format_func=lambda k: "—" if k is None else ROT[k])
+                pts = snap.dropna(subset=[x, y])
+                if tam:
+                    pts = pts[pts[tam] > 0]
+                if pts.empty:
+                    st.info("Sem dados suficientes para os eixos escolhidos.")
                 else:
-                    ult_p = ult[0] if ult else periodos[-1]
-                    tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
-                    padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
-                chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
-                                                                      tuple(sel_emp)))))
-                sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
-                                       help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-                fig = go.Figure()
-                for nome in sel_l:
-                    y = linhas_idx[nome]
-                    fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
-                                             name=nome.split(" — ")[0] if " — " in nome else nome,
-                                             line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
-                if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
-                    macro_aba = macro_mod()
-                    macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
-                                               3 if tipo == "trimestral" else 12,
-                                               col in ("ativo_total", "patrimonio_liquido"),
-                                               key=f"mac_cmp_set_{ind}_{tipo}")
-                fig.add_hline(y=100, line_dash="dot", line_color="gray")
-                fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
-                                  title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
-                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
-                st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
-                            "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
-                            "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
-                            "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
-                           + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
-            elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
-                # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
-                linhas_g = {}
-                for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
-                    linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
-                linhas_g["Todas as empresas"] = total
-                sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
-                                       key=f"graus_linhas_{ind}_{tipo}",
-                                       help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
-                fig = go.Figure()
-                for nome in sel_g:
-                    y = linhas_g[nome]
-                    fig.add_trace(go.Scatter(x=periodos, y=y.values, mode="lines+markers", name=nome,
-                                             line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
-                fig.add_hline(y=1, line_dash="dot", line_color="gray")
-                fig.update_layout(height=480, legend_title_text="", yaxis_ticksuffix="x",
-                                  title=f"{ROT[ind]} por setor")
-                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
-                st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
-                           "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
-                           "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
-            else:
-                fig = go.Figure()
-                for r in tab.index[:10]:
-                    fig.add_trace(go.Scatter(x=periodos, y=tab.loc[r], mode="lines+markers", name=r.split(" — ")[0]))
-                fig.add_trace(go.Scatter(x=periodos, y=total, mode="lines", name="Setor agregado", line=dict(width=4, dash="dash")))
-                fig.add_trace(go.Scatter(x=periodos, y=mediana, mode="lines", name="Mediana", line=dict(dash="dot")))
-                fig.update_layout(height=480, legend_title_text="")
-                if fmt == "pct":
-                    fig.update_yaxes(tickformat=".0%")
-                st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
-
-            exp_t = tab_full.reset_index()
-            exp_todos[f"{len(exp_todos) + 1}. {ROT[ind]}"] = exp_t
-            c1, c2 = st.columns(2)
-            c1.download_button("⬇️ Tabela (CSV)", exp_t.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-                               file_name=f"setor_{ind}_{tipo}.csv", mime="text/csv", key=f"set_csv_{ind}")
-            c2.download_button("⬇️ Tabela (XLSX)", excel_bytes({ROT[ind][:31]: exp_t}), file_name=f"setor_{ind}_{tipo}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"set_xlsx_{ind}")
-        if len(inds) > 1:
-            st.divider()
-            st.download_button("⬇️ Todos os indicadores selecionados (XLSX, uma aba por indicador)",
-                               excel_bytes(exp_todos), file_name=f"setor_{len(inds)}_indicadores_{tipo}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="set_xlsx_todos")
-
-        with st.expander("Dispersão entre dois indicadores (um período)"):
-            ref_opts = periodos[::-1]
-            ref = st.selectbox("Período", ref_opts, key="disp_per")
-            snap = filtrado[col_periodo(filtrado) == ref]
-            c1, c2, c3 = st.columns(3)
-            x = c1.selectbox("Eixo X", list(METRICAS), index=list(METRICAS).index("div_liq_ebitda_ifrs16"), format_func=lambda k: ROT[k])
-            y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
-            tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
-                               format_func=lambda k: "—" if k is None else ROT[k])
-            pts = snap.dropna(subset=[x, y])
-            if tam:
-                pts = pts[pts[tam] > 0]
-            if pts.empty:
-                st.info("Sem dados suficientes para os eixos escolhidos.")
-            else:
-                fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
-                                 hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
-                                 labels={x: ROT[x], y: ROT[y]})
-                for eixo, k in (("x", x), ("y", y)):
-                    if METRICAS[k][1] == "pct":
-                        fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
-                fig.update_layout(height=520, legend_title_text="Segmento")
-                st.plotly_chart(fig, width="stretch")
+                    fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
+                                     hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
+                                     labels={x: ROT[x], y: ROT[y]})
+                    for eixo, k in (("x", x), ("y", y)):
+                        if METRICAS[k][1] == "pct":
+                            fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
+                    fig.update_layout(height=520, legend_title_text="Segmento")
+                    st.plotly_chart(fig, width="stretch")
 
 # -------- Empresa: séries históricas vs. mediana do segmento
 with aba_emp:
@@ -1957,6 +1994,17 @@ with aba_emp:
                         "dividend_yield": st.column_config.NumberColumn("Dividend yield", format="percent")})
                     st.download_button("⬇️ Múltiplos (CSV)", tab_m.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                        file_name=f"multiplos_{emp.split(' — ')[0]}_{tipo_m}.csv", mime="text/csv", key="mult_csv")
+
+        # ---- cotação diária (ajustável por proventos e eventos, nominal ou real), valor de mercado e EV
+        _cn_e = str(linha_e["cnpj"]).zfill(14)
+        _tk_e = str(linha_e.get("ticker") or "")
+        _mm = mercado_mod()
+        if EUA:
+            _vme = mult[(mult["cnpj"] == _cn_e) & (mult["tipo"] == "trimestral")][
+                ["data", "valor_mercado", "ev_com_arrend", "ev_sem_arrend"]] if not mult.empty else pd.DataFrame()
+            _mm.secao_cotacao("", _cn_e, emp, eua=True, ticker_eua=_tk_e, vm_ev_eua=_vme, moeda=MOEDA, chave="cot_e")
+        else:
+            _mm.secao_cotacao(_tk_e[:4], _cn_e, emp, moeda=MOEDA, chave="cot_e")
 
         if not EUA:          # debêntures (SND/ANBIMA) e aluguel de ações (B3): só Brasil
             # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço
@@ -2236,6 +2284,12 @@ with aba_emp:
                        f"na barra lateral. Em valores, {UN} ficam no eixo da esquerda; múltiplos e % no da direita. "
                        "◎ = indicador de mercado calculado com o preço do último pregão, na cor da curva correspondente.")
 
+        # ---- estrutura societária e modelo de negócio (fim da visão da empresa)
+        st.divider()
+        _mm.secao_estrutura(_cn_e, emp.split(" — ")[-1] if " — " in emp else emp, eua=EUA, chave="soc_e")
+        st.divider()
+        _mm.secao_modelo(_tk_e if EUA else _tk_e[:4], emp)
+
 # -------- Filtro por indicador (screener): fundamentos do último LTM + mercado na última cotação
 MERCADO_SCR = ["valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
                "ev_ebitda_pre_ifrs16", "ev_receita_com_arrend", "ev_receita_sem_arrend", "dividend_yield"]
@@ -2379,9 +2433,15 @@ JANELAS = {"Diária": ("D", 1), "Semanal": ("D", 7), "Mensal": ("M", 1), "Trimes
            "Semestral": ("M", 6), "Anual": ("M", 12), "2 anos": ("M", 24), "3 anos": ("M", 36),
            "5 anos": ("M", 60)}
 
-if not EUA:          # sem dados equivalentes nos EUA
+if True:
     with aba_var:
-        vmd = carregar_vm_diario(versao_arquivos(DADOS / "valor_mercado_diario.csv.gz"))
+        if EUA:
+            vmd = eua.vm_diario_recente(mult)
+        else:
+            _mm = mercado_mod()
+            vmd = _mm.vm_ev_todos(_mm._versao("vm_ev_*.parquet"))
+            if vmd.empty:                       # base antiga (até nov/2026): um CSV com a série desde 2020
+                vmd = carregar_vm_diario(versao_arquivos(DADOS / "valor_mercado_diario.csv.gz"))
         if vmd.empty:
             st.info("Série diária de valor de mercado ainda não gerada: aparece depois da próxima execução do coletor.")
         else:
@@ -2390,7 +2450,7 @@ if not EUA:          # sem dados equivalentes nos EUA
             d_fim = c0.selectbox("Data final (pregão)", pregoes[::-1],
                                  format_func=lambda d: pd.Timestamp(d).strftime("%d/%m/%Y"), key="var_dfim")
             d_fim = pd.Timestamp(d_fim)
-            jan = c1.selectbox("Período", list(JANELAS), index=2, key="var_jan")
+            jan = c1.selectbox("Período", list(JANELAS) if not EUA else list(JANELAS)[:6], index=0, key="var_jan")
             n_top = c2.slider("Quantas de cada lado", 5, 50, 30, 5, key="var_n")
             c3 = st.container()
             unidade, passo = JANELAS[jan]
@@ -2415,16 +2475,21 @@ if not EUA:          # sem dados equivalentes nos EUA
             set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
             if set_f:
                 v = v[v["setor"].isin(set_f)]
-            vm_min = st.slider("Valor de mercado mínimo (R$ bi)", 0.0, 20.0, 0.5, 0.25, key="var_vmmin",
-                               help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
+            vm_min = st.slider(f"Valor de mercado mínimo ({MOEDA} bi)", 0.0, 20.0, 0.5 if not EUA else 2.0, 0.25,
+                               key="var_vmmin", help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
             v = v[(v["vm_fim"] >= vm_min * 1000) & v["variacao"].notna()]
-            v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em R$ milhões
+            v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em milhões
+            mercado_mod().mapa_calor(v, f"{jan.lower()}: {pd.Timestamp(alvo).strftime('%d/%m/%Y')} a "
+                                        f"{pd.Timestamp(d_fim).strftime('%d/%m/%Y')}", MOEDA, chave="var_mapa")
             st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
-                       f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. O valor de mercado "
-                       "usa as ações vigentes em cada data, então desdobramentos e grupamentos não viram variação; "
-                       "emissões e recompras, sim. Não inclui dividendos (é variação de preço, não retorno total).")
+                       f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. " +
+                       ("Nos EUA a variação é a do preço do ticker principal (Yahoo Finance) corrigido por "
+                        "desdobramentos, aplicada ao valor de mercado do último pregão; histórico de ~200 dias. "
+                        if EUA else "O valor de mercado usa as ações vigentes em cada data, então desdobramentos e "
+                        "grupamentos não viram variação; emissões e recompras, sim. ") +
+                       "Não inclui dividendos (é variação de preço, não retorno total).")
             cfg_v = {"rotulo": "Empresa", "setor": "Setor", "variacao": st.column_config.NumberColumn("Variação", format="percent"),
-                     "vm_bi": st.column_config.NumberColumn("Valor de mercado (R$ bi)", format="%,.1f"),
+                     "vm_bi": st.column_config.NumberColumn(f"Valor de mercado ({MOEDA} bi)", format="%,.1f"),
                      "data_ini": "Pregão inicial"}
             cols_v = ["rotulo", "setor", "variacao", "vm_bi", "data_ini"]
             altas = v.nlargest(n_top, "variacao")[cols_v].assign(data_ini=lambda x: x["data_ini"].dt.date)

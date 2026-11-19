@@ -262,6 +262,41 @@ def multiplos() -> pd.DataFrame:
     return m.drop(columns=["cik"]).reset_index(drop=True)
 
 
+@st.cache_data(ttl=3600, max_entries=1, show_spinner=False)
+def _precos_recentes(versao: str) -> pd.DataFrame:
+    """Fechamento ajustado por desdobramentos dos ~200 últimos dias (cache do coletor-eua)."""
+    try:
+        p = pd.read_parquet(io.BytesIO(_baixar("precos_recentes.parquet")))
+        sp = pd.read_parquet(io.BytesIO(_baixar("splits_eua.parquet")))
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+    p["data"] = pd.to_datetime(p["data"])
+    sp["data"] = pd.to_datetime(sp["data"])
+    p = p.sort_values(["ticker", "data"])
+    p["aj"] = p["bruto"].astype(float)
+    for r in sp[sp["data"] >= p["data"].min()].itertuples():     # preço antes do desdobramento ÷ razão
+        if pd.notna(r.razao) and r.razao > 0 and r.razao != 1:
+            m = (p["ticker"] == r.ticker) & (p["data"] < r.data)
+            p.loc[m, "aj"] = p.loc[m, "aj"] / r.razao
+    return p[["ticker", "data", "aj"]]
+
+
+def vm_diario_recente(mult: pd.DataFrame) -> pd.DataFrame:
+    """Série diária aproximada de valor de mercado (últimos ~200 dias) para as altas e baixas: valor de mercado do
+    último pregão × preço ajustado da data ÷ preço ajustado do último pregão (cálculo próprio)."""
+    if mult is None or mult.empty:
+        return pd.DataFrame()
+    p = _precos_recentes(versao())
+    if p.empty:
+        return pd.DataFrame()
+    u = mult[mult["tipo"] == "trimestral"].sort_values("data").groupby("cnpj").tail(1)
+    u = u[u["valor_mercado"] > 0][["cnpj", "ticker", "valor_mercado"]]
+    ult = p.sort_values("data").groupby("ticker").tail(1)[["ticker", "aj"]].rename(columns={"aj": "aj_ult"})
+    v = p.merge(u, on="ticker").merge(ult, on="ticker")
+    v["valor_mercado"] = v["valor_mercado"] * v["aj"] / v["aj_ult"]
+    return v[["data", "cnpj", "valor_mercado"]].dropna()
+
+
 def cobertura() -> pd.DataFrame:
     """Situação de cada empresa do universo, no formato da aba Cobertura."""
     a = pd.read_csv(io.BytesIO(_baixar("auditoria_eua.csv.gz")), compression="gzip")
