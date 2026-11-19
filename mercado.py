@@ -124,7 +124,9 @@ def proventos() -> pd.DataFrame:
     df = pd.DataFrame(linhas)
     if len(h) and len(df):
         # complemento recente: entra só o que o histórico ainda não tem (mesma empresa, data-com e valor)
-        k = lambda x: x["raiz"] + "|" + x["data_com"].dt.strftime("%Y-%m-%d") + "|" + x["valor"].round(8).astype(str)  # noqa: E731
+        k = lambda x: (x["raiz"] + "|" + x["data_com"].dt.strftime("%Y-%m-%d") + "|" + x["valor"].round(8).astype(str)  # noqa: E731
+                       + "|" + x["isin"].str[6:11].replace({"ACNOR": "ON", "ACNPR": "PN", "ACNPA": "PNA", "ACNPB": "PNB"})
+                       .where(x["isin"] != "", x["classe_b3"]))
         din = df[df["tipo"] == "dinheiro"]
         novos = din[~k(din).isin(set(k(h)))]
         df = pd.concat([df[df["tipo"] == "acoes"], h, novos], ignore_index=True)
