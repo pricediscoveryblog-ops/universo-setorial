@@ -51,3 +51,20 @@ O workflow roda o universo todo dia 20 (e manualmente em Actions → Run workflo
 
 ## Abas do Excel (modo grupos)
 LEIA-ME · painel · mediana_setor · cobertura (com ticker) · reapresentacoes · auditoria · base_longa.
+
+## Mercado (cotações, proventos, VM/EV diário e acionistas) — nov/2026
+- `multiplos.py` (dentro do universo): grava `saidas/mercado/precos_<ano>.parquet` (fechamento bruto do COTAHIST desde
+  2015, ON/PN/units) e `vm_ev_<ano>.parquet` (valor de mercado diário e EV com/sem arrendamento, ponto no tempo: dívida
+  líquida e minoritários do último ITR/DFP divulgado em cada data). Particionado por ano para o Git só regravar o ano corrente.
+- `mercado.py` (workflow `mercado`, dias úteis 20h): `proventos.parquet` (B3: histórico de proventos em dinheiro por
+  espécie + complemento recente por ISIN + desdobramentos/grupamentos/bonificações), `acionistas.parquet` e
+  `distribuicao_capital.parquet` (FRE da CVM, posição acionária com cadeia de controle e free float).
+- Fator de ações da B3: desdobramento/bonificação em % de ações novas (100 = 2 por 1); grupamento = ações resultantes por
+  ação antiga (0,1 = 10 por 1). Conferido contra o salto de preço na data ex (MGLU, WEGE, BBAS, ITUB, BBDC, CMIG).
+
+## Dois apps
+- **Price Discovery Scanning BR**: `app/app.py` — https://pricediscovery-scanning-br.streamlit.app
+- **Price Discovery Scanning USA**: `app/app_eua.py` (roda o mesmo `app.py` com `MERCADO_FIXO = "EUA"`) —
+  https://pricediscovery-scanning-usa.streamlit.app. Lê o coletor-eua público pelo raw do GitHub; cotações do gráfico
+  via yfinance.
+- Seções da aba Empresa em `app/mercado_aba.py`; textos de modelo de negócio em `app/curadoria/<RAIZ>.yaml`.
