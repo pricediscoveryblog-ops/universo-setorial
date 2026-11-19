@@ -1,0 +1,58 @@
+name: mercado
+
+on:
+  workflow_dispatch:
+    inputs:
+      qual:
+        description: "proventos, acionistas ou tudo"
+        required: true
+        default: "tudo"
+        type: choice
+        options: [tudo, proventos, acionistas]
+  schedule:
+    # dias úteis, 20h de Brasília (23:00 UTC): proventos da B3 e Formulário de Referência (CVM),
+    # antes do coletor setorial (23h), que atualiza preços, valor de mercado e EV
+    - cron: "0 23 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mercado
+  cancel-in-progress: false
+
+jobs:
+  mercado:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache dos ZIPs da CVM (FRE)
+        uses: actions/cache@v4
+        with:
+          path: cache_cvm
+          key: cvm-fre-${{ github.run_id }}
+          restore-keys: |
+            cvm-fre-
+
+      - run: pip install -r requirements.txt
+
+      - name: Coletar
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python mercado.py "${{ github.event.inputs.qual || 'tudo' }}"
+
+      - name: Commit
+        run: |
+          git config user.name "pricediscovery-bot"
+          git config user.email "pricediscovery.blog@gmail.com"
+          git add saidas/mercado
+          git diff --cached --quiet || git commit -m "mercado: $(date +%Y-%m-%d)"
+          git pull --rebase --autostash || true
+          git push
