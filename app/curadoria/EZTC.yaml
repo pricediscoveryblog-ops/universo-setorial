@@ -1,0 +1,26 @@
+modelo_negocio: 'Incorporadora e construtora integrada na Região Metropolitana de São Paulo: prospecta terrenos,
+  incorpora, constrói com equipe própria e vende empreendimentos residenciais (médio e alto padrão, além de econômico)
+  e comerciais. Gestão familiar e conservadora em alavancagem; carrega carteira de recebíveis própria (financiamento
+  direto a compradores).'
+segmentos:
+- Incorporação residencial (média e alta renda)
+- Empreendimentos comerciais (EZ INC)
+- Construção própria
+- Carteira de recebíveis/financiamento direto
+historico:
+- ano: '1979'
+  fato: Fundação por Ernesto, Flávio e Silvio Ernesto Zarzur (EZ TEC Engenharia).
+- ano: '2007'
+  fato: Listagem no Novo Mercado (21/06/2007).
+- ano: '2019'
+  fato: Reorganização societária cria a subsidiária EZ INC Incorporações.
+- ano: '2021'
+  fato: Morte do fundador Ernesto Zarzur.
+fontes:
+- nome: Formulário de Referência EZTEC, item 1.1 (RI)
+  url: https://api.mziq.com/mzfilemanager/v2/d/653fada3-cbcd-4015-9a94-2149f610a321/2e3efe24-5cd8-bbd0-94e2-77fcbcf1d958?origin=2
+- nome: Suno — Ernesto Zarzur
+  url: https://www.suno.com.br/tudo-sobre/ernesto-zarzur/amp/
+- nome: AUVP Analítica — EZTC3
+  url: https://analitica.auvp.com.br/acoes/EZTC3
+revisado_em: '2026-11-19'

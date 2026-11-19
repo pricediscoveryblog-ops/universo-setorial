@@ -1,0 +1,25 @@
+modelo_negocio: Incorporadora e construtora líder em Porto Alegre e região metropolitana, atuando em todos os segmentos
+  de renda e em loteamentos, com área própria de vendas (HousIn). Com o mercado gaúcho estagnado, passou a crescer
+  por parcerias com incorporadoras locais e de outros estados (inclusive São Paulo, com a Even).
+segmentos:
+- Incorporação residencial (média e alta renda) no RS
+- Loteamentos
+- Vendas próprias (HousIn)
+- Parcerias fora de Porto Alegre (PR, SP)
+historico:
+- ano: '1970'
+  fato: Fundação por Milton Melnick em Porto Alegre.
+- ano: '2020'
+  fato: IPO a R$ 8,50 por ação (R$ 713,6 mi), então subsidiária da Even (~43% do capital).
+- ano: '2022'
+  fato: Acordos de parceria com construtoras locais.
+- ano: 2024–2025
+  fato: Even conclui a venda de sua participação; nova parceria com a Even para entrar em São Paulo.
+fontes:
+- nome: Moody's Local — Melnick (set/2025)
+  url: https://moodyslocal.com.br/wp-content/uploads/2025/09/1.2.1_MLBR_CO-Melnick_17092025-1.pdf
+- nome: NeoFeed — Melnick volta a se unir com a Even
+  url: https://neofeed.com.br/negocios/melnick-volta-a-se-unir-com-a-even-e-chega-a-sao-paulo/
+- nome: Seu Dinheiro — IPO
+  url: https://www.seudinheiro.com/2020/empresas/subsidiaria-da-even-melnick-estreia-na-b3-com-queda-de-mais-de-1
+revisado_em: '2026-11-19'

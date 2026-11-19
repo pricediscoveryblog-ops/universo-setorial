@@ -1,0 +1,25 @@
+modelo_negocio: 'Fabricante de equipamentos de pós-colheita: silos metálicos, secadores, limpeza e transportadores
+  de grãos, sistemas para portos e terminais, peças de reposição e serviços. Vende para fazendas, cooperativas,
+  agroindústrias e terminais; a demanda acompanha a renda do agro, o crédito rural e o déficit estrutural de armazenagem
+  no Brasil. Também exporta.'
+segmentos:
+- Fazendas (armazenagem na propriedade)
+- Agroindústrias e cooperativas
+- Portos e terminais
+- Peças de reposição e serviços
+- Exportação
+historico:
+- ano: '1925'
+  fato: Fundação como ferraria pelos irmãos Otto e Adolfo Kepler em Panambi (RS).
+- ano: '2004'
+  fato: Inauguração da fábrica de Campo Grande (MS).
+- ano: '2021'
+  fato: Receita líquida recorde acima de R$ 1 bilhão.
+fontes:
+- nome: Kepler Weber — relatório 2021 (RI/MZ)
+  url: https://api.mziq.com/mzfilemanager/v2/d/4eecf609-719e-4c7f-971f-b02a8a05c7b1/22fe193f-4b32-074d-12f9-01b50cdb9e2c?origin=2
+- nome: Análise de Ações — KEPL3
+  url: https://www.analisedeacoes.com/acoes/kepl3/
+- nome: AUVP Analítica — KEPL3
+  url: https://analitica.auvp.com.br/acoes/KEPL3
+revisado_em: '2026-11-19'

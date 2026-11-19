@@ -1,0 +1,26 @@
+modelo_negocio: 'Fabricante nacional de equipamentos médico-hospitalares e implantes: ortopedia e coluna (implantes
+  e instrumentais), esterilização e controle de infecção (autoclaves), centro cirúrgico, odontologia e serviços.
+  Vende a hospitais, clínicas, indústria farmacêutica e laboratórios, no Brasil e no exterior, a partir do complexo
+  industrial de Mogi Mirim (SP).'
+segmentos:
+- Ortopedia, coluna e trauma (implantes)
+- Esterilização e controle de infecção
+- Centro cirúrgico
+- Odontologia
+- Serviços / Genius (biomateriais)
+historico:
+- ano: '1952'
+  fato: Fundação por Manoel Amaral Baumer, que converte a empresa de autopeças para fabricar implantes e instrumentos
+    ortopédicos.
+- ano: '1971'
+  fato: Constituição da Baumer S.A.
+- ano: '2022'
+  fato: 70 anos, com atuação internacional em ambiente seguro, dental, equipamentos, ortopedia e serviços.
+fontes:
+- nome: AUVP Analítica — BALM4
+  url: https://analitica.auvp.com.br/acoes/BALM4
+- nome: ABRAIDI — visita à Baumer
+  url: https://legismap.com.br/conteudos/artigos-e-noticias/executivos-da-abraidi-visitam-a-sede-da-baumer
+- nome: g-medtech — Baumer
+  url: https://g-medtech.com/database/medtech-players/index/baumer/
+revisado_em: '2026-11-19'

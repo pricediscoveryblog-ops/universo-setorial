@@ -1,0 +1,25 @@
+modelo_negocio: Marketplace de produtos usados (moda, acessórios e outros), em que usuários abrem lojas e vendem
+  a outros usuários. A receita é a comissão sobre as vendas (take rate sobre o GMV), mais fretes e serviços; o lucro
+  depende do equilíbrio entre take rate, subsídios/incentivos e custos de marketing e logística. Abriu lojas físicas
+  recentemente.
+segmentos:
+- Marketplace online (C2C)
+- Lojas físicas Enjoei
+- Serviços ao vendedor (fretes, impulsionamento)
+historico:
+- ano: '2009'
+  fato: Fundado por Ana Luiza McLaren e Tiê Lima como blog de venda de roupas usadas.
+- ano: '2012'
+  fato: Vira marketplace e lança modelo premium de venda.
+- ano: '2020'
+  fato: IPO na B3 (novembro).
+- ano: '2025'
+  fato: GMV consolidado de R$ 1,6 bi no ano; take rate de 24,9% e net take rate de 18,3%.
+fontes:
+- nome: Enjoei — apresentação 4T25 (via Investidor10)
+  url: https://investidor10.com.br/acoes/link_comunicado/ENJU3/35158
+- nome: Suno — IPO da Enjoei
+  url: https://www.suno.com.br/noticias/ipo-enjoei-enju3-b3/
+- nome: Renova Invest — Enjoei
+  url: https://renovainvest.com.br/?p=16042
+revisado_em: '2026-11-19'

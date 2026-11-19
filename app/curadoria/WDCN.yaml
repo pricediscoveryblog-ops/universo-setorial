@@ -1,0 +1,30 @@
+modelo_negocio: Distribuidora e montadora (SKD na Bahia) de equipamentos de telecom, TI e infraestrutura, com venda
+  e locação (Tecnologia como Serviço, TaaS). O principal cliente histórico são os provedores regionais de internet
+  (ISPs); o segmento Enterprise atende empresas (data center, redes, segurança, áudio e vídeo). Saiu da energia
+  solar em 2024 e amplia serviços gerenciados.
+segmentos:
+- Telecom (fibra óptica, redes, data center para ISPs)
+- Enterprise (data center, Wi-Fi, segurança, cibersegurança, áudio e vídeo)
+- Serviços gerenciados (Infinite Consulting, 51%)
+- Solar — descontinuado em 2024
+historico:
+- ano: Origem
+  fato: Começa em internet via rádio e expande para banda larga, segurança e comunicação unificada.
+- ano: 2018–2019
+  fato: Aquisições da Axyon e da Munddo; entrada na Colômbia e centro logístico no Panamá.
+- ano: '2020'
+  fato: Entra em energia solar (centro em Extrema, MG).
+- ano: '2023'
+  fato: Prejuízo; telecom cai 20% e solar 50% nas vendas.
+- ano: 2024–2025
+  fato: Saída do solar e volta ao lucro; aporte de 51% na Infinite Consulting (fev/2025); ticker LVTC3 → WDCN3.
+fontes:
+- nome: Teletime — telecom cai 20% em 2023
+  url: https://teletime.com.br/07/03/2024/em-telecom-wdc-networks-registra-queda-de-20-em-2023/
+- nome: Baguete — WDC sai do solar
+  url: https://www.baguete.com.br/noticias/wdc-networks-sai-do-solar-e-entra-no-azul
+- nome: PR Newswire — Infinite Consulting
+  url: https://www.prnewswire.com/br/comunicados-para-a-imprensa/wdc-networks-anuncia-conclusao-de-aporte-na-infinite-consulting-e-amplia-servicos-para-isps-e-operadoras-de-telecom-302387922.html
+- nome: AUVP Analítica — WDCN3
+  url: https://analitica.auvp.com.br/en/acoes/WDCN3
+revisado_em: '2026-11-19'

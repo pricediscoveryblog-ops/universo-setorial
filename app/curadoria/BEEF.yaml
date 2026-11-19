@@ -1,0 +1,25 @@
+modelo_negocio: 'Frigorífico de carne bovina (e ovina) focado em exportação: compra gado, abate e desossa em plantas
+  em sete países da América do Sul e vende carne in natura e derivados, principalmente ao exterior (China é o maior
+  destino). Margem depende do ciclo do gado, do câmbio e do acesso a mercados; o balanço é alavancado após a compra
+  de ativos da Marfrig.'
+segmentos:
+- Brasil
+- Athena Foods (Paraguai, Argentina, Uruguai, Colômbia, Chile)
+- Austrália (ovinos)
+- Trading e processados
+historico:
+- ano: Origem
+  fato: Grupo da família Vilela de Queiroz, sede em Barretos (SP).
+- ano: '2023'
+  fato: Acordo para comprar ativos da Marfrig na América do Sul por R$ 7,5 bi.
+- ano: '2024'
+  fato: Conclui a compra de 13 plantas e 1 centro de distribuição (Brasil, Argentina, Chile), chegando a 46 unidades;
+    prejuízo de R$ 1,57 bi no 4T24.
+fontes:
+- nome: Bloomberg Línea — compra de ativos da Marfrig
+  url: https://www.bloomberglinea.com.br/negocios/minerva-paga-r-75-bilhoes-por-ativos-da-marfrig-para-dar-salto-em-abate/
+- nome: O Povo / Agência Estado — conclusão
+  url: https://www.opovo.com.br/noticias/economia/2024/10/28/amp/minerva-conclui-compra-de-ativos-da-marfrig-no-brasil-e-em-outros-paises-da-america-do-sul.html
+- nome: Suno — 4T24
+  url: https://www.suno.com.br/noticias/?p=598565
+revisado_em: '2026-11-19'

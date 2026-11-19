@@ -1,0 +1,25 @@
+modelo_negocio: 'Indústria química de base: produz cloro e soda cáustica (e derivados como hipoclorito e ácido clorídrico)
+  e PVC, com integração cloro → dicloroetano/MVC → PVC. Receita em um único segmento operacional; os preços seguem
+  ciclos internacionais de soda e PVC, e energia elétrica é o principal insumo (a empresa é autoprodutora).'
+segmentos:
+- 'Cloro-soda: Cubatão (SP), Santo André (SP), Camaçari (BA) e Bahía Blanca (Argentina)'
+- 'PVC: Santo André e Bahía Blanca'
+- Autoprodução de energia; participação na Solalban (Argentina)
+historico:
+- ano: '1969'
+  fato: Fundação; por décadas deteve 50% da Carbocloro em JV com o Grupo Occidental.
+- ano: '2010'
+  fato: Venda da participação na Quattor para a Braskem; reorientação para cloro-soda e vinílicos.
+- ano: '2013'
+  fato: Compra dos 50% restantes da Carbocloro; vira Unipar Carbocloro.
+- ano: '2016'
+  fato: Aquisição de 70,59% da Solvay Indupa (Argentina e Brasil), depois Unipar Indupa; participação ampliada até
+    ~99% em 2023.
+fontes:
+- nome: RI Unipar — perfil corporativo
+  url: https://ri.unipar.com/en/about-unipar/corporate-profile/
+- nome: Suno — OPA Indupa
+  url: https://www.suno.com.br/artigos/radar-do-mercado-unipar-carbocloro-s-a-unip6-comunica-ao-mercado-sobre-opa-de-sua-subsidiaria/amp/
+- nome: InfoMoney — UNIP6
+  url: https://www.infomoney.com.br/UNIP6
+revisado_em: '2026-11-19'
