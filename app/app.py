@@ -2472,6 +2472,7 @@ if True:
                         f_i[c] = "Financeiro" if c == "setor" else np.nan
                 info = pd.concat([info, f_i[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]])
             v = v.merge(info.drop_duplicates("cnpj"), on="cnpj", how="left")
+            v = v[v["rotulo"].notna()]              # fora da base (sem fundamentos): não entra no ranking nem no mapa
             set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
             if set_f:
                 v = v[v["setor"].isin(set_f)]

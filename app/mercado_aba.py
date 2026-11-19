@@ -28,8 +28,7 @@ MACRO = RAIZ_APP.parent / "saidas"
 CURADORIA = RAIZ_APP / "curadoria"
 
 EV_ACOES_APLICADOS = ("DESDOBRAMENTO", "GRUPAMENTO", "BONIFICACAO")
-SUF_CLASSE = {"ON": "3", "PN": "4", "PNA": "5", "PNB": "6", "PNC": "7", "PND": "8", "UNT": "11", "UNIT": "11",
-              "UNITS": "11", "ONEJ": "3", "PNEJ": "4"}
+
 
 
 def _n(s) -> str:
@@ -156,22 +155,51 @@ def fator_acoes_b3(evento: str, fator_b3: float) -> float:
     return np.nan
 
 
+def _classe_isin(isin: str) -> str:
+    """Espécie a partir do ISIN da B3 (BRPETRACNPR6 -> PN; BRTAEECDAM10 -> UNT)."""
+    i = str(isin or "").upper()
+    if len(i) < 11:
+        return ""
+    if i[6:10] == "CDAM":
+        return "UNT"
+    return {"ACNOR": "ON", "ACNPR": "PN", "ACNPA": "PNA", "ACNPB": "PNB", "ACNPC": "PNC", "ACNPD": "PND"}.get(i[6:11], "")
+
+
+CLASSE_SUF = {"3": "ON", "4": "PN", "5": "PNA", "6": "PNB", "7": "PNC", "8": "PND", "11": "UNT"}
+
+
 def eventos_br(prov: pd.DataFrame, precos_tk: pd.DataFrame) -> pd.DataFrame:
-    """Eventos do papel (pelos ISINs que o código já teve), com a data ex = primeiro pregão depois da data-com."""
+    """Eventos do papel, com a data ex = primeiro pregão depois da data-com.
+    Fontes da B3: complemento recente (por ISIN) e histórico de proventos em dinheiro (por espécie ON/PN/UNT).
+    O histórico da B3 às vezes lista um provento só na ON quando ON e PN recebem o mesmo valor; quando a espécie do
+    papel não tem linha naquela data-com, usa-se a da ON (indicado em 'obs'). Units só usam linhas próprias."""
+    vazio = pd.DataFrame(columns=["data_ex", "data_com", "tipo", "evento", "valor", "fator", "obs"])
     if prov.empty or precos_tk.empty:
-        return pd.DataFrame(columns=["data_ex", "data_com", "tipo", "evento", "valor", "fator", "obs"])
-    isins = set(precos_tk["isin"].dropna().astype(str)) - {""}
+        return vazio
     tk = str(precos_tk["ticker"].iloc[-1])
-    suf = tk[4:]
     raiz = str(precos_tk["raiz"].iloc[-1]) if "raiz" in precos_tk else tk[:4]
-    # histórico da B3 vem por espécie (ON/PN/UNT), sem ISIN; o complemento recente vem por ISIN
-    por_classe = prov["isin"].fillna("").eq("") & prov["raiz"].eq(raiz) & \
-        prov["classe_b3"].map(lambda c: SUF_CLASSE.get(_n(c).replace(" ", ""))).eq(suf)
-    e = prov[prov["isin"].isin(isins) | por_classe].copy()
-    e = e.assign(_v=e["valor"].round(6)).drop_duplicates(["data_com", "tipo", "evento", "_v", "fator_b3"]).drop(columns="_v")
+    alvo = CLASSE_SUF.get(tk[4:], "")
+    isins = set(precos_tk["isin"].dropna().astype(str)) - {""}
+    e = prov[prov["raiz"].eq(raiz) | prov["isin"].isin(isins)].copy()
     if e.empty:
-        return pd.DataFrame(columns=["data_ex", "data_com", "tipo", "evento", "valor", "fator", "obs"])
+        return vazio
+    e["classe"] = [(_classe_isin(i) if str(i or "") else _n(c).replace(" ", ""))
+                   for i, c in zip(e["isin"].fillna(""), e["classe_b3"].fillna(""))]
+    e["classe"] = e["classe"].replace({"UNIT": "UNT", "UNITS": "UNT"})
+    proprias = e[e["isin"].isin(isins) | (e["classe"] == alvo)]
+    if alvo not in ("ON", "UNT", ""):
+        on = e[(e["classe"] == "ON") & (e["tipo"] == "dinheiro")]
+        chave = lambda x: x["data_com"].dt.strftime("%Y-%m-%d") + "|" + x["evento"]  # noqa: E731
+        falta = on[~chave(on).isin(set(chave(proprias[proprias["tipo"] == "dinheiro"])))]
+        if len(falta):
+            falta = falta.assign(obs="valor da ON (a B3 listou o provento só na ON nesta data-com)")
+            proprias = pd.concat([proprias, falta])
+    e = proprias.assign(_v=proprias["valor"].round(6)).drop_duplicates(
+        ["data_com", "tipo", "evento", "_v", "fator_b3"]).drop(columns="_v")
     datas = precos_tk["data"].sort_values().to_numpy()
+    e = e[e["data_com"] >= pd.Timestamp(datas[0])]          # só eventos dentro da série de preços
+    if e.empty:
+        return vazio
     k = np.searchsorted(datas, e["data_com"].to_numpy(dtype="datetime64[ns]"), side="right")
     e["data_ex"] = [pd.Timestamp(datas[i]) if i < len(datas) else pd.NaT for i in k]
     e["fator"] = [fator_acoes_b3(ev, f) if t == "acoes" else np.nan for ev, f, t in zip(e["evento"], e["fator_b3"], e["tipo"])]
@@ -350,8 +378,8 @@ def mapa_calor(v: pd.DataFrame, rotulo_periodo: str, moeda: str = "R$", chave: s
     n_max = c2.slider("Empresas no mapa (as de maior valor de mercado)", 30, max(30, len(v)), min(150, len(v)), 10,
                       key=f"{chave}_n")
     v = v.nlargest(n_max, "vm_fim")
-    v["setor"] = v["setor"].fillna("Sem setor").replace("", "Sem setor")
-    v["subsetor"] = v["subsetor"].fillna("—").replace("", "—")
+    for c_, vazio in (("setor", "Sem setor"), ("subsetor", "—"), ("rotulo", "?")):
+        v[c_] = v[c_].astype("object").where(v[c_].notna(), vazio).astype(str).replace({"": vazio, "nan": vazio})
     v["tk"] = v["rotulo"].astype(str).str.split(" — ").str[0]
     v["vm_ini"] = v["vm_fim"] / (1 + v["variacao"])
 

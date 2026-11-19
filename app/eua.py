@@ -86,12 +86,16 @@ def _token() -> str | None:
 
 
 def tem_acesso() -> bool:
-    return bool(LOCAL or _token())
+    return True          # coletor-eua é público desde nov/2026: sem token, lê pelo raw.githubusercontent.com
 
 
 def _baixar(nome: str) -> bytes:
     if LOCAL:
         return (Path(LOCAL) / nome).read_bytes()
+    if not _token():
+        r = requests.get(f"https://raw.githubusercontent.com/{REPO}/{RAMO}/dados/{nome}", timeout=180)
+        r.raise_for_status()
+        return r.content
     r = requests.get(f"https://api.github.com/repos/{REPO}/contents/dados/{nome}", params={"ref": RAMO},
                      timeout=180, headers={"Authorization": f"Bearer {_token()}",
                                            "Accept": "application/vnd.github.raw+json",
