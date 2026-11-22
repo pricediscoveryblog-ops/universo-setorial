@@ -1,0 +1,70 @@
+# eletricas.yaml — Price Discovery Scanning BR
+# Classificação das empresas do segmento B3 "Energia Elétrica" para o EBITDA ajustado (ebitda_ajustado).
+# A B3 põe todas no mesmo segmento, por isso a curadoria é por empresa (chave = CNPJ da CVM, só dígitos).
+#
+# tipo:     transmissao | distribuicao | integrada | geracao | holding
+# ajustes:  transmissao  -> EBITDA + custo de construção − Δ ativo de contrato/concessão (BP)
+#                           (tira receita de construção, remuneração e correção monetária do ativo; entra a RAP faturada)
+#           vnr          -> EBITDA − atualização do ativo financeiro indenizável (VNR), ajuste não-caixa da DFC
+#           bonificacao  -> EBITDA − Δ saldo da bonificação pela outorga (BP) (UHEs do leilão de 2015 e similares)
+# Integradas com distribuição: a transmissão NÃO é ajustada (o consolidado mistura o ativo de contrato e o custo de
+# construção da distribuição com os da transmissão), só VNR/bonificação; o app mostra a nota.
+# "confirmar: true" = classificação a conferir (empresa pequena/pouco conhecida).
+
+"08364948000138": {ticker: ALUP11, empresa: ALUPAR, tipo: transmissao, ajustes: [transmissao]}   # + geração (sem ativo de contrato)
+"02998611000104": {ticker: ISAE3, empresa: ISA ENERGIA, tipo: transmissao, ajustes: [transmissao]}
+"07859971000130": {ticker: TAEE11, empresa: TAESA, tipo: transmissao, ajustes: [transmissao]}
+"92715812000131": {ticker: EEEL, empresa: CEEE-T (CPFL Transmissão), tipo: transmissao, ajustes: [transmissao]}
+"09584854000137": {ticker: MANT, empresa: MANAUS TRANSMISSORA, tipo: transmissao, ajustes: [transmissao]}
+"10338320000100": {ticker: AFLT3, empresa: AFLUENTE T, tipo: transmissao, ajustes: [transmissao]}
+"05336882000184": {ticker: CPTE, empresa: CACHOEIRA PAULISTA TRANSMISSORA, tipo: transmissao, ajustes: [transmissao], confirmar: true}
+"00001180000126": {ticker: AXIA3, empresa: AXIA ENERGIA (Eletrobras), tipo: transmissao, ajustes: [transmissao]}   # geração + transmissão, sem distribuição
+"02474103000119": {ticker: EGIE3, empresa: ENGIE BRASIL, tipo: transmissao, ajustes: [transmissao, bonificacao]}   # geração + transmissão; Jaguara/Miranda
+
+"02016440000162": {ticker: AESL, empresa: RGE SUL / RGE (CPFL), tipo: distribuicao, ajustes: [vnr]}
+"33050071000158": {ticker: CBEE3, empresa: AMPLA (Enel RJ), tipo: distribuicao, ajustes: [vnr]}
+"15139629000194": {ticker: CEEB3, empresa: COELBA, tipo: distribuicao, ajustes: [vnr]}
+"08467115000100": {ticker: CEED3, empresa: CEEE-D (Equatorial RS), tipo: distribuicao, ajustes: [vnr]}
+"10835932000108": {ticker: CEPE, empresa: CELPE, tipo: distribuicao, ajustes: [vnr]}
+"07047251000170": {ticker: COCE3, empresa: COELCE (Enel CE), tipo: distribuicao, ajustes: [vnr]}
+"04172213000151": {ticker: CPFP, empresa: CPFL PIRATININGA, tipo: distribuicao, ajustes: [vnr]}
+"08324196000181": {ticker: CSRN, empresa: COSERN, tipo: distribuicao, ajustes: [vnr]}
+"02302100000106": {ticker: EBEN, empresa: EDP SÃO PAULO (ex-Bandeirante), tipo: distribuicao, ajustes: [vnr]}
+"02328280000197": {ticker: EKTR3, empresa: ELEKTRO, tipo: distribuicao, ajustes: [vnr]}
+"61695227000193": {ticker: ELPL, empresa: ELETROPAULO (Enel SP), tipo: distribuicao, ajustes: [vnr]}
+"15413826000150": {ticker: ENER, empresa: ENERSUL (Energisa MS), tipo: distribuicao, ajustes: [vnr]}
+"03467321000199": {ticker: ENMT3, empresa: ENERGISA MT, tipo: distribuicao, ajustes: [vnr]}
+"06272793000184": {ticker: EQMA3B, empresa: EQUATORIAL MARANHÃO, tipo: distribuicao, ajustes: [vnr]}
+"04895728000180": {ticker: EQPA3, empresa: EQUATORIAL PARÁ, tipo: distribuicao, ajustes: [vnr]}
+"28152650000171": {ticker: ESCE, empresa: EDP ESPÍRITO SANTO (Escelsa), tipo: distribuicao, ajustes: [vnr]}
+"60444437000146": {ticker: LIGH-DEBE1, empresa: LIGHT SESA, tipo: distribuicao, ajustes: [vnr]}
+"03378521000175": {ticker: LIGT3, empresa: LIGHT S/A, tipo: distribuicao, ajustes: [vnr]}   # holding; predominantemente distribuição
+"33050196000188": {ticker: PALF, empresa: CPFL PAULISTA, tipo: distribuicao, ajustes: [vnr]}
+"83878892000155": {ticker: CLSC3, empresa: CELESC, tipo: distribuicao, ajustes: [vnr]}   # + pequena geração
+"61584140000149": {ticker: REDE3, empresa: REDE ENERGIA (Energisa), tipo: distribuicao, ajustes: [vnr]}
+
+"17155730000164": {ticker: CMIG3, empresa: CEMIG, tipo: integrada, ajustes: [vnr, bonificacao]}
+"02429144000193": {ticker: CPFE3, empresa: CPFL ENERGIA, tipo: integrada, ajustes: [vnr]}
+"76483817000120": {ticker: CPLE3, empresa: COPEL, tipo: integrada, ajustes: [vnr]}
+"03220438000173": {ticker: EQTL3, empresa: EQUATORIAL, tipo: integrada, ajustes: [vnr]}
+"00864214000106": {ticker: ENGI11, empresa: ENERGISA, tipo: integrada, ajustes: [vnr]}
+"01083200000118": {ticker: NEOE, empresa: NEOENERGIA, tipo: integrada, ajustes: [vnr]}
+
+"00194724000113": {ticker: AESO3, empresa: AES OPERAÇÕES, tipo: geracao, ajustes: []}
+"09359927000197": {ticker: ASAB, empresa: ASA BRANCA, tipo: geracao, ajustes: []}
+"28594234000123": {ticker: AURE3, empresa: AUREN, tipo: geracao, ajustes: []}
+"39881421000104": {ticker: CGEE, empresa: CEEE-G, tipo: geracao, ajustes: []}
+"25369840000157": {ticker: COMR3, empresa: COMERC, tipo: geracao, ajustes: []}
+"08439659000150": {ticker: CPRE, empresa: CPFL RENOVÁVEIS, tipo: geracao, ajustes: []}
+"02302101000142": {ticker: EMAE3, empresa: EMAE, tipo: geracao, ajustes: []}
+"04423567000121": {ticker: ENEV3, empresa: ENEVA, tipo: geracao, ajustes: []}
+"12489315000123": {ticker: FGEN, empresa: FGENERGIA, tipo: geracao, ajustes: [], confirmar: true}
+"02291077000193": {ticker: PRMN3B, empresa: PROMAN, tipo: geracao, ajustes: [], confirmar: true}
+"08534605000174": {ticker: RNEW3, empresa: RENOVA, tipo: geracao, ajustes: []}
+"09149503000106": {ticker: SEGE, empresa: SERENA GERAÇÃO, tipo: geracao, ajustes: []}
+"42500384000151": {ticker: SRNA, empresa: SERENA, tipo: geracao, ajustes: []}
+"10502676000137": {ticker: TEPE, empresa: TERMOPERNAMBUCO, tipo: geracao, ajustes: []}
+
+"00070698000111": {ticker: CEBR3, empresa: CEB, tipo: holding, ajustes: []}
+"02998301000181": {ticker: GEPA3, empresa: RIO PARANAPANEMA (holding), tipo: holding, ajustes: []}
+"08560444000193": {ticker: GPAR3, empresa: CELGPAR, tipo: holding, ajustes: []}

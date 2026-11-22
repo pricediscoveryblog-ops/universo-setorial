@@ -41,16 +41,22 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "servico_div_arrend_misto", "capex_frota_fco", "baixa_frota_valor_contabil", "capex_frota_liquido",
           # construção de concessões (ICPC 01) e valores reportados antes do ajuste
           "receita_construcao", "custo_construcao", "margem_construcao_dfc",
+          # setor elétrico (eletricas.yaml): custo de implantação, VNR e variação dos saldos de concessão no período
+          "custo_implantacao", "vnr_atualizacao", "var_ativo_concessao", "var_bonificacao",
           *cs.REPORTADOS.values()]
 # Segmentos B3 de concessões do modelo do intangível (sem ativo financeiro da concessão): a construção sai da
 # receita, do CPV e dos lucros (cs.ajustar_construcao). Energia elétrica fica de fora (transmissão = ativo de
 # contrato/financeiro; distribuição = bifurcação com ativo financeiro indenizável).
+# Setor elétrico: tipo e ajustes por empresa (CNPJ) para o EBITDA ajustado (cs.ajustar_eletrico)
+ELETRICAS = {cs.so_digitos(k): v for k, v in
+             (yaml.safe_load(open("eletricas.yaml", encoding="utf-8")) or {}).items()} \
+    if Path("eletricas.yaml").exists() else {}
 SEG_CONSTRUCAO = {"exploracao de rodovias", "agua e saneamento", "servicos de apoio e armazenagem",
                   "transporte ferroviario", "transporte hidroviario"}
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
-            "fornecedores"]
+            "fornecedores", "ativo_concessao_saldo", "bonificacao_saldo"]
 # fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
 CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento", "ir_csll_pagos", "juros_pagos",
               "principal_pago", "servico_divida_pago", "servico_div_arrend_misto"]
@@ -237,11 +243,18 @@ def snapshots(df: pd.DataFrame, doc: str, aud: list) -> list[dict]:
             diag = [{"cnpj": cnpj, "exercicio": exerc.year, "faltou": ",".join(faltou), "demonstracao": r.DEMO,
                      "cd_conta": r.CD_CONTA, "ds_conta": r.DS_CONTA, "valor_rs_mm": r.VL}
                     for r in dfc.itertuples()]
+        # setor elétrico: demonstrações completas das DFPs recentes, para calibrar as buscas do EBITDA ajustado
+        diag_elet = []
+        if cnpj in ELETRICAS and doc == "DFP" and ordem == "ultimo" and exerc.year >= datetime.now().year - 3:
+            e_ = g[g["DEMO"].isin(["DRE", "BPA", "DFC_MI", "DFC_MD", "DVA"])]
+            diag_elet = [{"cnpj": cnpj, "ticker": ELETRICAS[cnpj].get("ticker"), "tipo_eletrica": ELETRICAS[cnpj].get("tipo"),
+                          "exercicio": exerc.year, "demonstracao": r.DEMO, "cd_conta": r.CD_CONTA,
+                          "ds_conta": r.DS_CONTA, "valor_rs_mm": r.VL} for r in e_.itertuples()]
         out.append({"cnpj": cnpj, "doc": doc, "tipo": tipo, "dt_ini": dt_ini, "dt_fim": dt_fim,
                     "exercicio": exerc.year, "trimestre": 4 if doc == "DFP" else _trimestre(dt_ini, dt_fim),
                     "base": "consolidado" if base == "con" else "individual",
                     "denominacao": g["DENOM_CIA"].iloc[0], "arq_ano": ctx["arq_ano"], "m": m, "aud": a_tmp,
-                    "diag": diag})
+                    "diag": diag, "diag_elet": diag_elet})
     return out
 
 
@@ -253,6 +266,7 @@ def _linha(s: dict, tipo: str, m: dict, periodo: str, fonte: str, notas: list) -
             "fonte": fonte, "base": s["base"], "regime_contabil": m.get("regime_contabil"),
             **{k: m.get(k) for k in FLUXOS + ESTOQUES + DERIVADAS},
             "margem_construcao": m.get("margem_construcao"), "fonte_construcao": m.get("fonte_construcao") or "",
+            "fonte_ajuste_eletrico": m.get("fonte_ajuste_eletrico") or "",
             "notas": "; ".join(x for x in extra if x)}
 
 
@@ -262,7 +276,10 @@ DERIVADAS = ["div_liq_com_arrend", "div_liq_sem_arrend", "ncav", "margem_bruta",
              # cobertura da dívida (bases e índices; ver cs.derivadas)
              "desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex",
              "ebitda_ir_capex", "servico_divida_c_arrend", "capex_cobertura", "cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda",
-             "dscr_pos_capex", "dscr_capex_arrend_den", "dscr_ebitda_arrend_den"]
+             "dscr_pos_capex", "dscr_capex_arrend_den", "dscr_ebitda_arrend_den",
+             # setor elétrico: EBITDA ajustado (≈ regulatório/caixa) e índices com ele
+             "ebitda_ajustado", "margem_ebitda_ajustado", "div_liq_ebitda_ajustado", "caixa_servico_ajustado",
+             "dscr_ebitda_ajustado"]
 
 
 def gravar_por_ano(df: pd.DataFrame, prefixo: str) -> None:
@@ -275,14 +292,39 @@ def gravar_por_ano(df: pd.DataFrame, prefixo: str) -> None:
         g.reset_index(drop=True).to_parquet(pasta / f"{prefixo}_{ano}.parquet", index=False, compression="zstd")
 
 
-def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False) -> tuple[list, list, list]:
+def _variacoes_saldos(snaps: list[dict], chaves=(("ativo_concessao_saldo", "var_ativo_concessao"),
+                                                  ("bonificacao_saldo", "var_bonificacao"))) -> None:
+    """Variação acumulada no exercício de saldos do balanço (saldo na data − saldo no fim do exercício anterior),
+    gravada em s["m"] como fluxo: o trimestre sai por diferença de acumulados e o LTM pela soma, como os demais.
+    Saldo de referência = DFP do exercício anterior (reapresentado > original, como no anual)."""
+    fye = {}
+    for s in snaps:
+        if s["doc"] != "DFP":
+            continue
+        a = fye.get(s["exercicio"])
+        if a is None or (s["tipo"] == "reapresentado" and a["tipo"] == "original") or \
+                (s["tipo"] == a["tipo"] and s["arq_ano"] > a["arq_ano"]):
+            fye[s["exercicio"]] = s
+    for s in snaps:
+        ant = fye.get(s["exercicio"] - 1)
+        for saldo, var in chaves:
+            a, b = s["m"].get(saldo), ant["m"].get(saldo) if ant else np.nan
+            # saldo ausente num dos lados fica NaN (não supõe zero: a busca textual pode ter falhado num ano)
+            s["m"][var] = a - b if pd.notna(a) and pd.notna(b) else np.nan
+
+
+def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False,
+                   eletrica: dict | None = None) -> tuple[list, list, list]:
     """Retorna (linhas, auditoria, info) para uma empresa. construcao=True: concessão do modelo do intangível,
-    a construção sai da receita, do CPV e dos lucros (ver cs.ajustar_construcao)."""
+    a construção sai da receita, do CPV e dos lucros (ver cs.ajustar_construcao). eletrica: entrada de
+    eletricas.yaml (tipo e ajustes do EBITDA ajustado, ver cs.ajustar_eletrico)."""
     def ajc(m):
         m = cs.ajustar_construcao(m, construcao)
         if construcao and not m.get("fonte_construcao"):
             m["fonte_construcao"] = "não identificada (DRE/DVA/DFC)"
-        return m
+        return cs.ajustar_eletrico(m, eletrica)
+    if eletrica:
+        _variacoes_saldos(snaps)
     linhas, aud = [], []
     dfp = [s for s in snaps if s["doc"] == "DFP"]
     itr = [s for s in snaps if s["doc"] == "ITR"]
@@ -452,7 +494,7 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             del bruto
             gc.collect()
 
-    linhas, aud, cob, diag = [], [], [], []
+    linhas, aud, cob, diag, diag_elet = [], [], [], [], []
     ident = univ.set_index("cnpj_cvm")
     for cnpj in sorted(set(univ["cnpj_cvm"])):
         r = ident.loc[cnpj]
@@ -476,7 +518,9 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
             continue
         for s in snaps[cnpj]:
             diag += [{**d, "empresa": meta["empresa"], "ticker": meta["ticker"]} for d in s.get("diag", [])]
-        l, a, info = montar_empresa(snaps[cnpj], n_anos, construcao=cs.norm(r["segmento"]) in SEG_CONSTRUCAO)
+            diag_elet += s.get("diag_elet", [])
+        l, a, info = montar_empresa(snaps[cnpj], n_anos, construcao=cs.norm(r["segmento"]) in SEG_CONSTRUCAO,
+                                    eletrica=ELETRICAS.get(cnpj) or ELETRICAS.get(r["cnpj"]))
         linhas += [{**meta, **x} for x in l]
         aud += [{"cnpj": cnpj, "empresa": meta["empresa"], **x} for x in a]
         cad_e = cad[cad["CNPJ_NUM"] == cnpj]
@@ -522,6 +566,9 @@ def rodar(n_anos: int = 10, atualizar_b3: bool = False, limite: int = 0):
         print(f"  -> financeiras.csv.gz ({len(fb)} linhas), auditoria_financeiras.csv.gz")
     if diag:
         pd.DataFrame(diag).to_csv(SAIDA / "diagnostico_dfc.csv.gz", index=False, compression="gzip")
+    if diag_elet:
+        pd.DataFrame(diag_elet).to_csv(SAIDA / "diagnostico_eletricas.csv.gz", index=False, compression="gzip")
+        print(f"  -> diagnostico_eletricas.csv.gz ({len(diag_elet)} linhas)")
     # múltiplos de mercado (valor de mercado × PL, lucro e EBITDA), trimestrais e anuais
     try:
         import multiplos
