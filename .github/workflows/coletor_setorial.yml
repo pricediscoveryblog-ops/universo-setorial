@@ -32,6 +32,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}   # ponta do branch ao iniciar (rodada na fila usa o código mais novo, não o do disparo)
 
       - uses: actions/setup-python@v5
         with:
@@ -72,5 +74,7 @@ jobs:
           git config user.email "pricediscovery.blog@gmail.com"
           git add saidas/ cache_b3/ .gitignore
           git diff --cached --quiet || git commit -m "coletor setorial: $(date +%Y-%m-%d)"
-          git pull --rebase --autostash || true
+          # rodada na fila (concurrency) parte de um commit antigo: em conflito nas saídas binárias fica a versão
+          # desta rodada (-X theirs = o commit sendo reaplicado no rebase), que é a mais recente
+          git pull --rebase --autostash -X theirs
           git push
