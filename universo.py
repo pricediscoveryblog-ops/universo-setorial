@@ -315,22 +315,22 @@ def _variacoes_saldos(snaps: list[dict], chaves=(("ativo_concessao_saldo", "var_
             s["m"][var] = a - b if pd.notna(a) and pd.notna(b) else np.nan
 
 
-def _dfc_confiavel(snaps: list[dict], tol: float = 0.10) -> bool:
-    """A DFC da empresa reproduz o Δ do ativo de contrato do balanço? Testa os exercícios (DFP) sem aquisição de
-    participações: em todos, |Δ DFC − Δ BP| ≤ tol × |Δ BP|. Só então o Δ pela DFC substitui o do balanço nos períodos
-    com compra de SPEs (ver cs.ajustar_eletrico)."""
-    ok = 0
+def _dfc_confiavel(snaps: list[dict], tol: float = 0.10, n: int = 2) -> bool:
+    """A DFC da empresa reproduz o Δ do ativo de contrato do balanço? Testa os n exercícios (DFP) mais recentes sem
+    aquisição de participações: em todos, |Δ DFC − Δ BP| ≤ tol × |Δ BP|. Só então o Δ pela DFC substitui o do
+    balanço nos períodos com compra de SPEs (ver cs.ajustar_eletrico). Anos antigos ficam de fora: o plano de contas
+    e as linhas da DFC mudam com o tempo."""
+    anos = {}
     for s in snaps:
         m = s["m"]
-        if s["doc"] != "DFP":
+        if s["doc"] != "DFP" or s["tipo"] != "original":
             continue
         aq, vb, vd = m.get("aquisicoes_participacoes"), m.get("var_ativo_concessao"), m.get("var_ativo_concessao_dfc")
         if (aq is not None and pd.notna(aq) and aq > 0) or pd.isna(vb) or pd.isna(vd) or not vb:
             continue
-        if abs(vd - vb) > tol * abs(vb):
-            return False
-        ok += 1
-    return ok > 0
+        anos[s["exercicio"]] = abs(vd - vb) <= tol * abs(vb)
+    rec = [anos[a] for a in sorted(anos, reverse=True)[:n]]
+    return bool(rec) and all(rec)
 
 
 def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False,
