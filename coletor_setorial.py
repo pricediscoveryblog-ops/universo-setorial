@@ -431,22 +431,31 @@ RX_CONSTR_EXC = re.compile(r"construcao civil|incorpora|imobiliari|provis|perda|
 RX_MARGEM_CONSTR = re.compile(r"margem.{0,40}constru")
 RX_MARGEM_CONSTR_EXC = re.compile(r"transmiss|remunerac|ativos? de contrato|operac")
 # Setor elétrico (EBITDA ajustado; classificação por empresa em eletricas.yaml)
-# custo de implantação da transmissão: subcontas do CPV/DVA com construção/implementação de infraestrutura, sem
-# as linhas que juntam O&M
+# custo de implantação da transmissão: subcontas do CPV/DVA ou ajuste não-caixa da DFC com construção/implementação
+# de infraestrutura; linhas que juntam O&M ficam à parte (RX_IMPLANT_OM)
 RX_IMPLANT = re.compile(r"constru|implementac|implantac|infraestrutura")
-RX_IMPLANT_EXC = re.compile(r"operac|manutenc|pessoal|energia (?:comprada|eletrica)|provis|perda|ineficien|civil")
+RX_IMPLANT_EXC = re.compile(r"pessoal|energia (?:comprada|eletrica)|provis|perda|ineficien|civil|usina|geracao|receita|"
+                            r"remunerac|margem|baixa|amortiz|deprec")
+RX_IMPLANT_OM = re.compile(r"operac|manutenc")
 # saldo do ativo de contrato/concessão da transmissão no balanço (circulante + não circulante)
-RX_AC_SALDO = re.compile(r"ativos? (?:de|do) contratos?|ativos? (?:da|de) concess|ativos? financeiros? (?:da|de) concess|"
-                         r"concessao (?:do|de) servico publico \(ativo|\brbse\b|infraestrutura de concess")
+RX_AC_SALDO = re.compile(r"ativos? (?:de|do) contratos?|ativos? contratua|ativos? (?:da|de) concess|"
+                         r"ativos? financeiros? (?:da|de) concess|concessao (?:do|de) servico publico \(ativo|\brbse\b|"
+                         r"infraestrutura de concess")
 RX_AC_SALDO_EXC = re.compile(r"exclusividade|seguro|direito de uso|bonifica|setorial|passivo|\bimpost|tribut|diferid")
+RX_AC_FIN = re.compile(r"financeir")   # parte "ativo financeiro" do saldo (na geração = bonificação pela outorga)
 # bonificação pela outorga (geração): saldo no balanço
 RX_BONIF = re.compile(r"bonifica\w* (?:pel[ao] |da |de )?outorga|outorga.{0,20}bonifica")
 # atualização do ativo financeiro indenizável (VNR) da distribuição: ajuste não-caixa da DFC (6.01.01/6.01.03)
 RX_VNR = re.compile(r"ativos? financeiros? (?:indeniz|da concess|de concess|\(concess)|ativos? (?:sujeito a )?indeniz|"
-                    r"sujeito a indeniza|bens reversiveis e indeniz|concessao (?:do )?servico publico \(ativo financeiro|\bvnr\b")
+                    r"sujeito a indeniza|bens reversiveis e indeniz|concessao (?:do )?servico publico \(ativo financeiro|\bvnr\b|"
+                    r"atualizac\w* d[oa]s? ativos?.{0,40}financeiro|valor (?:novo )?de reposicao|"
+                    r"expectativa do fluxo de caixa.{0,30}concess")
 RX_VNR_VERBO = re.compile(r"atualiza|remunera|valor justo|receita|correc|ajuste|marcacao")
 RX_VNR_EXC = re.compile(r"setorial|disponive|venda|receb|baixa|perda|amortiza|itaipu|aplicac|transmiss|aumento|"
-                        r"reduc|diminui|variac|investiment|adic|aquisi")
+                        r"reduc|diminui|variac|investiment|adic|aquisi|parcela a")
+# PIS/COFINS diferidos sobre a receita do ativo de contrato (não-caixa; o Δ do ativo sai pelo valor bruto)
+RX_PIS_DIF = re.compile(r"(?:pis|cofins|tributos indiretos).{0,30}diferid")
+RX_EQUIV = re.compile(r"equivalencia patrimonial")
 IR_CS_CONSTRUCAO = 0.34  # alíquota nominal de IR + CS usada para retirar a margem de construção do lucro líquido
 # campos reportados preservados antes do ajuste de construção (o principal passa a ser o ajustado)
 REPORTADOS = {"receita": "receita_reportada", "cpv": "cpv_reportado", "lucro_bruto": "lucro_bruto_reportado",
@@ -955,9 +964,15 @@ def ajustar_construcao(m: dict, ativo: bool) -> dict:
 
 def componentes_eletricos(sub: pd.DataFrame, dfc: pd.DataFrame, dfc_demo: str, registrar=None) -> dict:
     """Peças do EBITDA ajustado do setor elétrico (busca textual; aplicadas só às empresas de eletricas.yaml):
-      ativo_concessao_saldo: saldo do ativo de contrato/concessão da transmissão (BP, 1.01 + 1.02), R$ mm
-      bonificacao_saldo:     saldo da bonificação pela outorga (BP)
-      custo_implantacao:     custo de construção/implementação de infraestrutura (DRE 3.02.xx > DVA 7.02.xx), positivo
+      ativo_concessao_saldo: saldo do ativo de contrato/concessão (BP, 1.01 + 1.02), R$ mm
+      ativo_fin_concessao_saldo: parte "ativo financeiro de concessão" desse saldo (bonificação, na geração)
+      bonificacao_saldo:     saldo com "bonificação pela outorga" no nome (BP)
+      custo_implantacao:     custo de construção/implementação de infraestrutura (DRE 3.02.xx > ajuste da DFC >
+                             DVA 7.02.xx; com transmissão no nome, quando houver), positivo
+      custo_implant_om:      linha do CPV que junta implantação e O&M (ex.: ISA), menos O&M estimado pela DVA
+                             (insumos de terceiros 7.02.02 + pessoal 7.08.01) — aproximação
+      pis_cofins_diferidos:  PIS/COFINS diferidos somados de volta na DFC (não-caixa)
+      equivalencia_patrimonial: DRE 3.04.06 (sai do EBITDA ajustado; o regulatório consolidado não a inclui)
       vnr_atualizacao:       atualização do ativo financeiro indenizável da DFC (ganho não-caixa = positivo)"""
     out = {}
     bpa = sub[(sub["DEMO"] == "BPA") & sub["CD_CONTA"].str.match(r"^1\.0[12]\.")]
@@ -968,58 +983,106 @@ def componentes_eletricos(sub: pd.DataFrame, dfc: pd.DataFrame, dfc_demo: str, r
         registrar(ac, "eletrico:ativo_concessao_saldo")
         registrar(bonif, "eletrico:bonificacao_saldo")
     out["ativo_concessao_saldo"] = ac["VL"].sum() if len(ac) else np.nan
+    fin = ac[ac["DESC"].str.contains(RX_AC_FIN)]
+    out["ativo_fin_concessao_saldo"] = fin["VL"].sum() if len(ac) else np.nan
     out["bonificacao_saldo"] = bonif["VL"].sum() if len(bonif) else np.nan
 
-    def implant(demo, prefixo):
+    def implant(demo, prefixo, om=False):
         d = sub[(sub["DEMO"] == demo) & sub["CD_CONTA"].str.match(prefixo) & sub["DESC"].str.contains(RX_IMPLANT)
                 & ~sub["DESC"].str.contains(RX_IMPLANT_EXC)]
+        d = d[d["DESC"].str.contains(RX_IMPLANT_OM) == om]
+        if d["DESC"].str.contains("transmiss").any():   # empresa com geração e transmissão: só a da transmissão
+            d = d[d["DESC"].str.contains("transmiss")]
         return topo(d)
-    ci = implant("DRE", r"^3\.02\.")
-    fonte = "DRE"
-    if not len(ci) or not _nz(ci["VL"].sum()):
-        ci, fonte = implant("DVA", r"^7\.02\."), "DVA"
-    v = _nz(ci["VL"].sum()) if len(ci) else np.nan
+    v, fonte, ci = np.nan, "", None
+    for demo, pref, nome in (("DRE", r"^3\.02\.", "DRE"), ("DFC_MI", r"^6\.01\.0[13]\.", "DFC (ajuste não-caixa)"),
+                             ("DVA", r"^7\.02\.", "DVA")):
+        ci = implant(demo, pref)
+        if demo == "DFC_MI":
+            ci = ci[ci["VL"] > 0]   # custo somado de volta ao lucro
+        v = _nz(ci["VL"].sum()) if len(ci) else np.nan
+        if pd.notna(v):
+            fonte = nome
+            break
     out["custo_implantacao"] = abs(v) if pd.notna(v) else np.nan
     out["fonte_custo_implantacao"] = f"custo de implantação {fonte}" if pd.notna(v) else ""
     if registrar and pd.notna(v):
         registrar(ci, "eletrico:custo_implantacao")
+    cm = implant("DRE", r"^3\.02\.", om=True)
+    vm = _nz(cm["VL"].sum()) if len(cm) else np.nan
+    if pd.notna(vm):
+        om = np.nansum([conta(sub, "DVA", "7.02.02"), conta(sub, "DVA", "7.08.01") * -1])
+        out["custo_implant_om"] = max(abs(vm) - abs(om), 0.0)
+        if registrar:
+            registrar(cm, "eletrico:custo_implantacao_com_om")
+    else:
+        out["custo_implant_om"] = np.nan
+
+    eq = sub[(sub["DEMO"] == "DRE") & sub["CD_CONTA"].str.match(r"^3\.04\.") & sub["DESC"].str.contains(RX_EQUIV)]
+    eq = topo(eq)
+    out["equivalencia_patrimonial"] = eq["VL"].sum() if len(eq) else 0.0
 
     if dfc_demo == "DFC_MI" and not dfc.empty:
         aj = dfc[dfc["CD_CONTA"].str.match(r"^6\.01\.0[13]\.")]
-        vn = topo(aj[aj["DESC"].str.contains(RX_VNR) & aj["DESC"].str.contains(RX_VNR_VERBO)
-                     & ~aj["DESC"].str.contains(RX_VNR_EXC)])
+        # verbo (atualização, valor justo...) exigido fora de 6.01.01; nos ajustes não-caixa basta o nome do ativo
+        vn = topo(aj[aj["DESC"].str.contains(RX_VNR) & ~aj["DESC"].str.contains(RX_VNR_EXC)
+                     & (aj["DESC"].str.contains(RX_VNR_VERBO) | aj["CD_CONTA"].str.startswith("6.01.01."))])
+        pc = topo(aj[aj["DESC"].str.contains(RX_PIS_DIF)])
         if registrar:
             registrar(vn, "eletrico:vnr_atualizacao")
+            registrar(pc, "eletrico:pis_cofins_diferidos")
         out["vnr_atualizacao"] = float(-vn["VL"].sum()) if len(vn) else 0.0  # na DFC o ganho é deduzido do lucro
         out["vnr_identificado"] = bool(len(vn))
+        out["pis_cofins_diferidos"] = float(pc["VL"].sum()) if len(pc) else 0.0
     else:
-        out["vnr_atualizacao"], out["vnr_identificado"] = np.nan, False
+        out["vnr_atualizacao"], out["vnr_identificado"], out["pis_cofins_diferidos"] = np.nan, False, np.nan
     return out
 
 
+CAMPOS_TRANSM = ("ativo_concessao_saldo", "var_ativo_concessao", "custo_implantacao")
+
+
 def ajustar_eletrico(m: dict, cfg: dict | None) -> dict:
-    """EBITDA ajustado do setor elétrico (aproximação do EBITDA regulatório/caixa), por tipo de empresa:
-      transmissão: EBITDA IFRS + custo de construção − Δ ativo de contrato/concessão. A receita de construção, a
-                   remuneração e a correção monetária do ativo saem pelo Δ; entra a RAP faturada.
+    """EBITDA ajustado do setor elétrico (aproximação do EBITDA regulatório consolidado), por tipo de empresa:
+      transmissão: EBITDA IFRS + custo de construção − Δ ativo de contrato/concessão + PIS/COFINS diferidos. A receita
+                   de construção, a remuneração e a correção monetária do ativo saem pelo Δ; entra a RAP faturada.
+                   Sem construção identificada e ativo em queda (concessão madura), custo = 0.
       VNR:         − atualização do ativo financeiro indenizável (distribuição; não-caixa).
-      bonificação: − Δ saldo da bonificação pela outorga (remuneração na receita, recebimento reduz o saldo).
-    Os Δ e o custo são fluxos do período (var_* vêm do universo, por diferença de saldos). Sem cfg: NaN."""
+      bonificação: − Δ saldo da bonificação pela outorga (remuneração na receita, recebimento reduz o saldo); sem conta
+                   própria, usa a parte "ativo financeiro de concessão" do saldo.
+      Todos:       − equivalência patrimonial (o EBITDA regulatório consolidado não a inclui).
+    Os Δ e os custos são fluxos do período (var_* vêm do universo, por diferença de saldos). Sem cfg: NaN."""
     m["ebitda_ajustado"], m["fonte_ajuste_eletrico"] = np.nan, ""
+    aj = (cfg or {}).get("ajustes") or []
+    if "transmissao" not in aj:   # saldo e custo de implantação só fazem sentido (e só aparecem) nas transmissoras
+        for k in CAMPOS_TRANSM:
+            m[k] = np.nan
     if not cfg:
         return m
     e = m.get("ebitda")
     if e is None or pd.isna(e):
         return m
-    aj, tipo, val, fonte, ok = cfg.get("ajustes") or [], cfg.get("tipo", ""), float(e), [], True
+
+    def ok_(x):
+        return x is not None and pd.notna(x) and x != 0
+    tipo, val, fonte, ok = cfg.get("tipo", ""), float(e), [], True
+    va, vf = m.get("var_ativo_concessao"), m.get("var_ativo_fin_concessao")
+    vb = m.get("var_bonificacao")
+    if "bonificacao" in aj and (vb is None or pd.isna(vb)) and vf is not None and pd.notna(vf) and vf:
+        vb = vf   # bonificação registrada como "ativo financeiro de concessão": sai do Δ da transmissão
+        va = va - vf if va is not None and pd.notna(va) else va
+        fonte.append("bonificação = ativo financeiro de concessão do BP")
     if "transmissao" in aj:
-        va = m.get("var_ativo_concessao")
-        cc, orig = m.get("custo_construcao"), m.get("fonte_construcao") or "construção"
-        if cc is None or pd.isna(cc) or not cc:
-            cc, orig = m.get("custo_implantacao"), m.get("fonte_custo_implantacao") or "custo de implantação"
-        if cc is None or pd.isna(cc) or not cc:
+        cc, orig = m.get("custo_implantacao"), m.get("fonte_custo_implantacao") or "custo de implantação"
+        if not ok_(cc):
+            cc, orig = m.get("custo_construcao"), m.get("fonte_construcao") or "construção"
+        if not ok_(cc):
+            cc, orig = m.get("custo_implant_om"), "≈ CPV de implantação + O&M − O&M estimado pela DVA"
+        if not ok_(cc):
             ca = m.get("capex_ativo_contrato")
-            cc, orig = (ca, "≈ investimento em ativo de contrato na DFC") if ca is not None and pd.notna(ca) and ca > 0 \
-                else (np.nan, "")
+            cc, orig = (ca, "≈ investimento em ativo de contrato na DFC") if ok_(ca) and ca > 0 else (np.nan, "")
+        if (cc is None or pd.isna(cc)) and va is not None and pd.notna(va) and va <= 0:
+            cc, orig = 0.0, "sem construção identificada; ativo em queda (assumido 0)"
         if va is None or pd.isna(va):
             ok = False
             fonte.append("Δ ativo de contrato não identificado (saldo do BP ou do ano anterior ausente)")
@@ -1027,29 +1090,35 @@ def ajustar_eletrico(m: dict, cfg: dict | None) -> dict:
             ok = False
             fonte.append("custo de construção da transmissão não identificado")
         else:
-            val += cc - va
-            fonte.append(f"+ custo de construção ({orig}) − Δ ativo de contrato")
+            pc = m.get("pis_cofins_diferidos")
+            pc = pc if pc is not None and pd.notna(pc) else 0.0
+            val += cc - va + pc
+            fonte.append(f"+ custo de construção ({orig}) − Δ ativo de contrato"
+                         + (" + PIS/COFINS diferidos" if pc else ""))
             aq = m.get("aquisicoes_participacoes")
             if aq is not None and pd.notna(aq) and aq > 0:
                 fonte.append("ATENÇÃO: período com aquisição de participações — o Δ do ativo de contrato pode incluir "
                              "a consolidação de SPEs (EBITDA ajustado subestimado)")
     if "vnr" in aj:
         v = m.get("vnr_atualizacao")
-        if v is not None and pd.notna(v) and v:
+        if ok_(v):
             val -= v
             fonte.append("− atualização do ativo financeiro indenizável (VNR)")
         else:
-            fonte.append("VNR não identificado na DFC (sem ajuste)")
+            fonte.append("VNR sem linha própria na DFC (sem ajuste)")
     if "bonificacao" in aj:
-        vb = m.get("var_bonificacao")
         if vb is not None and pd.notna(vb):
             val -= vb
             fonte.append("− Δ bonificação pela outorga")
         else:
             fonte.append("bonificação pela outorga não identificada (sem ajuste)")
+    eq = m.get("equivalencia_patrimonial")
+    if ok_(eq):
+        val -= eq
+        fonte.append("− equivalência patrimonial")
     if tipo == "integrada":
         fonte.append("transmissão não ajustada (consolidado mistura distribuição e transmissão)")
-    if tipo in ("geracao", "holding") and not aj:
+    if tipo in ("geracao", "holding") and not aj and not ok_(eq):
         fonte.append("sem ajuste (EBITDA IFRS)")
     if cfg.get("confirmar"):
         fonte.append("classificação a confirmar")

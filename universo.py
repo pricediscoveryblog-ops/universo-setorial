@@ -42,7 +42,8 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           # construção de concessões (ICPC 01) e valores reportados antes do ajuste
           "receita_construcao", "custo_construcao", "margem_construcao_dfc",
           # setor elétrico (eletricas.yaml): custo de implantação, VNR e variação dos saldos de concessão no período
-          "custo_implantacao", "vnr_atualizacao", "var_ativo_concessao", "var_bonificacao",
+          "custo_implantacao", "custo_implant_om", "vnr_atualizacao", "var_ativo_concessao", "var_ativo_fin_concessao",
+          "var_bonificacao", "pis_cofins_diferidos", "equivalencia_patrimonial",
           *cs.REPORTADOS.values()]
 # Segmentos B3 de concessões do modelo do intangível (sem ativo financeiro da concessão): a construção sai da
 # receita, do CPV e dos lucros (cs.ajustar_construcao). Energia elétrica fica de fora (transmissão = ativo de
@@ -293,6 +294,7 @@ def gravar_por_ano(df: pd.DataFrame, prefixo: str) -> None:
 
 
 def _variacoes_saldos(snaps: list[dict], chaves=(("ativo_concessao_saldo", "var_ativo_concessao"),
+                                                  ("ativo_fin_concessao_saldo", "var_ativo_fin_concessao"),
                                                   ("bonificacao_saldo", "var_bonificacao"))) -> None:
     """Variação acumulada no exercício de saldos do balanço (saldo na data − saldo no fim do exercício anterior),
     gravada em s["m"] como fluxo: o trimestre sai por diferença de acumulados e o LTM pela soma, como os demais.
