@@ -3066,12 +3066,17 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   inclui receita de construção, remuneração e correção monetária (IPCA/IGP-M) do ativo de contrato, que não são caixa;
   o de distribuidora inclui a atualização do ativo financeiro indenizável (VNR). A B3 põe todas as elétricas num só
   segmento, então o tipo de cada empresa vem de curadoria (`eletricas.yaml`):
-  transmissão: EBITDA + custo de construção − Δ ativo de contrato/concessão do balanço (circulante + não circulante),
-  o que tira construção, remuneração e correção e deixa a RAP faturada + O&M − custos operacionais; o custo de
-  construção vem da DRE/DVA (ou, sem ela, do investimento em ativo de contrato da DFC). Distribuição: EBITDA − VNR
-  (ajuste não-caixa da DFC; supõe o VNR na receita operacional). Geração com bonificação pela outorga: − Δ do saldo
-  da bonificação. Integradas com distribuição: só VNR/bonificação, transmissão sem ajuste (o consolidado mistura as
-  duas). Em períodos com aquisição de SPEs o Δ do ativo inclui a consolidação (nota em `fonte_ajuste_eletrico`).
+  transmissão: EBITDA + custo de construção − Δ ativo de contrato/concessão do balanço (circulante + não circulante)
+  + PIS/COFINS diferidos, o que tira construção, remuneração e correção e deixa a RAP faturada + O&M − custos
+  operacionais. Custo de construção, em ordem: subconta do CPV → ajuste não-caixa da DFC → DVA → linha do CPV que junta
+  implantação e O&M, menos O&M estimado pela DVA (aproximação) → investimento em ativo de contrato da DFC; sem
+  construção e com o ativo em queda (concessão madura), zero. Distribuição: EBITDA − VNR (ajuste não-caixa da DFC;
+  supõe o VNR na receita operacional; o grupo CPFL não tem linha própria e fica sem ajuste). Geração com bonificação
+  pela outorga: − Δ do saldo da bonificação. Integradas com distribuição: só VNR/bonificação, transmissão sem ajuste
+  (o consolidado mistura as duas). Em todas sai a equivalência patrimonial (o EBITDA regulatório consolidado não a
+  inclui). Em períodos com aquisição de SPEs o Δ do ativo inclui a consolidação (nota em `fonte_ajuste_eletrico`).
+  Conferência 2025 contra o EBITDA regulatório consolidado divulgado: TAESA −3,5%, Alupar −4,8%, ISA +12%
+  (custo de construção aproximado).
   É aproximação, não o EBITDA regulatório divulgado pelas empresas; covenants de debêntures têm definição própria.
   Indicadores: DL c/ arrend. ÷ EBITDA ajustado e (EBITDA ajustado − IR − arrend.) ÷ serviço da dívida.
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
