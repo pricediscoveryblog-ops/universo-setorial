@@ -36,6 +36,17 @@ METRICAS = {
     "ebit_reportado": ("EBIT reportado", "mm", "Concessões (construção)"),
     "ebitda_reportado": ("EBITDA reportado (IFRS 16)", "mm", "Concessões (construção)"),
     "lucro_liquido_reportado": ("Lucro líquido reportado", "mm", "Concessões (construção)"),
+    # setor elétrico (eletricas.yaml): EBITDA ajustado ≈ EBITDA regulatório/caixa (ver Metodologia). Transmissão:
+    # EBITDA + custo de construção − Δ ativo de contrato; distribuição: − atualização do VNR; geração: − Δ bonificação
+    "ebitda_ajustado": ("EBITDA ajustado (elétricas ≈ regulatório)", "mm", "Setor elétrico (ajustado)"),
+    "margem_ebitda_ajustado": ("Margem EBITDA ajustado (elétricas)", "pct", "Setor elétrico (ajustado)"),
+    "div_liq_ebitda_ajustado": ("DL c/ arrend. / EBITDA ajustado (elétricas)", "x", "Setor elétrico (ajustado)"),
+    "dscr_ebitda_ajustado": ("(EBITDA ajustado − IR − arrend.) ÷ (juros + principal)", "x", "Setor elétrico (ajustado)"),
+    "ativo_concessao_saldo": ("Ativo de contrato/concessão da transmissão (saldo)", "mm", "Setor elétrico (ajustado)"),
+    "var_ativo_concessao": ("Δ ativo de contrato/concessão no período", "mm", "Setor elétrico (ajustado)"),
+    "custo_implantacao": ("Custo de implantação da infraestrutura (transmissão)", "mm", "Setor elétrico (ajustado)"),
+    "vnr_atualizacao": ("Atualização do ativo financeiro indenizável (VNR)", "mm", "Setor elétrico (ajustado)"),
+    "var_bonificacao": ("Δ bonificação pela outorga no período", "mm", "Setor elétrico (ajustado)"),
     "fco": ("FCO comparável (sem juros e dividendos)", "mm", "Caixa e investimento"),
     "fco_reportado": ("FCO reportado (DFC)", "mm", "Caixa e investimento"),
     "fco_juros_no_fco": ("Juros pagos/recebidos dentro do FCO (líq.)", "mm", "Caixa e investimento"),
@@ -123,6 +134,9 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "div_liq_ebitda_pre_ifrs16": ("div_liq_sem_arrend", "ebitda_pre_ifrs16"),
          "giro_ativo": ("receita", "ativo_total"), "alavancagem_ativo_pl": ("ativo_total", "patrimonio_liquido"),
          "conversao_fco_ebitda": ("fco", "ebitda"),
+         "margem_ebitda_ajustado": ("ebitda_ajustado", "receita"),
+         "div_liq_ebitda_ajustado": ("div_liq_com_arrend", "ebitda_ajustado"),
+         "dscr_ebitda_ajustado": ("caixa_servico_ajustado", "servico_divida_pago"),
          # cobertura da dívida do setor = Σ geração de caixa ÷ Σ obrigação (só empresas com denominador > 0)
          "cob_ebit_res_fin": ("ebit", "desp_fin_liquida"), "cob_juros_caixa": ("caixa_servico_divida", "juros_pagos"),
          "dscr_ebitda": ("caixa_servico_divida", "servico_divida_pago"),
@@ -136,9 +150,9 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
 # bases dos índices de cobertura (não aparecem como métrica; usadas no agregado do setor)
 AUX_COB = ["desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex", "ebitda_ir_capex",
-           "servico_divida_c_arrend"]
+           "servico_divida_c_arrend", "caixa_servico_ajustado"]
 AGREG_DEN_POS = {"cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda", "dscr_pos_capex", "dscr_capex_arrend_den",
-                 "dscr_ebitda_arrend_den"}
+                 "dscr_ebitda_arrend_den", "dscr_ebitda_ajustado", "div_liq_ebitda_ajustado"}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -1522,7 +1536,8 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
         g = ok.groupby("_c")[[c, c + "_ant"]].sum()
         return (g[c] / g[c + "_ant"] - 1).astype(float)
     if m in AGREG:
-        if tipo == "trimestral" and m in ("roe_pl_final", "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16"):
+        if tipo == "trimestral" and m in ("roe_pl_final", "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16",
+                                           "div_liq_ebitda_ajustado"):
             return pd.Series(dtype=float)
         n, dn = AGREG[m]
         ok = d.dropna(subset=[n, dn])
@@ -2970,6 +2985,8 @@ with aba_dados:
         cols_out = [c for c in IDENT if c in filtrado.columns] + list(METRICAS) + ["notas"]
     if "fonte_construcao" in filtrado.columns and filtrado["fonte_construcao"].fillna("").ne("").any():
         cols_out.append("fonte_construcao")
+    if "fonte_ajuste_eletrico" in filtrado.columns and filtrado["fonte_ajuste_eletrico"].fillna("").ne("").any():
+        cols_out.append("fonte_ajuste_eletrico")
     saida = filtrado[cols_out].sort_values(["empresa", "dt_fim"])
     mets_vis = [c for c in cols_out if c in METRICAS]
     # base americana: ~10x a brasileira; tabela na tela limitada e arquivos gerados só sob pedido (cada interação
@@ -3045,6 +3062,18 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   (sem margem identificada, receita = custo). Sem receita de construção identificada, só a margem de construção da DFC
   (se houver) sai dos lucros. Coluna `fonte_construcao` mostra a origem; os valores reportados seguem disponíveis
   (grupo "Concessões (construção)").
+- Setor elétrico — EBITDA ajustado (≈ EBITDA regulatório/caixa). No IFRS (CPC 47 / ICPC 01) o EBITDA de transmissora
+  inclui receita de construção, remuneração e correção monetária (IPCA/IGP-M) do ativo de contrato, que não são caixa;
+  o de distribuidora inclui a atualização do ativo financeiro indenizável (VNR). A B3 põe todas as elétricas num só
+  segmento, então o tipo de cada empresa vem de curadoria (`eletricas.yaml`):
+  transmissão: EBITDA + custo de construção − Δ ativo de contrato/concessão do balanço (circulante + não circulante),
+  o que tira construção, remuneração e correção e deixa a RAP faturada + O&M − custos operacionais; o custo de
+  construção vem da DRE/DVA (ou, sem ela, do investimento em ativo de contrato da DFC). Distribuição: EBITDA − VNR
+  (ajuste não-caixa da DFC; supõe o VNR na receita operacional). Geração com bonificação pela outorga: − Δ do saldo
+  da bonificação. Integradas com distribuição: só VNR/bonificação, transmissão sem ajuste (o consolidado mistura as
+  duas). Em períodos com aquisição de SPEs o Δ do ativo inclui a consolidação (nota em `fonte_ajuste_eletrico`).
+  É aproximação, não o EBITDA regulatório divulgado pelas empresas; covenants de debêntures têm definição própria.
+  Indicadores: DL c/ arrend. ÷ EBITDA ajustado e (EBITDA ajustado − IR − arrend.) ÷ serviço da dívida.
 - Alavancagem em pares consistentes: DL c/ arrendamento ÷ EBITDA IFRS 16; DL s/ arrendamento ÷ EBITDA pré-IFRS 16.
 - Capex orgânico = saídas para imobilizado (inclui propriedade para investimento), intangível e ativo de
   contrato/concessão no bloco de investimento.

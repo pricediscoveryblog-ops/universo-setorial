@@ -60,7 +60,11 @@ EXTRAS_EUA = {
 SEM_EQUIVALENTE = ["fco_juros_no_fco", "fco_div_no_fco", "capex_frota_liquido",
                    # ajuste de construção de concessões (ICPC 01): só Brasil
                    "receita_construcao", "custo_construcao", "margem_construcao", "receita_reportada",
-                   "lucro_bruto_reportado", "ebit_reportado", "ebitda_reportado", "lucro_liquido_reportado"]
+                   "lucro_bruto_reportado", "ebit_reportado", "ebitda_reportado", "lucro_liquido_reportado",
+                   # EBITDA ajustado do setor elétrico (eletricas.yaml): só Brasil
+                   "ebitda_ajustado", "margem_ebitda_ajustado", "div_liq_ebitda_ajustado", "dscr_ebitda_ajustado",
+                   "ativo_concessao_saldo", "var_ativo_concessao", "custo_implantacao", "vnr_atualizacao",
+                   "var_bonificacao"]
 
 
 def ajustar_metricas(metricas: dict, agreg: dict) -> None:
