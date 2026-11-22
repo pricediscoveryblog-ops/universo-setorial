@@ -3074,7 +3074,9 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   supõe o VNR na receita operacional; o grupo CPFL não tem linha própria e fica sem ajuste). Geração com bonificação
   pela outorga: − Δ do saldo da bonificação. Integradas com distribuição: só VNR/bonificação, transmissão sem ajuste
   (o consolidado mistura as duas). Em todas sai a equivalência patrimonial (o EBITDA regulatório consolidado não a
-  inclui). Em períodos com aquisição de SPEs o Δ do ativo inclui a consolidação (nota em `fonte_ajuste_eletrico`).
+  inclui). Em períodos com aquisição de SPEs o Δ do balanço inclui a consolidação: quando a DFC da empresa reproduz
+  o Δ do balanço nos anos sem aquisição (±10%), usa-se o Δ operacional da DFC; senão fica o alerta em
+  `fonte_ajuste_eletrico`.
   Conferência 2025 contra o EBITDA regulatório consolidado divulgado: TAESA −3,5%, Alupar −4,8%, ISA +12%
   (custo de construção aproximado).
   É aproximação, não o EBITDA regulatório divulgado pelas empresas; covenants de debêntures têm definição própria.
