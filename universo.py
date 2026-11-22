@@ -43,7 +43,7 @@ FLUXOS = ["receita", "lucro_bruto", "ebit", "lucro_liquido", "lucro_controladore
           "receita_construcao", "custo_construcao", "margem_construcao_dfc",
           # setor elétrico (eletricas.yaml): custo de implantação, VNR e variação dos saldos de concessão no período
           "custo_implantacao", "custo_implant_om", "vnr_atualizacao", "var_ativo_concessao", "var_ativo_fin_concessao",
-          "var_bonificacao", "pis_cofins_diferidos", "equivalencia_patrimonial",
+          "var_bonificacao", "pis_cofins_diferidos", "equivalencia_patrimonial", "var_ativo_concessao_dfc",
           *cs.REPORTADOS.values()]
 # Segmentos B3 de concessões do modelo do intangível (sem ativo financeiro da concessão): a construção sai da
 # receita, do CPV e dos lucros (cs.ajustar_construcao). Energia elétrica fica de fora (transmissão = ativo de
@@ -315,6 +315,24 @@ def _variacoes_saldos(snaps: list[dict], chaves=(("ativo_concessao_saldo", "var_
             s["m"][var] = a - b if pd.notna(a) and pd.notna(b) else np.nan
 
 
+def _dfc_confiavel(snaps: list[dict], tol: float = 0.10) -> bool:
+    """A DFC da empresa reproduz o Δ do ativo de contrato do balanço? Testa os exercícios (DFP) sem aquisição de
+    participações: em todos, |Δ DFC − Δ BP| ≤ tol × |Δ BP|. Só então o Δ pela DFC substitui o do balanço nos períodos
+    com compra de SPEs (ver cs.ajustar_eletrico)."""
+    ok = 0
+    for s in snaps:
+        m = s["m"]
+        if s["doc"] != "DFP":
+            continue
+        aq, vb, vd = m.get("aquisicoes_participacoes"), m.get("var_ativo_concessao"), m.get("var_ativo_concessao_dfc")
+        if (aq is not None and pd.notna(aq) and aq > 0) or pd.isna(vb) or pd.isna(vd) or not vb:
+            continue
+        if abs(vd - vb) > tol * abs(vb):
+            return False
+        ok += 1
+    return ok > 0
+
+
 def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False,
                    eletrica: dict | None = None) -> tuple[list, list, list]:
     """Retorna (linhas, auditoria, info) para uma empresa. construcao=True: concessão do modelo do intangível,
@@ -327,6 +345,7 @@ def montar_empresa(snaps: list[dict], n_anos: int, construcao: bool = False,
         return cs.ajustar_eletrico(m, eletrica)
     if eletrica:
         _variacoes_saldos(snaps)
+        eletrica = {**eletrica, "dfc_confiavel": _dfc_confiavel(snaps)}
     linhas, aud = [], []
     dfp = [s for s in snaps if s["doc"] == "DFP"]
     itr = [s for s in snaps if s["doc"] == "ITR"]

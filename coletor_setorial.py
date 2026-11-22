@@ -456,6 +456,11 @@ RX_VNR_EXC = re.compile(r"setorial|disponive|venda|receb|baixa|perda|amortiza|it
 # PIS/COFINS diferidos sobre a receita do ativo de contrato (não-caixa; o Δ do ativo sai pelo valor bruto)
 RX_PIS_DIF = re.compile(r"(?:pis|cofins|tributos indiretos).{0,30}diferid")
 RX_EQUIV = re.compile(r"equivalencia patrimonial")
+# Δ operacional do ativo de contrato pela DFC (ajustes não-caixa + variação no capital de giro): exclui a
+# consolidação de SPEs compradas, que entra no Δ do balanço
+RX_AC_DFC = re.compile(r"ativos? (?:de|do) contrat|ativos? contratua|ativos? (?:da|de) concess|concess.{0,25}\(ativo|"
+                       r"implementac.{0,20}infra|receita de infra|receita de constru|construcao de infraestrutura")
+RX_AC_DFC_EXC = re.compile(r"custo|financeiro de concess|bonifica|baixa|intangivel|aquisic|alienac|impost|tribut")
 IR_CS_CONSTRUCAO = 0.34  # alíquota nominal de IR + CS usada para retirar a margem de construção do lucro líquido
 # campos reportados preservados antes do ajuste de construção (o principal passa a ser o ajustado)
 REPORTADOS = {"receita": "receita_reportada", "cpv": "cpv_reportado", "lucro_bruto": "lucro_bruto_reportado",
@@ -1034,8 +1039,14 @@ def componentes_eletricos(sub: pd.DataFrame, dfc: pd.DataFrame, dfc_demo: str, r
         out["vnr_atualizacao"] = float(-vn["VL"].sum()) if len(vn) else 0.0  # na DFC o ganho é deduzido do lucro
         out["vnr_identificado"] = bool(len(vn))
         out["pis_cofins_diferidos"] = float(pc["VL"].sum()) if len(pc) else 0.0
+        op = dfc[dfc["CD_CONTA"].str.match(r"^6\.01\.0[12]\.")]
+        ad = topo(op[op["DESC"].str.contains(RX_AC_DFC) & ~op["DESC"].str.contains(RX_AC_DFC_EXC)])
+        if registrar:
+            registrar(ad, "eletrico:var_ativo_concessao_dfc")
+        out["var_ativo_concessao_dfc"] = float(-ad["VL"].sum()) if len(ad) else np.nan
     else:
         out["vnr_atualizacao"], out["vnr_identificado"], out["pis_cofins_diferidos"] = np.nan, False, np.nan
+        out["var_ativo_concessao_dfc"] = np.nan
     return out
 
 
@@ -1070,7 +1081,7 @@ def ajustar_eletrico(m: dict, cfg: dict | None) -> dict:
     vb = m.get("var_bonificacao")
     if "bonificacao" in aj and (vb is None or pd.isna(vb)) and vf is not None and pd.notna(vf) and vf:
         vb = vf   # bonificação registrada como "ativo financeiro de concessão": sai do Δ da transmissão
-        va = va - vf if va is not None and pd.notna(va) else va
+        va = va - vf if va is not None and pd.notna(va) else va   # (a versão pela DFC já exclui essa parte)
         fonte.append("bonificação = ativo financeiro de concessão do BP")
     if "transmissao" in aj:
         cc, orig = m.get("custo_implantacao"), m.get("fonte_custo_implantacao") or "custo de implantação"
@@ -1083,6 +1094,12 @@ def ajustar_eletrico(m: dict, cfg: dict | None) -> dict:
             cc, orig = (ca, "≈ investimento em ativo de contrato na DFC") if ok_(ca) and ca > 0 else (np.nan, "")
         if (cc is None or pd.isna(cc)) and va is not None and pd.notna(va) and va <= 0:
             cc, orig = 0.0, "sem construção identificada; ativo em queda (assumido 0)"
+        aq = m.get("aquisicoes_participacoes")
+        com_aquis = aq is not None and pd.notna(aq) and aq > 0
+        vd = m.get("var_ativo_concessao_dfc")
+        usa_dfc = com_aquis and cfg.get("dfc_confiavel") and vd is not None and pd.notna(vd)
+        if usa_dfc:   # período com compra de SPEs: Δ operacional pela DFC (sem a consolidação)
+            va = vd
         if va is None or pd.isna(va):
             ok = False
             fonte.append("Δ ativo de contrato não identificado (saldo do BP ou do ano anterior ausente)")
@@ -1095,8 +1112,9 @@ def ajustar_eletrico(m: dict, cfg: dict | None) -> dict:
             val += cc - va + pc
             fonte.append(f"+ custo de construção ({orig}) − Δ ativo de contrato"
                          + (" + PIS/COFINS diferidos" if pc else ""))
-            aq = m.get("aquisicoes_participacoes")
-            if aq is not None and pd.notna(aq) and aq > 0:
+            if usa_dfc:
+                fonte.append("período com aquisição de participações: Δ do ativo pela DFC (sem a consolidação de SPEs)")
+            elif com_aquis:
                 fonte.append("ATENÇÃO: período com aquisição de participações — o Δ do ativo de contrato pode incluir "
                              "a consolidação de SPEs (EBITDA ajustado subestimado)")
     if "vnr" in aj:
