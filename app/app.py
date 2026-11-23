@@ -37,20 +37,19 @@ def _quebrar_titulo(txt: str, lim: int = _LIM_TIT) -> str:
     return "<br>".join(partes)
 
 
-def _linhas_legenda(fig, larg: int = 400) -> int:
-    """Estimativa conservadora (para largura ~400 px) de quantas linhas a legenda horizontal ocupa."""
-    nomes = [str(t.name) for t in fig.data if t.name and t.showlegend is not False]
+def _linhas_legenda(fig, larg: int = 420) -> int:
+    """Estimativa conservadora (largura ~420 px) de quantas linhas a legenda horizontal ocupa. O Plotly alinha os itens
+    em colunas de largura igual (a do maior item), então itens por linha = largura ÷ maior item."""
     vistos, itens = set(), []
-    for n in nomes:
-        if n not in vistos:
+    for t in fig.data:
+        n = str(t.name) if t.name else ""
+        if n and t.showlegend is not False and n not in vistos:
             vistos.add(n)
             itens.append(48 + 6.5 * len(n))
-    linhas, usado = 1, 0
-    for w in itens:
-        if usado and usado + w > larg:
-            linhas, usado = linhas + 1, 0
-        usado += w
-    return linhas if itens else 0
+    if not itens:
+        return 0
+    por_linha = max(1, int(larg // max(itens)))
+    return -(-len(itens) // por_linha)
 
 
 def _ajustar_fig(fig):
