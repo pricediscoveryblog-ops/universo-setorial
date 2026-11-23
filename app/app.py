@@ -1832,7 +1832,7 @@ with aba_emp:
             alertas = d_emp[d_emp["alerta"]]
             if len(alertas):
                 fig.add_trace(go.Scatter(x=alertas[eixo_x(tipo)], y=alertas[m], mode="markers", name="Alerta",
-                                         marker=dict(symbol="x", size=11, color="red")))
+                                         marker=dict(symbol="circle", size=10, color="#7B2CBF")))
             unidade = {"mm": f" ({UN})", "pct": "", "x": " (x)", "d": " (dias)"}[METRICAS[m][1]]
             fig.update_layout(title=ROT[m] + unidade, height=320, margin=dict(t=40, b=20, l=10, r=10),
                               legend=dict(orientation="h", y=-0.2))
