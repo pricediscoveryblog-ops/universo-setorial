@@ -13,6 +13,89 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+
+# --- Ajuste visual aplicado a TODOS os gráficos Plotly na hora de desenhar (st.plotly_chart / col.plotly_chart):
+# (1) legenda horizontal que ficava abaixo do gráfico passa para logo acima da área do gráfico, liberando a base só para
+#     os rótulos do eixo x (trimestres/LTM inclinados não ficam mais tampados);
+# (2) títulos longos quebram em linhas (<br>) em vez de serem cortados; a margem superior é calculada para caber
+#     título + legenda sem sobreposição.
+_LIM_TIT = 50  # caracteres por linha de título (gráficos em meia largura têm ~450-550 px)
+
+
+def _quebrar_titulo(txt: str, lim: int = _LIM_TIT) -> str:
+    partes = []
+    for bloco in str(txt).split("<br>"):
+        linha, linhas = "", []
+        for pal in bloco.split(" "):
+            if linha and len(linha) + 1 + len(pal) > lim:
+                linhas.append(linha)
+                linha = pal
+            else:
+                linha = (linha + " " + pal) if linha else pal
+        linhas.append(linha)
+        partes.append("<br>".join(linhas))
+    return "<br>".join(partes)
+
+
+def _linhas_legenda(fig, larg: int = 400) -> int:
+    """Estimativa conservadora (para largura ~400 px) de quantas linhas a legenda horizontal ocupa."""
+    nomes = [str(t.name) for t in fig.data if t.name and t.showlegend is not False]
+    vistos, itens = set(), []
+    for n in nomes:
+        if n not in vistos:
+            vistos.add(n)
+            itens.append(48 + 6.5 * len(n))
+    linhas, usado = 1, 0
+    for w in itens:
+        if usado and usado + w > larg:
+            linhas, usado = linhas + 1, 0
+        usado += w
+    return linhas if itens else 0
+
+
+def _ajustar_fig(fig):
+    try:
+        lay = fig.layout
+        tit = lay.title.text if lay.title is not None else None
+        if tit and len(tit) > _LIM_TIT and "<br>" not in tit:
+            tit = _quebrar_titulo(tit)
+            fig.update_layout(title_text=tit)
+        n_tit = (tit.count("<br>") + 1) if tit else 0
+        leg = lay.legend
+        mover_leg = leg.orientation == "h" and leg.y is not None and leg.y < 0 and leg.yref != "container"
+        if not mover_leg and n_tit <= 1:
+            return fig
+        n_leg = _linhas_legenda(fig) if mover_leg else 0
+        h0 = lay.height or 450
+        h = h0 + 21 * n_leg + 22 * max(n_tit - 1, 0)
+        t_px = 8 + 22 * n_tit + 21 * n_leg + 8
+        upd = dict(height=h, margin=dict(t=max(t_px, lay.margin.t or 0)))
+        if n_tit:  # título centrado numa posição fixa em pixels a partir do topo (multilinha não é cortado)
+            upd["title"] = dict(yref="container", y=1 - (8 + 11 * n_tit) / h, yanchor="middle", automargin=False)
+        if mover_leg:
+            upd["legend"] = dict(y=1.0, yanchor="bottom", x=0, xanchor="left", yref="paper")
+            upd["margin"]["b"] = max(lay.margin.b or 0, 10)
+        fig.update_layout(**upd)
+    except Exception:
+        pass
+    return fig
+
+
+if not getattr(st, "_pd_graficos_ajustados", False):
+    from streamlit.delta_generator import DeltaGenerator as _DG
+    _pc_original = _DG.plotly_chart
+
+    def _plotly_chart_ajustado(self, figure_or_data, *args, **kwargs):
+        if isinstance(figure_or_data, go.Figure):
+            _ajustar_fig(figure_or_data)
+        return _pc_original(self, figure_or_data, *args, **kwargs)
+
+    _DG.plotly_chart = _plotly_chart_ajustado
+    _st_pc_original = st.plotly_chart
+    st.plotly_chart = lambda figure_or_data, *a, **k: _plotly_chart_ajustado(
+        getattr(_st_pc_original, "__self__", None), figure_or_data, *a, **k)
+    st._pd_graficos_ajustados = True
+
 DADOS = Path(os.environ.get("UNIVERSO_DIR", Path(__file__).resolve().parent.parent / "saidas" / "universo"))
 
 # chave: (rótulo, formato, grupo)   formato: mm = R$ milhões | pct = % | x = múltiplo
