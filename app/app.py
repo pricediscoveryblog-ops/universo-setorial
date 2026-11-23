@@ -80,20 +80,27 @@ def _ajustar_fig(fig):
     return fig
 
 
-if not getattr(st, "_pd_graficos_ajustados", False):
-    from streamlit.delta_generator import DeltaGenerator as _DG
-    _pc_original = _DG.plotly_chart
+# Instalação refeita a cada execução (o Streamlit Cloud aplica push sem reiniciar o processo): o wrapper chama sempre
+# a versão mais recente de _ajustar_fig e o plotly_chart ORIGINAL do Streamlit, sem empilhar wrappers.
+from streamlit.delta_generator import DeltaGenerator as _DG
 
-    def _plotly_chart_ajustado(self, figure_or_data, *args, **kwargs):
-        if isinstance(figure_or_data, go.Figure):
-            _ajustar_fig(figure_or_data)
-        return _pc_original(self, figure_or_data, *args, **kwargs)
+if getattr(st, "_pd_pc_original", None) is None:
+    _pc_atual = _DG.plotly_chart
+    if getattr(_pc_atual, "__name__", "") == "_plotly_chart_ajustado":  # versão anterior já instalada no processo
+        _pc_atual = _pc_atual.__globals__["_pc_original"]
+    st._pd_pc_original = _pc_atual
+st._pd_ajustar_fig = _ajustar_fig
 
-    _DG.plotly_chart = _plotly_chart_ajustado
-    _st_pc_original = st.plotly_chart
-    st.plotly_chart = lambda figure_or_data, *a, **k: _plotly_chart_ajustado(
-        getattr(_st_pc_original, "__self__", None), figure_or_data, *a, **k)
-    st._pd_graficos_ajustados = True
+
+def _plotly_chart_ajustado(self, figure_or_data, *args, **kwargs):
+    if hasattr(figure_or_data, "update_layout") and hasattr(figure_or_data, "layout"):
+        st._pd_ajustar_fig(figure_or_data)
+    return st._pd_pc_original(self, figure_or_data, *args, **kwargs)
+
+
+_DG.plotly_chart = _plotly_chart_ajustado
+st.plotly_chart = lambda figure_or_data, *a, **k: _plotly_chart_ajustado(st._main, figure_or_data, *a, **k)
+st._pd_graficos_ajustados = True
 
 DADOS = Path(os.environ.get("UNIVERSO_DIR", Path(__file__).resolve().parent.parent / "saidas" / "universo"))
 
