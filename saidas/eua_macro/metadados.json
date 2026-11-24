@@ -1,19 +1,19 @@
 {
   "treasury_diario.csv.gz": {
-    "atualizado_em": "2026-11-21T18:16:03",
-    "status": "ok, 3222 linhas, último data = 2026-11-19"
+    "atualizado_em": "2026-11-24T21:34:13",
+    "status": "ok, 3224 linhas, último data = 2026-11-23"
   },
   "cpi_mensal.csv": {
-    "atualizado_em": "2026-11-21T18:16:04",
+    "atualizado_em": "2026-11-24T21:34:13",
     "status": "ok, 154 linhas, último mes = 2026-10"
   },
   "pib_trimestral.csv": {
-    "atualizado_em": "2026-11-21T18:16:05",
+    "atualizado_em": "2026-11-24T21:34:14",
     "status": "ok, 51 linhas, último trimestre = 3T26"
   },
   "dolar_diario.csv": {
-    "atualizado_em": "2026-11-21T18:16:06",
-    "status": "ok, 3217 linhas, último data = 2026-11-13"
+    "atualizado_em": "2026-11-24T21:34:16",
+    "status": "ok, 3222 linhas, último data = 2026-11-20"
   },
   "janela": {
     "inicio_coleta": "2014-01-01",
