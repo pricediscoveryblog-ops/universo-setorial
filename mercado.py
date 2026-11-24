@@ -11,7 +11,10 @@ Dados de mercado complementares para o app (saidas/mercado/):
    recente de cada companhia, com a cadeia de controle (ID do acionista e do acionista relacionado) e quantidades
    ON/PN; distribuicao_capital.parquet — ações em circulação (free float) informadas no FRE.
 
-Uso: python mercado.py [proventos|acionistas|tudo]   (padrão: tudo)
+3) indices.parquet — fechamento diário do Ibovespa (Yahoo Finance, ^BVSP) desde 2015, referência da régua das altas e
+   baixas do app.
+
+Uso: python mercado.py [proventos|acionistas|indices|tudo]   (padrão: tudo)
 """
 import sys
 import time
@@ -197,6 +200,25 @@ def acionistas() -> tuple[pd.DataFrame, pd.DataFrame]:
     return out[0], out[1]
 
 
+def indices() -> pd.DataFrame:
+    """Ibovespa diário (Yahoo Finance). Acumula: baixa tudo desde 2015 na primeira vez, depois só o último mês."""
+    import yfinance as yf
+    arq = SAIDA / "indices.parquet"
+    ant = pd.read_parquet(arq) if arq.exists() else pd.DataFrame(columns=["data", "ticker", "indice", "fech"])
+    ini = "2015-01-01" if ant.empty else (pd.Timestamp.today() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    h = yf.Ticker("^BVSP").history(start=ini, auto_adjust=False)
+    if h is None or h.empty:
+        print("  ! Ibovespa: Yahoo não devolveu dados")
+        return ant
+    novo = pd.DataFrame({"data": pd.to_datetime(h.index).tz_localize(None).normalize(), "ticker": "^BVSP",
+                         "indice": "Ibovespa", "fech": h["Close"].to_numpy(float)})
+    out = pd.concat([ant, novo], ignore_index=True) if len(ant) else novo
+    out["data"] = pd.to_datetime(out["data"])
+    out = out.drop_duplicates(["ticker", "data"], keep="last").sort_values(["ticker", "data"])
+    print(f"Ibovespa: {len(out)} fechamentos, último {out['data'].max().date()}")
+    return out
+
+
 def main(qual: str = "tudo"):
     SAIDA.mkdir(parents=True, exist_ok=True)
     if qual in ("proventos", "tudo"):
@@ -210,6 +232,11 @@ def main(qual: str = "tudo"):
             a.to_parquet(SAIDA / "acionistas.parquet", index=False)
         if len(d):
             d.to_parquet(SAIDA / "distribuicao_capital.parquet", index=False)
+    if qual in ("indices", "tudo"):
+        try:
+            indices().to_parquet(SAIDA / "indices.parquet", index=False)
+        except Exception as e:  # noqa: BLE001 — índice de referência não pode derrubar o resto
+            print(f"  ! Ibovespa: {type(e).__name__}: {str(e)[:120]}")
 
 
 if __name__ == "__main__":
