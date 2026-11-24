@@ -76,6 +76,71 @@ def vm_ev_todos(versao: tuple = ()) -> pd.DataFrame:
     return v
 
 
+@st.cache_data(max_entries=8, show_spinner=False)
+def liquidez_br(d_fim, n_pregoes: int = 21, versao: tuple = ()) -> pd.DataFrame:
+    """cnpj, liq: volume financeiro médio diário (R$ milhões) nos n pregões até d_fim, somando todas as classes de
+    ações da empresa (COTAHIST da B3; cálculo próprio)."""
+    d_fim = pd.Timestamp(d_fim)
+    arqs = [MERC / f"precos_{a}.parquet" for a in (d_fim.year - 1, d_fim.year)]
+    filtro = [("data", ">=", d_fim - pd.Timedelta(days=60)), ("data", "<=", d_fim)]
+    partes = []
+    for a in arqs:
+        if a.exists():
+            try:
+                partes.append(pd.read_parquet(a, columns=["data", "raiz", "volume"], filters=filtro))
+            except Exception:  # noqa: BLE001 — coluna data gravada como texto em arquivos antigos
+                x = pd.read_parquet(a, columns=["data", "raiz", "volume"])
+                x["data"] = pd.to_datetime(x["data"])
+                partes.append(x[(x["data"] >= filtro[0][2]) & (x["data"] <= d_fim)])
+    if not partes:
+        return pd.DataFrame(columns=["cnpj", "liq"])
+    p = pd.concat(partes, ignore_index=True)
+    p["data"] = pd.to_datetime(p["data"])
+    dias = sorted(p["data"].unique())[-n_pregoes:]
+    p = p[p["data"].isin(dias)]
+    por_dia = p.groupby(["raiz", "data"])["volume"].sum().reset_index()      # todas as classes no mesmo dia
+    liq = (por_dia.groupby("raiz")["volume"].sum() / len(dias) / 1e6).rename("liq").reset_index()
+    a_vm = MERC / f"vm_ev_{d_fim.year}.parquet"
+    if not a_vm.exists():
+        return pd.DataFrame(columns=["cnpj", "liq"])
+    mapa = pd.read_parquet(a_vm, columns=["cnpj", "raiz"]).drop_duplicates()
+    mapa["cnpj"] = mapa["cnpj"].astype(str).str.zfill(14)
+    return mapa.merge(liq, on="raiz").groupby("cnpj", as_index=False)["liq"].sum()
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def ibovespa(versao: tuple = ()) -> pd.DataFrame:
+    """Ibovespa diário (data, indice, fech): arquivo do coletor (mercado.py); sem ele, direto do Yahoo Finance."""
+    a = MERC / "indices.parquet"
+    i = pd.read_parquet(a) if a.exists() else pd.DataFrame()
+    if i.empty:
+        try:
+            import yfinance as yf
+            h = yf.Ticker("^BVSP").history(period="2y", auto_adjust=False)
+            i = pd.DataFrame({"data": pd.to_datetime(h.index).tz_localize(None).normalize(), "indice": "Ibovespa",
+                              "fech": h["Close"].to_numpy(float)})
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame(columns=["data", "indice", "fech"])
+    i["data"] = pd.to_datetime(i["data"])
+    return i[["data", "indice", "fech"]]
+
+
+def retorno_indices(ind: pd.DataFrame, d_ini, d_fim, tol_ini: int = 3) -> dict:
+    """{índice: (variação, data inicial, data final)} entre o último fechamento até d_ini (com até tol_ini dias de
+    atraso) e o último até d_fim (até 3 dias). Mesma regra de datas das empresas nas altas e baixas."""
+    out = {}
+    if ind is None or ind.empty:
+        return out
+    d_ini, d_fim = pd.Timestamp(d_ini), pd.Timestamp(d_fim)
+    for nome, g in ind.dropna(subset=["fech"]).sort_values("data").groupby("indice", sort=False):
+        f = g[g["data"] <= d_fim].tail(1)
+        i = g[g["data"] <= d_ini].tail(1)
+        if f.empty or i.empty or (d_fim - f["data"].iloc[0]).days > 3 or (d_ini - i["data"].iloc[0]).days > tol_ini:
+            continue
+        out[nome] = (float(f["fech"].iloc[0] / i["fech"].iloc[0] - 1), i["data"].iloc[0], f["data"].iloc[0])
+    return out
+
+
 @st.cache_data(max_entries=1, show_spinner=False)
 def proventos_br(versao: tuple = ()) -> pd.DataFrame:
     a = MERC / "proventos.parquet"
@@ -366,52 +431,103 @@ def secao_cotacao(raiz: str, cnpj: str, nome: str, eua: bool = False, ticker_eua
 
 
 # ================================================================== tela: mapa de calor
-def mapa_calor(v: pd.DataFrame, rotulo_periodo: str, moeda: str = "R$", chave: str = "mapa"):
-    """v: colunas rotulo, setor, subsetor, vm_fim (milhões), variacao."""
-    v = v.dropna(subset=["variacao", "vm_fim"])
-    v = v[v["vm_fim"] > 0].copy()
+PESOS = {"vm_fim": "valor de mercado", "liq": "liquidez diária"}
+
+
+def mapa_calor(v: pd.DataFrame, rotulo_periodo: str, moeda: str = "R$", chave: str = "mapa", peso: str = "vm_fim",
+               marcas: dict | None = None):
+    """v: colunas rotulo, setor, subsetor, vm_fim (milhões), variacao e, opcional, liq (volume médio diário, milhões).
+    peso: 'vm_fim' (área = valor de mercado) ou 'liq' (área = liquidez diária). marcas: {índice: variação} para a
+    régua de cores."""
+    v = v.dropna(subset=["variacao", peso])
+    v = v[v[peso] > 0].copy()
     if v.empty:
-        st.info("Sem dados para o mapa de calor.")
+        st.info("Sem dados para o mapa de calor" + (" (liquidez diária ainda não disponível para estas empresas)."
+                                                    if peso == "liq" else "."))
         return
     c1, c2 = st.columns([1, 1])
     nivel = c1.radio("Agrupar por", ["Setor", "Setor e subsetor"], horizontal=True, key=f"{chave}_niv")
-    n_max = c2.slider("Empresas no mapa (as de maior valor de mercado)", 30, max(30, len(v)), min(150, len(v)), 10,
-                      key=f"{chave}_n")
-    v = v.nlargest(n_max, "vm_fim")
+    n_max = c2.slider(f"Empresas no mapa (as de maior {PESOS[peso]})", min(30, len(v)), max(30, len(v)),
+                      min(150, len(v)), 10, key=f"{chave}_n")
+    v = v.nlargest(n_max, peso)
+    if "liq" not in v.columns:
+        v["liq"] = np.nan
     for c_, vazio in (("setor", "Sem setor"), ("subsetor", "—"), ("rotulo", "?")):
         v[c_] = v[c_].astype("object").where(v[c_].notna(), vazio).astype(str).replace({"": vazio, "nan": vazio})
     v["tk"] = v["rotulo"].astype(str).str.split(" — ").str[0]
     v["vm_ini"] = v["vm_fim"] / (1 + v["variacao"])
 
     def pond(g):
-        return g["vm_fim"].sum() / g["vm_ini"].sum() - 1
+        if peso == "vm_fim":                               # Σ valor final ÷ Σ valor inicial − 1
+            return g["vm_fim"].sum() / g["vm_ini"].sum() - 1
+        return float(np.average(g["variacao"], weights=g["liq"]))     # média ponderada pela liquidez
 
-    ids, par, lab, val, cor, hov = [], [], [], [], [], []
+    def soma(g):
+        return g[peso].sum()
+
+    ids, par, lab, val, cor, hov, vms, lqs = [], [], [], [], [], [], [], []
     for s_, gs in v.groupby("setor"):
-        ids.append(f"S|{s_}"); par.append(""); lab.append(s_); val.append(gs["vm_fim"].sum()); cor.append(pond(gs))
-        hov.append(f"{len(gs)} empresas")
+        ids.append(f"S|{s_}"); par.append(""); lab.append(s_); val.append(soma(gs)); cor.append(pond(gs))
+        hov.append(f"{len(gs)} empresas"); vms.append(gs["vm_fim"].sum()); lqs.append(gs["liq"].sum())
         if nivel == "Setor e subsetor":
             for ss, gss in gs.groupby("subsetor"):
-                ids.append(f"SS|{s_}|{ss}"); par.append(f"S|{s_}"); lab.append(ss); val.append(gss["vm_fim"].sum())
+                ids.append(f"SS|{s_}|{ss}"); par.append(f"S|{s_}"); lab.append(ss); val.append(soma(gss))
                 cor.append(pond(gss)); hov.append(f"{len(gss)} empresas")
+                vms.append(gss["vm_fim"].sum()); lqs.append(gss["liq"].sum())
         for r in gs.itertuples():
             ids.append(f"E|{r.rotulo}"); par.append(f"SS|{s_}|{r.subsetor}" if nivel == "Setor e subsetor" else f"S|{s_}")
-            lab.append(r.tk); val.append(r.vm_fim); cor.append(r.variacao); hov.append(str(r.rotulo))
+            lab.append(r.tk); val.append(getattr(r, peso)); cor.append(r.variacao); hov.append(str(r.rotulo))
+            vms.append(r.vm_fim); lqs.append(r.liq)
     lim = float(np.nanquantile(np.abs(v["variacao"]), 0.9)) or 0.01
+    marcas = {k: x for k, x in (marcas or {}).items() if x is not None and np.isfinite(x)}
+    lim = max(lim, *(abs(x) * 1.15 for x in marcas.values())) if marcas else lim   # índice sempre dentro da régua
+    liq_txt = np.array([f"{moeda} {x:,.1f} mi/dia" if pd.notna(x) and x > 0 else "n/d" for x in lqs], dtype=object)
     fig = go.Figure(go.Treemap(
         ids=ids, parents=par, labels=lab, values=val, branchvalues="total",
-        customdata=np.column_stack([cor, hov, np.array(val) / 1000]),
+        customdata=np.column_stack([cor, hov, np.array(vms, dtype=float) / 1000, liq_txt]),
         texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2%}",
         hovertemplate="<b>%{label}</b><br>%{customdata[1]}<br>Variação: %{customdata[0]:+.2%}<br>"
-                      f"Valor de mercado: {moeda} " + "%{customdata[2]:,.1f} bi<extra></extra>",
-        marker=dict(colors=cor, colorscale=[[0, "#b91c1c"], [0.5, "#3f3f46"], [1, "#15803d"]], cmid=0,
-                    cmin=-lim, cmax=lim, colorbar=dict(title="Variação", tickformat=".0%")),
+                      f"Valor de mercado: {moeda} " + "%{customdata[2]:,.1f} bi<br>"
+                      "Liquidez média: %{customdata[3]}<extra></extra>",
+        marker=dict(colors=cor, colorscale=ESCALA, cmid=0, cmin=-lim, cmax=lim, showscale=False),
         tiling=dict(pad=1), pathbar=dict(visible=True)))
-    fig.update_layout(height=640, margin=dict(t=30, b=10, l=10, r=10), title=f"Mapa de calor — {rotulo_periodo}")
+    fig.update_layout(height=640, margin=dict(t=30, b=10, l=10, r=10),
+                      title=f"Mapa de calor — {rotulo_periodo} — área: {PESOS[peso]}")
     st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
-    st.caption("Área = valor de mercado no pregão final; cor = variação no período (escala saturada no percentil 90 das "
-               "variações absolutas). Setores e subsetores: variação ponderada pelo valor de mercado "
-               "(Σ valor final ÷ Σ valor inicial − 1). Clique num setor para ampliar. Cálculo próprio.")
+    regua(lim, marcas, chave=f"{chave}_regua")
+    if peso == "vm_fim":
+        txt = ("Área = valor de mercado no pregão final. Setores e subsetores: variação ponderada pelo valor de mercado "
+               "(Σ valor final ÷ Σ valor inicial − 1).")
+    else:
+        txt = (f"Área = liquidez diária: volume financeiro médio dos 21 pregões até a data final ({moeda} milhões/dia, "
+               "todas as classes de ações somadas). Setores e subsetores: média das variações ponderada pela liquidez.")
+    st.caption(txt + " Cor = variação no período; a régua abaixo do mapa é a escala de cores (saturada no percentil 90 "
+               "das variações absolutas, ampliada se preciso para caber os índices), com a variação do(s) índice(s) "
+               "de referência no mesmo período. Clique num setor para ampliar. Cálculo próprio.")
+
+
+ESCALA = [[0, "#b91c1c"], [0.5, "#3f3f46"], [1, "#15803d"]]
+CORES_INDICE = {"Ibovespa": "#f59e0b", "S&P 500": "#38bdf8", "Nasdaq Composite": "#c084fc"}
+
+
+def regua(lim: float, marcas: dict, chave: str = "regua"):
+    """Régua horizontal da escala de cores do mapa (−lim a +lim) com uma marcação por índice de referência."""
+    x = np.linspace(-lim, lim, 241)
+    fig = go.Figure(go.Heatmap(x=x, y=[0], z=[x], colorscale=ESCALA, zmid=0, zmin=-lim, zmax=lim, showscale=False,
+                               hovertemplate="%{x:+.2%}<extra></extra>"))
+    fig.add_vline(x=0, line_color="#e5e7eb", line_width=1)
+    for k, (nome, r) in enumerate(sorted(marcas.items(), key=lambda t: t[1])):
+        cor = CORES_INDICE.get(nome, "#facc15")
+        fig.add_shape(type="line", x0=r, x1=r, y0=-0.5, y1=0.5, line=dict(color=cor, width=3))
+        fig.add_trace(go.Scatter(x=[r], y=[0.5], mode="markers", marker=dict(symbol="triangle-down", size=13, color=cor,
+                                 line=dict(color="white", width=1)), name=nome, showlegend=False,
+                                 hovertemplate=f"{nome}: {r:+.2%}<extra></extra>"))
+        fig.add_annotation(x=r, y=0.5, yshift=14 + 16 * (k % 2), text=f"<b>{nome} {r:+.2%}</b>", showarrow=False,
+                           font=dict(color=cor, size=12))
+    fig.update_layout(height=120 if marcas else 80, margin=dict(t=48 if marcas else 6, b=24, l=10, r=10),
+                      xaxis=dict(tickformat=".1%", range=[-lim, lim], showgrid=False, zeroline=False),
+                      yaxis=dict(visible=False, range=[-0.5, 0.5]))
+    st.plotly_chart(fig, width="stretch", key=chave, config={"displayModeBar": False})
 
 
 # ================================================================== tela: estrutura societária

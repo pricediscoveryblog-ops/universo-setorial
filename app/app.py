@@ -2580,12 +2580,42 @@ if True:
             set_f = c3.multiselect("Setores (vazio = todos)", sorted(v["setor"].dropna().unique()), key="var_setor")
             if set_f:
                 v = v[v["setor"].isin(set_f)]
-            vm_min = st.slider(f"Valor de mercado mínimo ({MOEDA} bi)", 0.0, 20.0, 0.5 if not EUA else 2.0, 0.25,
+            c4, c5 = st.columns([1.6, 1.4])
+            vm_min = c4.slider(f"Valor de mercado mínimo ({MOEDA} bi)", 0.0, 20.0, 0.5 if not EUA else 2.0, 0.25,
                                key="var_vmmin", help="Filtra empresas pequenas, onde um negócio isolado move muito o preço.")
+            pond_por = c5.radio("Ponderar mapa e setores por", ["Valor de mercado", "Liquidez diária"], horizontal=True,
+                                key="var_peso", help="Valor de mercado: como está no pregão final. Liquidez diária: volume "
+                                "financeiro médio dos 21 pregões até a data final (todas as classes de ações somadas).")
+            peso = "vm_fim" if pond_por == "Valor de mercado" else "liq"
             v = v[(v["vm_fim"] >= vm_min * 1000) & v["variacao"].notna()]
             v["vm_bi"] = v["vm_fim"] / 1000        # a série vem em milhões
-            mercado_mod().mapa_calor(v, f"{jan.lower()}: {pd.Timestamp(alvo).strftime('%d/%m/%Y')} a "
-                                        f"{pd.Timestamp(d_fim).strftime('%d/%m/%Y')}", MOEDA, chave="var_mapa")
+            _mm = mercado_mod()
+            try:                                   # liquidez média diária (milhões): sempre no hover e no CSV
+                liq = eua.liquidez_recente(mult, d_fim) if EUA else \
+                    _mm.liquidez_br(d_fim, versao=_mm._versao("precos_*.parquet"))
+            except Exception:  # noqa: BLE001
+                liq = pd.DataFrame(columns=["cnpj", "liq"])
+            v = v.merge(liq, on="cnpj", how="left") if len(liq) else v.assign(liq=np.nan)
+            # índices de referência no mesmo período (mesmo pregão inicial e final das empresas)
+            try:
+                ind = eua.indices_ref(eua.versao()) if EUA else _mm.ibovespa(_mm._versao("indices.parquet"))
+                ret_ind = _mm.retorno_indices(ind, alvo, d_fim, tol_ini=tol)
+            except Exception:  # noqa: BLE001
+                ret_ind = {}
+            n_sem_liq = int(v["liq"].isna().sum()) if peso == "liq" else 0
+            _mm.mapa_calor(v, f"{jan.lower()}: {pd.Timestamp(alvo).strftime('%d/%m/%Y')} a "
+                              f"{pd.Timestamp(d_fim).strftime('%d/%m/%Y')}", MOEDA, chave="var_mapa", peso=peso,
+                           marcas={k: r for k, (r, _, _) in ret_ind.items()})
+            if ret_ind:
+                st.caption("Índices de referência (fechamento, Yahoo Finance; variação de preço, cálculo próprio): " +
+                           "; ".join(f"**{k}** {r:+.2%} ({d0.strftime('%d/%m/%Y')} a {d1.strftime('%d/%m/%Y')})"
+                                     for k, (r, d0, d1) in ret_ind.items()) + ".")
+            else:
+                st.caption("Índice de referência indisponível para este período (sem fechamento do índice nas datas).")
+            if n_sem_liq:
+                st.caption(f"{n_sem_liq} empresa(s) sem volume negociado na janela ficam fora do mapa na ponderação "
+                           "por liquidez" + (" (nos EUA o volume passou a ser coletado em nov/2026; a janela de 21 "
+                                             "pregões se completa nas próximas execuções do coletor)." if EUA else "."))
             st.caption(f"Variação do valor de mercado entre {pd.Timestamp(d_fim).strftime('%d/%m/%Y')} e o pregão mais "
                        f"próximo de {pd.Timestamp(alvo).strftime('%d/%m/%Y')}, em {len(v)} empresas. " +
                        ("Nos EUA a variação é a do preço do ticker principal (Yahoo Finance) corrigido por "
@@ -2607,18 +2637,32 @@ if True:
             tabela_clicavel(baixas, baixas["rotulo"], "clk_baixas", alvo=t2, hide_index=True, width="stretch",
                             column_config=cfg_v, height=min(900, 38 + 35 * n_top))
             st.subheader("Variação por setor")
+            nome_pond = "Ponderada pelo valor de mercado" if peso == "vm_fim" else "Ponderada pela liquidez diária"
+
+            def _pond_setor(g):
+                if peso == "vm_fim":
+                    return g["vm_fim"].sum() / (g["vm_fim"] / (1 + g["variacao"])).sum() - 1
+                g = g[g["liq"] > 0]
+                return float(np.average(g["variacao"], weights=g["liq"])) if len(g) else np.nan
+
             por_setor = v.groupby("setor").apply(
-                lambda g: pd.Series({"Mediana": g["variacao"].median(),
-                                     "Ponderada pelo valor de mercado": g["vm_fim"].sum() / (g["vm_fim"] / (1 + g["variacao"])).sum() - 1,
-                                     "Empresas": len(g)}), include_groups=False).sort_values("Ponderada pelo valor de mercado")
+                lambda g: pd.Series({"Mediana": g["variacao"].median(), nome_pond: _pond_setor(g),
+                                     "Empresas": len(g)}), include_groups=False).sort_values(nome_pond)
             fig = go.Figure()
-            for c, cor in (("Mediana", None), ("Ponderada pelo valor de mercado", "#16a34a")):
+            for c, cor in (("Mediana", None), (nome_pond, "#16a34a")):
                 fig.add_trace(go.Bar(y=por_setor.index, x=por_setor[c], orientation="h", name=c, marker_color=cor))
             fig.add_vline(x=0, line_color="gray")
+            for k, (nome_i, (r_i, _, _)) in enumerate(ret_ind.items()):
+                cor_i = _mm.CORES_INDICE.get(nome_i, "#facc15")
+                fig.add_vline(x=r_i, line_color=cor_i, line_dash="dash", line_width=2)
+                fig.add_annotation(x=r_i, y=1, yref="paper", yshift=4 + 14 * k, text=f"{nome_i} {r_i:+.2%}",
+                                   showarrow=False, font=dict(color=cor_i, size=11))
             fig.update_layout(height=max(360, 26 * len(por_setor)), barmode="group", xaxis_tickformat=".1%",
-                              legend=dict(orientation="h", y=-0.15), margin=dict(t=20, b=20, l=10, r=10))
+                              legend=dict(orientation="h", y=-0.15),
+                              margin=dict(t=20 + 14 * len(ret_ind), b=20, l=10, r=10))
             st.plotly_chart(fig, width="stretch")
-            exp_v = v[cols_v + ["subsetor", "segmento", "vm_fim", "vm_ini"]].sort_values("variacao", ascending=False)
+            exp_v = v[cols_v + ["subsetor", "segmento", "vm_fim", "vm_ini", "liq"]].rename(
+                columns={"liq": "liquidez_media_21d_mi"}).sort_values("variacao", ascending=False)
             st.download_button("⬇️ Todas as empresas (CSV)",
                                exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")

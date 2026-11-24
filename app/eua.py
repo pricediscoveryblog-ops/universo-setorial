@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -286,7 +287,9 @@ def _precos_recentes(versao: str) -> pd.DataFrame:
         if pd.notna(r.razao) and r.razao > 0 and r.razao != 1:
             m = (p["ticker"] == r.ticker) & (p["data"] < r.data)
             p.loc[m, "aj"] = p.loc[m, "aj"] / r.razao
-    return p[["ticker", "data", "aj"]]
+    if "vol_fin" not in p.columns:                 # cache gravado antes de o coletor guardar o volume (nov/2026)
+        p["vol_fin"] = np.nan
+    return p[["ticker", "data", "aj", "vol_fin"]]
 
 
 def vm_diario_recente(mult: pd.DataFrame) -> pd.DataFrame:
@@ -303,6 +306,46 @@ def vm_diario_recente(mult: pd.DataFrame) -> pd.DataFrame:
     v = p.merge(u, on="ticker").merge(ult, on="ticker")
     v["valor_mercado"] = v["valor_mercado"] * v["aj"] / v["aj_ult"]
     return v[["data", "cnpj", "valor_mercado"]].dropna()
+
+
+def liquidez_recente(mult: pd.DataFrame, d_fim, n_pregoes: int = 21) -> pd.DataFrame:
+    """cnpj, liq: volume financeiro médio diário (US$ milhões) do ticker principal nos n pregões até d_fim
+    (Yahoo Finance: Close × Volume, cálculo do coletor). Pregões sem volume informado não entram na média."""
+    if mult is None or mult.empty:
+        return pd.DataFrame(columns=["cnpj", "liq"])
+    p = _precos_recentes(versao())
+    if p.empty or p["vol_fin"].isna().all():
+        return pd.DataFrame(columns=["cnpj", "liq"])
+    d_fim = pd.Timestamp(d_fim)
+    dias = sorted(d for d in p["data"].unique() if d <= d_fim)[-n_pregoes:]
+    p = p[p["data"].isin(dias)]
+    liq = (p.groupby("ticker")["vol_fin"].mean() / 1e6).rename("liq").reset_index()
+    u = mult.sort_values("data").drop_duplicates("cnpj", keep="last")[["cnpj", "ticker"]]
+    return u.merge(liq, on="ticker")[["cnpj", "liq"]].dropna()
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def indices_ref(versao_: str = "") -> pd.DataFrame:
+    """Fechamento diário do S&P 500 e do Nasdaq Composite (data, indice, fech). Lê o arquivo do coletor-eua; se ele
+    ainda não existir, baixa direto do Yahoo Finance."""
+    try:
+        i = pd.read_parquet(io.BytesIO(_baixar("indices_eua.parquet")))
+    except Exception:  # noqa: BLE001
+        i = pd.DataFrame()
+    if i.empty:
+        try:
+            import yfinance as yf
+            partes = []
+            for tk, nome in (("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq Composite")):
+                h = yf.Ticker(tk).history(period="2y", auto_adjust=False)
+                if h is not None and len(h):
+                    partes.append(pd.DataFrame({"data": pd.to_datetime(h.index).tz_localize(None).normalize(),
+                                                "indice": nome, "fech": h["Close"].to_numpy(float)}))
+            i = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame()
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame(columns=["data", "indice", "fech"])
+    i["data"] = pd.to_datetime(i["data"])
+    return i[["data", "indice", "fech"]]
 
 
 def cobertura() -> pd.DataFrame:
