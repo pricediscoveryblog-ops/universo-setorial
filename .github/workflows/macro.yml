@@ -17,14 +17,14 @@ concurrency:
 jobs:
   macro:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45   # 1ª coleta do Focus (desde 2014) é longa; depois é incremental
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install pandas requests
-      - name: Baixar IPCA, PIB e PTAX (BCB/IBGE)
+      - name: Baixar IPCA, PIB, PTAX e Focus (BCB/IBGE)
         run: python macro.py
       - name: Commit
         run: |
