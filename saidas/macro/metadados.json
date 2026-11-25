@@ -1,14 +1,14 @@
 {
   "ipca_mensal.csv": {
-    "atualizado_em": "2026-11-25T16:41:19",
+    "atualizado_em": "2026-11-25T18:38:08",
     "status": "ok, 154 linhas, último mes = 2026-10"
   },
   "pib_trimestral.csv": {
-    "atualizado_em": "2026-11-25T16:41:22",
+    "atualizado_em": "2026-11-25T18:38:09",
     "status": "ok, 50 linhas, último trimestre = 2T26"
   },
   "cambio_diario.csv": {
-    "atualizado_em": "2026-11-25T16:41:34",
+    "atualizado_em": "2026-11-25T18:38:36",
     "status": "ok, 3237 linhas, último data = 2026-11-25"
   },
   "janela": {
@@ -17,11 +17,27 @@
     "anos": 11
   },
   "pib_volume_trimestral.csv": {
-    "atualizado_em": "2026-11-25T16:41:23",
+    "atualizado_em": "2026-11-25T18:38:09",
     "status": "ok, 50 linhas, último trimestre = 2T26"
   },
   "focus_anual.csv": {
-    "atualizado_em": "2026-11-25T16:42:16",
+    "atualizado_em": "2026-11-25T18:38:44",
     "status": "ok, 31526 linhas, último data = 2026-11-19"
+  },
+  "fiscal_mensal.csv": {
+    "atualizado_em": "2026-11-25T18:40:23",
+    "status": "ok, 153 linhas, último mes = 2026-09"
+  },
+  "rtn_mensal.csv": {
+    "atualizado_em": "2026-11-25T18:40:35",
+    "status": "ok, 151 linhas, último mes = 2026-07"
+  },
+  "reservas_diario.csv": {
+    "atualizado_em": "2026-11-25T18:41:09",
+    "status": "ok, 3236 linhas, último data = 2026-11-24"
+  },
+  "balanca_mensal.csv": {
+    "atualizado_em": "2026-11-25T18:41:30",
+    "status": "ok, 153 linhas, último mes = 2026-09"
   }
 }
