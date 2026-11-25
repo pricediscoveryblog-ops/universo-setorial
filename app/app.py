@@ -191,6 +191,7 @@ METRICAS = {
     "cresc_ativo_total": ("Crescimento do ativo total (a/a)", "pct", "Crescimento"),
     "cresc_patrimonio_liquido": ("Crescimento do patrimônio líquido (a/a)", "pct", "Crescimento"),
     "cresc_capex_organico": ("Crescimento do capex orgânico (a/a)", "pct", "Crescimento"),
+    "cresc_capex_total": ("Crescimento do capex total c/ aquisições (a/a)", "pct", "Crescimento"),
     # graus de alavancagem (a partir das variações a/a): GAO = Δ% EBIT ÷ Δ% receita; GAF = Δ% lucro ÷ Δ% EBIT;
     # GAT = Δ% lucro ÷ Δ% receita (= GAO × GAF)
     "gao": ("Grau de alavancagem operacional (GAO)", "x", "Graus de alavancagem"),
@@ -600,7 +601,7 @@ def curva_juros(pj: pd.DataFrame, d, tipo_c: str, anos) -> np.ndarray:
 
 
 CRESC_BASE = ["receita", "lucro_bruto", "ebitda", "ebit", "lucro_liquido", "ativo_total", "patrimonio_liquido",
-              "capex_organico"]
+              "capex_organico", "capex_total"]
 
 
 def calc_crescimento(b: pd.DataFrame) -> pd.DataFrame:
@@ -1656,6 +1657,17 @@ with aba_setor:
         d_set = setor_f.assign(_c=col_periodo(setor_f))
         d_emp = filtrado.assign(_c=col_periodo(filtrado))
         exp_todos = {}
+        # sem setor/subsetor/segmento (nem empresas) escolhidos: todos os gráficos agrupam as empresas por setor
+        por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
+        setores_g = sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip())
+
+        def serie_setor(df_s: pd.DataFrame, m: str) -> pd.Series:
+            """Valor do setor por período: agregado (Σ ou Σ num ÷ Σ den); sem agregado possível, mediana."""
+            v = agregado_setor(df_s, m).reindex(periodos)
+            if v.notna().any():
+                return v
+            return df_s.assign(_c=col_periodo(df_s)).groupby("_c")[m].median().reindex(periodos)
+
         area_g = st.container()          # gráficos no topo da página
         area_t = st.container()          # tabelas e downloads no fim da página
         if inds:
@@ -1730,7 +1742,23 @@ with aba_setor:
                     st.divider()
                     st.subheader(rot_ind(ind))
                 # gráfico
-                if fmt == "mm":
+                if fmt == "mm" and por_setor:
+                    tab_s = d_set.groupby(["setor", "_c"])[ind].sum(min_count=1).unstack().reindex(columns=periodos)
+                    tab_s = tab_s[tab_s.index.astype(str).str.strip() != ""]
+                    if ult and ult[0] in tab_s.columns:
+                        tab_s = tab_s.sort_values(ult[0], ascending=False)
+                    if pct_setor:
+                        tab_s = tab_s.div(total, axis=1)
+                    longo = tab_s.T.reset_index(names="Período").melt(id_vars="Período", var_name="Setor", value_name="v")
+                    fig = px.bar(longo, x="Período", y="v", color="Setor",
+                                 labels={"v": "% do total" if pct_setor else ROT[ind] + f" ({UN})"})
+                    fig.update_layout(barmode="relative", height=480, legend_title_text="")
+                    if pct_setor:
+                        fig.update_yaxes(tickformat=".0%")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    st.caption("Sem setor, subsetor, segmento ou empresa escolhidos, o gráfico soma as empresas por setor. "
+                               "Filtre na barra lateral para ver as empresas individualmente (10 maiores + 'Demais').")
+                elif fmt == "mm":
                     top = tab.index[:10] if not sel_emp else tab.index
                     plot = tab.loc[top].T if len(tab) else pd.DataFrame()
                     if not sel_emp and len(tab) > 10:
@@ -1751,7 +1779,6 @@ with aba_setor:
                     # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
                     col = ind[6:]
                     niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
-                    por_setor = not (sel_setor or sel_sub or sel_seg or sel_emp)
                     linhas_idx = {}
                     if por_setor:
                         mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
@@ -1803,10 +1830,10 @@ with aba_setor:
                                 "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
                                 "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
                                + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
-                elif ind in ("gao", "gaf", "gat") and not (sel_setor or sel_sub or sel_seg or sel_emp):
+                elif ind in ("gao", "gaf", "gat") and por_setor:
                     # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
                     linhas_g = {}
-                    for st_nome in sorted(x for x in setor_f["setor"].dropna().unique() if str(x).strip()):
+                    for st_nome in setores_g:
                         linhas_g[st_nome] = agregado_setor(setor_f[setor_f["setor"] == st_nome], ind).reindex(periodos)
                     linhas_g["Todas as empresas"] = total
                     sel_g = st.multiselect("Linhas no gráfico", list(linhas_g), default=list(linhas_g),
@@ -1824,6 +1851,26 @@ with aba_setor:
                     st.caption("Grau de cada setor calculado sobre os agregados do setor (variação da soma de EBIT, lucro e "
                                "receita, só com empresas presentes nos dois períodos). Vazio quando o denominador variou menos "
                                "de 1%; valores muito altos indicam variação pequena no denominador, não alavancagem alta.")
+                elif por_setor:
+                    linhas_r = {s_: serie_setor(setor_f[setor_f["setor"] == s_], ind) for s_ in setores_g}
+                    linhas_r = {k: v for k, v in linhas_r.items() if v.notna().any()}
+                    linhas_r["Todas as empresas"] = serie_setor(setor_f, ind)
+                    sel_r = st.multiselect("Linhas no gráfico", list(linhas_r), default=list(linhas_r),
+                                           key=f"setor_linhas_{ind}_{tipo}",
+                                           help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                    fig = go.Figure()
+                    for nome in sel_r:
+                        fig.add_trace(go.Scatter(x=periodos, y=linhas_r[nome].values, mode="lines+markers", name=nome,
+                                                 line=dict(width=4, dash="dash") if nome == "Todas as empresas" else None))
+                    fig.update_layout(height=480, legend_title_text="", title=f"{ROT[ind]} por setor")
+                    if fmt == "pct":
+                        fig.update_yaxes(tickformat=".0%")
+                    elif fmt == "x":
+                        fig.update_yaxes(ticksuffix="x")
+                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    st.caption("Uma linha por setor, com o indicador calculado sobre os agregados do setor (Σ numerador ÷ "
+                               "Σ denominador, ex.: margem EBITDA = Σ EBITDA ÷ Σ receita). Indicadores sem agregado possível "
+                               "usam a mediana das empresas do setor. Filtre na barra lateral para ver as empresas.")
                 else:
                     fig = go.Figure()
                     for r in tab.index[:10]:
@@ -1853,20 +1900,42 @@ with aba_setor:
                 y = c2.selectbox("Eixo Y", list(METRICAS), index=list(METRICAS).index("margem_ebitda"), format_func=lambda k: ROT[k])
                 tam = c3.selectbox("Tamanho do ponto", [None] + [k for k in METRICAS if METRICAS[k][1] == "mm"],
                                    format_func=lambda k: "—" if k is None else ROT[k])
-                pts = snap.dropna(subset=[x, y])
-                if tam:
-                    pts = pts[pts[tam] > 0]
+                if por_setor:
+                    snap_s = setor_f[col_periodo(setor_f) == ref]
+                    linhas_p = []
+                    for s_ in setores_g:
+                        g_ = snap_s[snap_s["setor"] == s_]
+                        if g_.empty:
+                            continue
+                        lp = {"setor": s_, "n_empresas": g_["cnpj"].nunique()}
+                        for k in {x, y, tam} - {None}:
+                            v_ = serie_setor(g_, k)
+                            lp[k] = v_.get(ref, np.nan)
+                        linhas_p.append(lp)
+                    pts = pd.DataFrame(linhas_p, columns=["setor", "n_empresas"] + list(dict.fromkeys(
+                        k for k in (x, y, tam) if k)))
+                    pts = pts.dropna(subset=[x, y])
+                    if tam:
+                        pts = pts[pts[tam] > 0]
+                    cor, nome_hover, hov = "setor", "setor", {"n_empresas": True, x: ":.2f", y: ":.2f"}
+                else:
+                    pts = snap.dropna(subset=[x, y])
+                    if tam:
+                        pts = pts[pts[tam] > 0]
+                    cor, nome_hover, hov = "segmento", "empresa", {"ticker": True, x: ":.2f", y: ":.2f"}
                 if pts.empty:
                     st.info("Sem dados suficientes para os eixos escolhidos.")
                 else:
-                    fig = px.scatter(pts, x=x, y=y, color="segmento", size=tam, hover_name="empresa",
-                                     hover_data={"ticker": True, x: ":.2f", y: ":.2f"},
-                                     labels={x: ROT[x], y: ROT[y]})
+                    fig = px.scatter(pts, x=x, y=y, color=cor, size=tam, hover_name=nome_hover,
+                                     hover_data=hov, labels={x: ROT[x], y: ROT[y], "n_empresas": "Empresas"})
                     for eixo, k in (("x", x), ("y", y)):
                         if METRICAS[k][1] == "pct":
                             fig.update_layout(**{f"{eixo}axis_tickformat": ".0%"})
-                    fig.update_layout(height=520, legend_title_text="Segmento")
+                    fig.update_layout(height=520, legend_title_text="Setor" if por_setor else "Segmento")
                     st.plotly_chart(fig, width="stretch")
+                    if por_setor:
+                        st.caption("Um ponto por setor, com os indicadores sobre os agregados do setor (ou mediana, quando "
+                                   "não há agregado). Filtre na barra lateral para ver as empresas.")
 
 # -------- Empresa: séries históricas vs. mediana do segmento
 with aba_emp:
