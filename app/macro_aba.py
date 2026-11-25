@@ -1,6 +1,7 @@
 """
 macro_aba.py — aba "Macro (inflação, PIB, câmbio)" do app Price Discovery Scanning.
-Lê saidas/macro/ (gerado pelo workflow macro, script macro.py) e mostra três blocos: IPCA, PIB e PTAX.
+Lê saidas/macro/ (gerado pelo workflow macro, script macro.py) e mostra IPCA, PIB, PTAX e o consolidado do Focus.
+Usado também pelo app BR Toll Roads Fin Data (cópia idêntica do arquivo).
 """
 import json
 from pathlib import Path
@@ -10,7 +11,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-ARQS = ["ipca_mensal.csv", "pib_trimestral.csv", "pib_volume_trimestral.csv", "cambio_diario.csv", "metadados.json"]
+ARQS = ["ipca_mensal.csv", "pib_trimestral.csv", "pib_volume_trimestral.csv", "cambio_diario.csv", "metadados.json",
+        "focus_anual.csv"]
 PASTA_PADRAO = Path(__file__).resolve().parent.parent / "saidas" / "macro"
 
 IPCA_MODOS = ["Trimestral", "12 meses (janela móvel mensal)", "Anual", "Mensal"]
@@ -34,6 +36,12 @@ def carregar(pasta: str, versao: tuple = ()):
     meta = json.loads((p / "metadados.json").read_text()) if (p / "metadados.json").exists() else {}
     return (ler("ipca_mensal.csv"), ler("pib_trimestral.csv"),
             ler("cambio_diario.csv", parse_dates=["data"]), meta, ler("pib_volume_trimestral.csv"))
+
+
+@st.cache_data(max_entries=1, show_spinner=False)
+def carregar_focus(pasta: str, versao: tuple = ()) -> pd.DataFrame:
+    p = Path(pasta) / "focus_anual.csv"
+    return pd.read_csv(p, parse_dates=["data"]) if p.exists() else pd.DataFrame()
 
 
 def _tri(per: pd.Period) -> str:
@@ -231,6 +239,174 @@ def go_scatter(x, y, nome):
                       line=dict(color=CORES_MACRO[nome], width=2.5, dash="dot"), marker=dict(size=6))
 
 
+
+# ----------------------------------------------------------------------------- recorte por datas e Focus
+def _br(x: float, casas: int = 2, sinal: bool = False) -> str:
+    t = f"{x:+,.{casas}f}" if sinal else f"{x:,.{casas}f}"
+    return t.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _datas(rotulo: str, minimo, maximo, padrao_ini, key: str):
+    """Par de datas (inicial, final) limitado ao intervalo com dado; corrige inversão."""
+    minimo, maximo = pd.Timestamp(minimo).date(), pd.Timestamp(maximo).date()
+    padrao_ini = min(max(pd.Timestamp(padrao_ini).date(), minimo), maximo)
+    c1, c2, _ = st.columns([1, 1, 2])
+    d0 = c1.date_input(f"{rotulo} — data inicial", value=padrao_ini, min_value=minimo, max_value=maximo,
+                       format="DD/MM/YYYY", key=f"{key}_ini")
+    d1 = c2.date_input(f"{rotulo} — data final", value=maximo, min_value=minimo, max_value=maximo,
+                       format="DD/MM/YYYY", key=f"{key}_fim")
+    if d0 > d1:
+        d0, d1 = d1, d0
+    return pd.Timestamp(d0), pd.Timestamp(d1)
+
+
+def ipca_recorte(ipca: pd.DataFrame, ini, fim) -> pd.DataFrame:
+    """Meses cheios do recorte: do mês da data inicial ao mês da data final."""
+    per = pd.PeriodIndex(ipca["mes"], freq="M")
+    return ipca[(per >= pd.Period(ini, freq="M")) & (per <= pd.Period(fim, freq="M"))].reset_index(drop=True)
+
+
+def calc_ipca_recorte(ipca: pd.DataFrame, modo: str, ini, fim) -> pd.DataFrame:
+    """12 meses usa a série inteira (precisa dos 11 meses anteriores) e mostra só o recorte; as demais
+    periodicidades são compostas só com os meses do recorte (períodos de borda incompletos ficam parciais)."""
+    if modo.startswith("12 meses"):
+        t = calc_ipca(ipca, modo)
+        per = pd.PeriodIndex(t["periodo"], freq="M")
+        return t[(per >= pd.Period(ini, freq="M")) & (per <= pd.Period(fim, freq="M"))].reset_index(drop=True)
+    m = ipca_recorte(ipca, ini, fim)
+    return calc_ipca(m, modo) if len(m) else pd.DataFrame(columns=["periodo", "data", "ipca_pct", "parcial"])
+
+
+def ptax_em(c: pd.DataFrame, d):
+    """PTAX do último pregão até a data (ou o primeiro depois, se a data for anterior à série)."""
+    c = c.sort_values("data")
+    ate = c[c["data"] <= d]
+    r = ate.iloc[-1] if len(ate) else c[c["data"] >= d].iloc[0]
+    return r["data"], float(r["ptax_venda"])
+
+
+UNID_FOCUS = {"Câmbio": "R$/US$"}
+PADRAO_FOCUS = ["IPCA", "PIB Total", "Câmbio", "Selic"]
+
+
+def _unid(ind: str) -> str:
+    if ind in UNID_FOCUS:
+        return UNID_FOCUS[ind]
+    return "% do PIB" if ind.startswith(("Resultado", "Dívida")) else "%"
+
+
+def relatorio_em(datas: pd.Series, d) -> pd.Timestamp:
+    """Relatório Focus mais recente até a data escolhida (ou o primeiro disponível)."""
+    ok = datas[datas <= pd.Timestamp(d)]
+    return ok.max() if len(ok) else datas.min()
+
+
+def sequencia(s: pd.Series) -> str:
+    """Comportamento semanal estilo relatório Focus: direção da última mudança e há quantas semanas seguidas."""
+    dif = np.sign(s.diff().round(6).dropna().to_numpy())
+    if not len(dif):
+        return ""
+    ult = dif[-1]
+    n = 0
+    for x in dif[::-1]:
+        if x != ult:
+            break
+        n += 1
+    seta = {1: "▲", -1: "▼", 0: "="}[int(ult)]
+    return f"{seta} {n}"
+
+
+def consolidado_focus(f: pd.DataFrame, base, comp, inds: list, anos: list) -> pd.DataFrame:
+    linhas = []
+    for ind in inds:
+        for ano in anos:
+            s = f[(f["indicador"] == ind) & (f["ano_ref"] == ano)].set_index("data").sort_index()
+            if s.empty:
+                continue
+            b = s["mediana"].get(base, np.nan)
+            c = s["mediana"].get(comp, np.nan)
+            h1 = s.loc[:comp, "mediana"]
+            linhas.append({
+                "Indicador": ind, "Ano": int(ano), "Unidade": _unid(ind),
+                "Mediana base": b, "Mediana comparada": c,
+                "Variação": c - b,
+                "Variação %": (c / b - 1) * 100 if _unid(ind) == "R$/US$" and b else np.nan,
+                "Semana anterior": h1.iloc[-2] if len(h1) > 1 else np.nan,
+                "Comportamento semanal": sequencia(h1.tail(60)),
+                "Mín–máx (comparada)": (f"{_br(s['minimo'].get(comp, np.nan))} – {_br(s['maximo'].get(comp, np.nan))}"
+                                        if comp in s.index else ""),
+                "Respondentes": s["respondentes"].get(comp, np.nan),
+            })
+    return pd.DataFrame(linhas)
+
+
+def render_focus(f: pd.DataFrame, exportar: dict):
+    st.subheader("Expectativas de mercado — relatório Focus (BCB)")
+    if f.empty:
+        st.info("Focus ainda não coletado (saidas/macro/focus_anual.csv). Rode o workflow macro.")
+        return
+    datas = pd.Series(sorted(f["data"].unique()))
+    ult = datas.max()
+    inds_disp = sorted(f["indicador"].unique(), key=lambda x: ((PADRAO_FOCUS + [x]).index(x), x))
+    c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
+    d_b = c1.date_input("Relatório base", value=(ult - pd.Timedelta(weeks=4)).date(), min_value=datas.min().date(),
+                        max_value=ult.date(), format="DD/MM/YYYY", key="foc_base",
+                        help="Usa o relatório mais recente até a data escolhida.")
+    d_c = c2.date_input("Relatório comparado", value=ult.date(), min_value=datas.min().date(), max_value=ult.date(),
+                        format="DD/MM/YYYY", key="foc_comp")
+    base, comp = relatorio_em(datas, d_b), relatorio_em(datas, d_c)
+    if base > comp:
+        base, comp = comp, base
+    inds = c3.multiselect("Indicadores", inds_disp, default=[i for i in PADRAO_FOCUS if i in inds_disp],
+                          key="foc_inds")
+    anos_disp = sorted(f.loc[f["data"] == comp, "ano_ref"].unique())
+    padrao_anos = [a for a in anos_disp if comp.year <= a <= comp.year + 1] or anos_disp[:2]
+    anos = c4.multiselect("Anos de referência", anos_disp, default=padrao_anos, key="foc_anos")
+    st.caption(f"Comparando o relatório de {base:%d/%m/%Y} com o de {comp:%d/%m/%Y} "
+               f"({(comp - base).days // 7} semanas). Datas = último dia da semana com dado (sexta), que é o "
+               "que o relatório Focus publica na segunda-feira seguinte.")
+    if not inds or not anos:
+        st.info("Escolha ao menos um indicador e um ano de referência.")
+        return
+
+    tab = consolidado_focus(f, base, comp, inds, anos)
+    if tab.empty:
+        st.warning("Sem projeções para essa combinação.")
+        return
+    st.dataframe(tab, hide_index=True, width="stretch", column_config={
+        "Ano": st.column_config.NumberColumn(format="%d"),
+        "Mediana base": st.column_config.NumberColumn(f"Mediana {base:%d/%m/%y}", format="%.2f"),
+        "Mediana comparada": st.column_config.NumberColumn(f"Mediana {comp:%d/%m/%y}", format="%.2f"),
+        "Variação": st.column_config.NumberColumn("Variação (p.p. / R$)", format="%+.2f"),
+        "Variação %": st.column_config.NumberColumn(format="%+.1f%%"),
+        "Semana anterior": st.column_config.NumberColumn(format="%.2f"),
+        "Respondentes": st.column_config.NumberColumn(format="%d")})
+    exportar["Focus consolidado"] = tab
+
+    # evolução das medianas no intervalo escolhido
+    g1, g2 = st.columns([1, 3])
+    ind_g = g1.selectbox("Evolução da mediana", inds, key="foc_ind_g")
+    banda = g1.checkbox("Mostrar mín–máx", value=False, key="foc_banda")
+    ev = f[(f["indicador"] == ind_g) & f["ano_ref"].isin(anos) & (f["data"] >= base) & (f["data"] <= comp)]
+    ev = ev.sort_values("data").assign(ano=lambda x: x["ano_ref"].astype(str))
+    import plotly.graph_objects as go
+    fig = px.line(ev, x="data", y="mediana", color="ano", markers=len(ev) < 120,
+                  labels={"data": "", "mediana": _unid(ind_g), "ano": "Ano de ref."},
+                  title=f"Focus — {ind_g}: mediana das projeções ({base:%d/%m/%Y} a {comp:%d/%m/%Y})")
+    if banda:
+        for ano, d in ev.groupby("ano"):
+            fig.add_trace(go.Scatter(x=list(d["data"]) + list(d["data"][::-1]),
+                                     y=list(d["maximo"]) + list(d["minimo"][::-1]), fill="toself",
+                                     opacity=0.15, line=dict(width=0), name=f"{ano} mín–máx", hoverinfo="skip"))
+    fig.update_layout(height=400, margin=dict(l=10, r=10, t=50, b=10))
+    g2.plotly_chart(fig, width="stretch")
+    exportar["Focus evolução"] = ev.assign(data=ev["data"].dt.date).drop(columns=["ano"])
+    st.caption("Fonte: Banco Central do Brasil, Sistema de Expectativas de Mercado (Focus), API Olinda "
+               "ExpectativasMercadoAnuais, base de cálculo 0 (todas as instituições). Variação = mediana comparada − "
+               "mediana base, em p.p. (taxas e % do PIB) ou R$ (câmbio). Selic = taxa projetada para o fim do ano; "
+               "Câmbio = R$/US$ projetado para o fim do ano. Comportamento semanal: ▲ alta / ▼ queda / = estável e "
+               "há quantas semanas seguidas, até o relatório comparado.")
+
 # ----------------------------------------------------------------------------- tela
 def _grafico(df, y, titulo, tipo="barra", rot_y="%"):
     if tipo == "barra":
@@ -253,10 +429,6 @@ def render(pasta: Path, excel_bytes):
 
     ini_exib = pd.Timestamp(meta.get("janela", {}).get("inicio_exibicao")
                             or f"{pd.Timestamp.today().year - 11}-01-01")
-    anos = list(range(ini_exib.year, pd.Timestamp.today().year + 1))
-    a0, a1 = st.select_slider("Período exibido (anos)", options=anos, value=(anos[0], anos[-1]), key="mac_anos")
-    janela = lambda df: df[(df["data"] >= pd.Timestamp(a0, 1, 1)) &  # noqa: E731
-                           (df["data"] <= pd.Timestamp(a1, 12, 31))].reset_index(drop=True)
     exportar = {}
 
     # ---- Inflação
@@ -264,25 +436,40 @@ def render(pasta: Path, excel_bytes):
     if ipca.empty:
         st.warning("IPCA indisponível nesta coleta.")
     else:
+        per = pd.PeriodIndex(ipca["mes"], freq="M")
+        i0, i1 = _datas("IPCA", per.min().to_timestamp(), per.max().to_timestamp(how="end"), ini_exib, "mac_ipca_dt")
         modo = st.radio("Periodicidade", IPCA_MODOS, horizontal=True, key="mac_ipca_modo")
-        t = janela(calc_ipca(ipca, modo))
+        t = calc_ipca_recorte(ipca, modo, i0, i1)
+        mm = ipca_recorte(ipca, i0, i1)
         c1, c2 = st.columns([3, 1])
-        c1.plotly_chart(_grafico(t, "ipca_pct", f"IPCA — {modo.lower()} (%)",
-                                 "linha" if modo.startswith("12") else "barra"), width="stretch")
-        mm = ipca.assign(d=pd.PeriodIndex(ipca["mes"], freq="M").to_timestamp(how="end"))
-        mm = mm[(mm["d"] >= pd.Timestamp(a0, 1, 1)) & (mm["d"] <= pd.Timestamp(a1, 12, 31, 23, 59))]
-        acum = (np.prod(1 + mm["ipca_mensal"] / 100) - 1) * 100
-        c2.metric("IPCA acumulado no período", f"{acum:,.2f}%".replace(",", "X").replace(".", ",").replace("X", "."))
+        if len(t):
+            c1.plotly_chart(_grafico(t, "ipca_pct", f"IPCA — {modo.lower()} (%)",
+                                     "linha" if modo.startswith("12") else "barra"), width="stretch")
+        if len(mm):
+            acum = (np.prod(1 + mm["ipca_mensal"] / 100) - 1) * 100
+            n = len(mm)
+            anual = ((1 + acum / 100) ** (12 / n) - 1) * 100
+            c2.metric(f"IPCA acumulado {mm['mes'].iloc[0]} → {mm['mes'].iloc[-1]}", f"{_br(acum)}%",
+                      f"{_br(anual)}% a.a. ({n} meses)", delta_color="off",
+                      help="Composição das variações mensais dos meses cheios do recorte. Anualizado = "
+                           "(1 + acumulado)^(12/meses) − 1.")
         c2.metric("Último mês disponível", ipca["mes"].iloc[-1], f"{ipca['ipca_mensal'].iloc[-1]:.2f}% no mês",
                   delta_color="off")
         c2.dataframe(t[["periodo", "ipca_pct"]].iloc[::-1], hide_index=True, height=220,
                      column_config={"periodo": "Período", "ipca_pct": st.column_config.NumberColumn("IPCA %", format="%.2f")})
-        exportar[f"IPCA {modo[:10]}"] = t.assign(data=t["data"].dt.date)
+        exportar[f"IPCA {modo[:10]}"] = t.assign(data=pd.to_datetime(t["data"]).dt.date)
         st.caption("Fonte: IBGE, via Banco Central (SGS, série 433 — variação mensal). Trimestral, 12 meses e anual "
-                   "são calculados aqui por composição das variações mensais; períodos incompletos aparecem como parciais.")
+                   "são calculados aqui por composição das variações mensais. O recorte usa meses cheios (do mês da "
+                   "data inicial ao mês da data final); períodos incompletos no recorte aparecem como parciais. "
+                   "Em '12 meses', cada ponto usa os 12 meses anteriores, mesmo que antes da data inicial.")
 
-    # ---- PIB
+    # ---- PIB (recorte em anos, comum aos dois blocos de PIB)
+    anos = list(range(ini_exib.year, pd.Timestamp.today().year + 1))
     st.subheader("Crescimento do PIB")
+    a0, a1 = st.select_slider("Período exibido (anos) — PIB real e nominal", options=anos,
+                              value=(anos[0], anos[-1]), key="mac_anos")
+    janela = lambda df: df[(df["data"] >= pd.Timestamp(a0, 1, 1)) &  # noqa: E731
+                           (df["data"] <= pd.Timestamp(a1, 12, 31))].reset_index(drop=True)
     if pib.empty:
         st.warning("PIB indisponível nesta coleta.")
     else:
@@ -326,26 +513,47 @@ def render(pasta: Path, excel_bytes):
     if cambio.empty:
         st.warning("Câmbio indisponível nesta coleta.")
     else:
+        cs = cambio.sort_values("data")
+        k0, k1 = _datas("Câmbio", cs["data"].min(), cs["data"].max(), ini_exib, "mac_cambio_dt")
         modo = st.radio("Frequência", CAMBIO_MODOS, horizontal=True, index=1, key="mac_cambio_modo")
-        t = janela(calc_cambio(cambio, modo))
+        rec = cs[(cs["data"] >= k0) & (cs["data"] <= k1)]
         c1, c2 = st.columns([3, 1])
-        c1.plotly_chart(_grafico(t, "ptax_venda", f"PTAX venda — {modo.lower()}",
-                                 "linha", "R$ por US$"), width="stretch")
-        if len(t) > 1:
-            var = (t["ptax_venda"].iloc[-1] / t["ptax_venda"].iloc[0] - 1) * 100
-            c2.metric(f"Variação {t['periodo'].iloc[0]} → {t['periodo'].iloc[-1]}", f"{var:+.1f}%",
-                      help="Positivo = real se desvalorizou frente ao dólar.")
-        ult = cambio.sort_values("data").iloc[-1]
+        if rec.empty:
+            c1.info("Sem pregões no recorte escolhido.")
+            t = pd.DataFrame(columns=["periodo", "data", "ptax_venda"])
+        else:
+            t = calc_cambio(rec, modo)
+            c1.plotly_chart(_grafico(t, "ptax_venda", f"PTAX venda — {modo.lower()}",
+                                     "linha", "R$ por US$"), width="stretch")
+            db, vb = ptax_em(cs, k0)
+            df_, vf = ptax_em(cs, k1)
+            var = (vf / vb - 1) * 100
+            anos_r = max((df_ - db).days, 1) / 365.25
+            c2.metric(f"Variação {db:%d/%m/%Y} → {df_:%d/%m/%Y}", f"{_br(var, 1, True)}%",
+                      f"R$ {_br(vb, 4)} → R$ {_br(vf, 4)}", delta_color="off",
+                      help="PTAX do último pregão até cada data escolhida. Positivo = real se desvalorizou "
+                           "frente ao dólar.")
+            if anos_r >= 1:
+                c2.metric("Variação anualizada", f"{_br(((vf / vb) ** (1 / anos_r) - 1) * 100, 1, True)}% a.a.")
+            c2.metric("Média no recorte", f"R$ {_br(rec['ptax_venda'].mean(), 4)}",
+                      f"mín {_br(rec['ptax_venda'].min(), 4)} · máx {_br(rec['ptax_venda'].max(), 4)}",
+                      delta_color="off")
+        ult = cs.iloc[-1]
         c2.metric("Última PTAX", f"R$ {ult['ptax_venda']:.4f}".replace(".", ","), ult["data"].strftime("%d/%m/%Y"),
                   delta_color="off")
         c2.dataframe(t[["periodo", "ptax_venda"]].iloc[::-1], hide_index=True, height=220,
                      column_config={"periodo": "Período",
                                     "ptax_venda": st.column_config.NumberColumn("R$/US$", format="%.4f")})
-        exportar[f"PTAX {modo}"] = t.assign(data=t["data"].dt.date)
+        exportar[f"PTAX {modo}"] = t.assign(data=pd.to_datetime(t["data"]).dt.date)
         st.caption("Fonte: Banco Central do Brasil (SGS, série 1 — PTAX venda). 'Fim' = último pregão do período; "
-                   "'Média' = média simples dos pregões do período. No período corrente, valores até o último dado.")
+                   "'Média' = média simples dos pregões do período, só com os pregões dentro do recorte (períodos "
+                   "de borda ficam parciais). Variação ponto a ponto entre a PTAX do último pregão até a data inicial "
+                   "e até a data final.")
+
+    # ---- Focus
+    render_focus(carregar_focus(str(pasta), _versao(pasta)), exportar)
 
     if exportar:
-        st.download_button("⬇️ Séries exibidas (XLSX)", excel_bytes(exportar), file_name=f"macro_{a0}_{a1}.xlsx",
+        st.download_button("⬇️ Séries exibidas (XLSX)", excel_bytes(exportar), file_name=f"macro_{pd.Timestamp.today():%Y%m%d}.xlsx",
                            key="mac_xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
