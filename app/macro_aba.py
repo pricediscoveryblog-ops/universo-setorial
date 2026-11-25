@@ -1,6 +1,7 @@
 """
 macro_aba.py — aba "Macro (inflação, PIB, câmbio)" do app Price Discovery Scanning.
-Lê saidas/macro/ (gerado pelo workflow macro, script macro.py) e mostra IPCA, PIB, PTAX e o consolidado do Focus.
+Lê saidas/macro/ (gerado pelo workflow macro, script macro.py) e mostra IPCA, PIB, PTAX, contas públicas (NFSP e
+dívida), despesas do governo central (RTN), reservas internacionais, balança comercial e o consolidado do Focus.
 Usado também pelo app BR Toll Roads Fin Data (cópia idêntica do arquivo).
 """
 import json
@@ -407,6 +408,344 @@ def render_focus(f: pd.DataFrame, exportar: dict):
                "Câmbio = R$/US$ projetado para o fim do ano. Comportamento semanal: ▲ alta / ▼ queda / = estável e "
                "há quantas semanas seguidas, até o relatório comparado.")
 
+# ----------------------------------------------------------------------------- contas públicas, despesas e setor externo
+ARQS_EXT = ["fiscal_mensal.csv", "rtn_mensal.csv", "reservas_diario.csv", "balanca_mensal.csv"]
+ARQS += ARQS_EXT
+FLUXO_MODOS = ["Mensal", "Acumulado em 12 meses", "Anual"]
+FISCAL_MEDIDAS = ["% do PIB (acumulado em 12 meses)", "R$ bilhões — mensal", "R$ bilhões — acumulado em 12 meses",
+                  "R$ bilhões — anual"]
+ESFERAS = {"Setor público consolidado": "spc", "Governo central (Gov. Federal + BCB)": "gc"}
+RTN_COMPONENTES = {"beneficios_previdenciarios": "Benefícios previdenciários",
+                   "pessoal": "Pessoal e encargos sociais",
+                   "outras_obrigatorias": "Outras obrigatórias",
+                   "obrigatorias_controle_fluxo": "Obrigatórias com controle de fluxo",
+                   "discricionarias": "Discricionárias (Executivo)"}
+CORES_RTN = ["#1F4E79", "#2E86C1", "#85C1E9", "#A569BD", "#E59866"]
+RESERVAS_MODOS = ["Diário", "Fim do mês", "Fim do trimestre", "Fim do ano"]
+
+
+@st.cache_data(max_entries=1, show_spinner=False)
+def carregar_externo(pasta: str, versao: tuple = ()):
+    p = Path(pasta)
+    ler = lambda n, **k: pd.read_csv(p / n, **k) if (p / n).exists() else pd.DataFrame()  # noqa: E731
+    return (ler("fiscal_mensal.csv"), ler("rtn_mensal.csv"), ler("reservas_diario.csv", parse_dates=["data"]),
+            ler("balanca_mensal.csv"))
+
+
+def _mes_fim(per: pd.PeriodIndex) -> pd.Series:
+    return pd.Series(per.to_timestamp(how="end").normalize(), index=range(len(per)))
+
+
+def fluxo(df: pd.DataFrame, cols: list, modo: str, ini=None, fim=None) -> pd.DataFrame:
+    """Agrega fluxos mensais (coluna 'mes'). 12 meses: soma móvel sobre a série inteira (meses consecutivos) e depois
+    recorta; mensal e anual: só os meses do recorte (anos de borda incompletos ficam marcados como parciais)."""
+    m = df.assign(per=pd.PeriodIndex(df["mes"], freq="M")).set_index("per")[cols].sort_index()
+    m = m.reindex(pd.period_range(m.index.min(), m.index.max(), freq="M"))
+    def no_recorte(idx):
+        ok = np.ones(len(idx), dtype=bool)
+        if ini is not None:
+            ok &= np.asarray(idx >= pd.Period(ini, freq="M"))
+        if fim is not None:
+            ok &= np.asarray(idx <= pd.Period(fim, freq="M"))
+        return ok
+    if modo.startswith("Acumulado"):
+        v = m.rolling(12, min_periods=12).sum()
+        v = v[no_recorte(v.index)].dropna(how="all")
+        out = v.reset_index(names="per")
+        out["periodo"], out["parcial"] = out["per"].astype(str), False
+    else:
+        m = m[no_recorte(m.index)].dropna(how="all")
+        if modo == "Mensal":
+            out = m.reset_index(names="per")
+            out["periodo"], out["parcial"] = out["per"].astype(str), False
+        else:
+            g = m.groupby(m.index.asfreq("Y"))
+            out = g.sum(min_count=1)
+            out["n"] = g.size()
+            out = out.reset_index(names="per")
+            out["parcial"] = out["n"] < 12
+            out["periodo"] = [f"{p.year}" + (" (parcial)" if parc else "") for p, parc in zip(out["per"], out["parcial"])]
+            out = out.drop(columns="n")
+    out["data"] = _mes_fim(pd.PeriodIndex(out["per"]))
+    return out.drop(columns="per")
+
+
+def deflator_ipca(ipca: pd.DataFrame, meses: pd.Series, ref: pd.Period) -> pd.Series:
+    """Fator que leva R$ de cada mês para R$ do mês de referência (IPCA): índice(ref) / índice(mês)."""
+    idx = ipca_indice(ipca)
+    base = idx.get(ref, np.nan)
+    return pd.Series(base / idx.reindex(pd.PeriodIndex(meses, freq="M")).to_numpy(), index=meses.index)
+
+
+def _datas_mes(rotulo: str, meses: pd.Series, padrao_ini, key: str):
+    per = pd.PeriodIndex(meses, freq="M")
+    return _datas(rotulo, per.min().to_timestamp(), per.max().to_timestamp(how="end"), padrao_ini, key)
+
+
+def _layout(fig, titulo, rot_y, categorias=None, h=400):
+    fig.update_layout(title=titulo, height=h, margin=dict(l=10, r=10, t=50, b=10), yaxis_title=rot_y,
+                      legend=dict(orientation="h", yanchor="bottom", y=-0.25, x=0), hovermode="x unified")
+    if categorias is not None:
+        fig.update_xaxes(type="category", categoryorder="array", categoryarray=list(categorias))
+    return fig
+
+
+def render_fiscal(fiscal: pd.DataFrame, ini_exib, exportar: dict):
+    import plotly.graph_objects as go
+    st.subheader("Contas públicas — resultado primário e nominal")
+    if fiscal.empty:
+        st.info("Séries fiscais ainda não coletadas (saidas/macro/fiscal_mensal.csv). Rode o workflow macro.")
+        return
+    c1, c2 = st.columns([1, 2])
+    esfera = c1.radio("Esfera", list(ESFERAS), key="mac_fis_esfera")
+    medida = c2.radio("Medida", FISCAL_MEDIDAS, horizontal=True, key="mac_fis_medida")
+    e = ESFERAS[esfera]
+    f0, f1 = _datas_mes("Contas públicas", fiscal["mes"], ini_exib, "mac_fis_dt")
+    # resultado = −NFSP (positivo = superávit); juros aparecem negativos (custo)
+    nomes = {"primario": "Resultado primário", "juros": "Juros nominais", "nominal": "Resultado nominal"}
+    if medida.startswith("%"):
+        cols = [f"{e}_{k}_12m_pib" for k in nomes]
+        per = pd.PeriodIndex(fiscal["mes"], freq="M")
+        t = fiscal[(per >= pd.Period(f0, freq="M")) & (per <= pd.Period(f1, freq="M"))].dropna(subset=cols, how="all")
+        t = pd.DataFrame({"periodo": t["mes"], "data": _mes_fim(pd.PeriodIndex(t["mes"], freq="M")).to_numpy(),
+                          **{nomes[k]: -t[c].to_numpy() for k, c in zip(nomes, cols)}, "parcial": False})
+        unid, casas = "% do PIB", 2
+    else:
+        cols = [f"{e}_{k}" for k in nomes]
+        modo = {"mensal": "Mensal", "acumulado em 12 meses": "Acumulado em 12 meses", "anual": "Anual"}[
+            medida.split("— ")[1]]
+        a = fluxo(fiscal, cols, modo, f0, f1)
+        t = pd.DataFrame({"periodo": a["periodo"], "data": a["data"],
+                          **{nomes[k]: (-a[c] / 1000).round(2).to_numpy() for k, c in zip(nomes, cols)},
+                          "parcial": a["parcial"]})
+        unid, casas = "R$ bilhões", 1
+    t = t.reset_index(drop=True)
+    g1, g2 = st.columns([3, 1])
+    if t.empty:
+        g1.info("Sem dados no recorte escolhido.")
+        return
+    fig = go.Figure()
+    if medida.startswith("%"):
+        for nome, cor in zip(nomes.values(), ["#2E6FBA", "#C0504D", "#333333"]):
+            fig.add_trace(go.Scatter(x=t["data"], y=t[nome], name=nome, mode="lines", line=dict(color=cor, width=2.5)))
+        fig.add_hline(y=0, line_width=1, line_color="#999")
+        _layout(fig, f"{esfera} — resultado acumulado em 12 meses (% do PIB)", unid)
+    else:
+        fig.add_trace(go.Bar(x=t["periodo"], y=t["Resultado primário"], name="Resultado primário", marker_color="#2E6FBA"))
+        fig.add_trace(go.Bar(x=t["periodo"], y=t["Juros nominais"], name="Juros nominais", marker_color="#C0504D"))
+        fig.add_trace(go.Scatter(x=t["periodo"], y=t["Resultado nominal"], name="Resultado nominal", mode="lines+markers",
+                                 line=dict(color="#333333", width=2.5), marker=dict(size=5)))
+        fig.update_layout(barmode="relative")
+        _layout(fig, f"{esfera} — {medida.split('— ')[1]} ({unid})", unid, t["periodo"])
+    g1.plotly_chart(fig, width="stretch")
+    u = t.iloc[-1]
+    fmt = ((lambda x: f"{_br(x, casas, True)}% do PIB") if medida.startswith("%")  # noqa: E731
+           else (lambda x: f"R$ {_br(x, casas, True)} bi"))
+    g2.metric(f"Primário — {u['periodo']}", fmt(u["Resultado primário"]),
+              "superávit" if u["Resultado primário"] >= 0 else "déficit", delta_color="off")
+    g2.metric(f"Nominal — {u['periodo']}", fmt(u["Resultado nominal"]),
+              f"juros {fmt(u['Juros nominais'])}", delta_color="off")
+    g2.dataframe(t[["periodo"] + list(nomes.values())].iloc[::-1], hide_index=True, height=230,
+                 column_config={"periodo": "Período", **{n: st.column_config.NumberColumn(n, format=f"%.{casas}f")
+                                                         for n in nomes.values()}})
+    exportar[f"Fiscal {e} {medida[:12]}"] = t.assign(data=pd.to_datetime(t["data"]).dt.date)
+    st.caption("Fonte: Banco Central do Brasil, Estatísticas Fiscais — NFSP sem desvalorização cambial (SGS: setor "
+               "público consolidado 4649/4616/4583 e 5793/5760/5727; governo central 4639/4606/4573 e 5783/5750/5717). "
+               "O BCB publica as NFSP com sinal positivo para déficit; aqui o sinal foi invertido (positivo = "
+               "superávit; juros como custo, negativos). Resultado nominal = primário − juros. Critério 'abaixo da "
+               "linha' (variação da dívida), que difere do resultado do Tesouro 'acima da linha'. Anual e 12 meses em "
+               "R$ = soma dos fluxos mensais em valores correntes (cálculo próprio).")
+
+    # ---- dívida
+    per = pd.PeriodIndex(fiscal["mes"], freq="M")
+    d = fiscal[(per >= pd.Period(f0, freq="M")) & (per <= pd.Period(f1, freq="M"))][["mes", "dlsp_pib", "dbgg_pib"]]
+    d = d.dropna(how="all", subset=["dlsp_pib", "dbgg_pib"])
+    if len(d):
+        d = d.assign(data=_mes_fim(pd.PeriodIndex(d["mes"], freq="M")).to_numpy())
+        h1, h2 = st.columns([3, 1])
+        fig = go.Figure()
+        for c, nome, cor in [("dbgg_pib", "Dívida bruta do governo geral (DBGG)", "#C0504D"),
+                             ("dlsp_pib", "Dívida líquida do setor público (DLSP)", "#2E6FBA")]:
+            fig.add_trace(go.Scatter(x=d["data"], y=d[c], name=nome, mode="lines", line=dict(color=cor, width=2.5)))
+        h1.plotly_chart(_layout(fig, "Dívida pública (% do PIB)", "% do PIB", h=360), width="stretch")
+        for c, nome in [("dbgg_pib", "DBGG"), ("dlsp_pib", "DLSP")]:
+            s = d.dropna(subset=[c])
+            if len(s):
+                h2.metric(f"{nome} — {s['mes'].iloc[-1]}", f"{_br(s[c].iloc[-1], 1)}% do PIB",
+                          f"{_br(s[c].iloc[-1] - s[c].iloc[0], 1, True)} p.p. desde {s['mes'].iloc[0]}",
+                          delta_color="inverse")
+        exportar["Dívida % PIB"] = d.assign(data=d["data"].dt.date)
+        st.caption("Fonte: Banco Central do Brasil (SGS 13762 — DBGG, metodologia a partir de 2008; SGS 4513 — DLSP do "
+                   "setor público consolidado). Saldos de fim de mês em % do PIB dos últimos 12 meses.")
+
+
+def render_despesas(rtn: pd.DataFrame, ipca: pd.DataFrame, ini_exib, exportar: dict):
+    import plotly.graph_objects as go
+    st.subheader("Despesas e receitas do Governo Central — Tesouro Nacional")
+    if rtn.empty:
+        st.info("Resultado do Tesouro ainda não coletado (saidas/macro/rtn_mensal.csv). Rode o workflow macro.")
+        return
+    r0, r1 = _datas_mes("Despesas", rtn["mes"], ini_exib, "mac_rtn_dt")
+    c1, c2 = st.columns([2, 1])
+    modo = c1.radio("Periodicidade", FLUXO_MODOS, index=1, horizontal=True, key="mac_rtn_modo")
+    real = c2.radio("Valores", ["Nominais (correntes)", "Reais (IPCA)"], index=1, horizontal=True,
+                    key="mac_rtn_real") == "Reais (IPCA)"
+    cols = ["receita_liquida", "despesa_total"] + list(RTN_COMPONENTES) + ["primario_acima_linha"]
+    base = rtn[["mes"] + cols].copy()
+    ref = pd.Period(base["mes"].iloc[-1], freq="M")
+    if real:
+        if ipca.empty:
+            st.warning("IPCA indisponível: mostrando valores nominais.")
+            real = False
+        else:
+            ult_ipca = pd.Period(ipca["mes"].iloc[-1], freq="M")
+            ref = min(ref, ult_ipca)
+            fat = deflator_ipca(ipca, base["mes"], ref)
+            base[cols] = base[cols].mul(fat, axis=0)
+    t = fluxo(base, cols, modo, r0, r1)
+    t[cols] = t[cols] / 1000
+    if t.empty:
+        st.info("Sem dados no recorte escolhido.")
+        return
+    g1, g2 = st.columns([3, 1])
+    fig = go.Figure()
+    for (c, nome), cor in zip(RTN_COMPONENTES.items(), CORES_RTN):
+        fig.add_trace(go.Bar(x=t["periodo"], y=t[c], name=nome, marker_color=cor))
+    fig.add_trace(go.Scatter(x=t["periodo"], y=t["receita_liquida"], name="Receita líquida", mode="lines+markers",
+                             line=dict(color="#2CA02C", width=2.5), marker=dict(size=5)))
+    fig.update_layout(barmode="stack")
+    unid = f"R$ bilhões {'de ' + ref.strftime('%m/%Y') + ' (IPCA)' if real else 'correntes'}"
+    g1.plotly_chart(_layout(fig, f"Despesa total por grupo vs. receita líquida — {modo.lower()}", unid, t["periodo"],
+                            h=440), width="stretch")
+    u = t.iloc[-1]
+    g2.metric(f"Despesa total — {u['periodo']}", f"R$ {_br(u['despesa_total'], 1)} bi",
+              f"receita líquida R$ {_br(u['receita_liquida'], 1)} bi", delta_color="off")
+    g2.metric("Resultado primário (acima da linha)", f"R$ {_br(u['primario_acima_linha'], 1, True)} bi",
+              "superávit" if u["primario_acima_linha"] >= 0 else "déficit", delta_color="off")
+    comp = pd.DataFrame({"Grupo": list(RTN_COMPONENTES.values()),
+                         "R$ bi": [u[c] for c in RTN_COMPONENTES],
+                         "% da despesa": [100 * u[c] / u["despesa_total"] for c in RTN_COMPONENTES]})
+    g2.dataframe(comp, hide_index=True, height=230, column_config={
+        "R$ bi": st.column_config.NumberColumn(format="%.1f"),
+        "% da despesa": st.column_config.NumberColumn(format="%.1f%%")})
+
+    # crescimento real em 12 meses (sempre em termos reais, independentemente da escolha acima)
+    if not ipca.empty:
+        b = rtn[["mes", "despesa_total", "receita_liquida"] + list(RTN_COMPONENTES)].copy()
+        ref_r = min(pd.Period(b["mes"].iloc[-1], freq="M"), pd.Period(ipca["mes"].iloc[-1], freq="M"))
+        cc = [c for c in b.columns if c != "mes"]
+        b[cc] = b[cc].mul(deflator_ipca(ipca, b["mes"], ref_r), axis=0)
+        a12 = fluxo(b, cc, "Acumulado em 12 meses")
+        a12 = a12.set_index("periodo")[cc]
+        var = (a12 / a12.shift(12) - 1) * 100
+        per = pd.PeriodIndex(var.index, freq="M")
+        var = var[(per >= pd.Period(r0, freq="M")) & (per <= pd.Period(r1, freq="M"))].dropna(how="all")
+        if len(var):
+            sel = st.multiselect("Crescimento real em 12 meses — séries",
+                                 ["Despesa total", "Receita líquida"] + list(RTN_COMPONENTES.values()),
+                                 default=["Despesa total", "Receita líquida"], key="mac_rtn_cresc")
+            nome_col = {"Despesa total": "despesa_total", "Receita líquida": "receita_liquida",
+                        **{v: k for k, v in RTN_COMPONENTES.items()}}
+            fig = go.Figure()
+            for n in sel:
+                fig.add_trace(go.Scatter(x=list(var.index), y=var[nome_col[n]].round(2), name=n, mode="lines"))
+            fig.add_hline(y=0, line_width=1, line_color="#999")
+            st.plotly_chart(_layout(fig, "Variação real: 12 meses contra os 12 meses anteriores (%)", "%", h=360),
+                            width="stretch")
+            exportar["RTN cresc real 12m"] = var.reset_index().rename(columns={"index": "periodo"})
+    exportar[f"RTN {modo[:12]}{' real' if real else ''}"] = t.assign(data=pd.to_datetime(t["data"]).dt.date)
+    st.caption(f"Fonte: Tesouro Nacional, Resultado do Tesouro Nacional (RTN), Série Histórica Mensal, tabela 1.1 "
+               f"(Tesouro Transparente); último mês disponível: {rtn['mes'].iloc[-1]} (o RTN sai cerca de um mês depois "
+               "do mês de referência). Governo central = Tesouro, Previdência (RGPS) e Banco Central. Receita líquida = "
+               "receita total − transferências por repartição a estados e municípios. 'Obrigatórias com controle de "
+               "fluxo' e 'discricionárias' compõem as despesas do Executivo sujeitas à programação financeira. Valores "
+               "reais: cada mês corrigido pelo IPCA até o mês de referência; 12 meses e anual = soma dos meses "
+               "(cálculo próprio). O resultado 'acima da linha' do Tesouro difere do primário do BCB ('abaixo da linha').")
+
+
+def render_externo(reservas: pd.DataFrame, balanca: pd.DataFrame, ini_exib, exportar: dict):
+    import plotly.graph_objects as go
+    # ---- reservas
+    st.subheader("Reservas internacionais")
+    if reservas.empty:
+        st.info("Reservas ainda não coletadas (saidas/macro/reservas_diario.csv). Rode o workflow macro.")
+    else:
+        rs = reservas.sort_values("data")
+        k0, k1 = _datas("Reservas", rs["data"].min(), rs["data"].max(), ini_exib, "mac_res_dt")
+        modo = st.radio("Frequência", RESERVAS_MODOS, index=1, horizontal=True, key="mac_res_modo")
+        rec = rs[(rs["data"] >= k0) & (rs["data"] <= k1)]
+        c1, c2 = st.columns([3, 1])
+        if rec.empty:
+            c1.info("Sem dados no recorte escolhido.")
+        else:
+            if modo == "Diário":
+                t = pd.DataFrame({"periodo": rec["data"].dt.strftime("%d/%m/%Y"), "data": rec["data"],
+                                  "reservas": rec["reservas_liquidez"]})
+            else:
+                freq = {"mês": "M", "trimestre": "Q", "ano": "Y"}[modo.split(" do ")[-1]]
+                g = rec.assign(grupo=rec["data"].dt.to_period(freq)).groupby("grupo")
+                t = pd.DataFrame({"reservas": g["reservas_liquidez"].last(), "data": g["data"].max()}).reset_index()
+                t["periodo"] = [str(p) if freq == "M" else (_tri(p) if freq == "Q" else str(p.year)) for p in t["grupo"]]
+            t["reservas"] = (t["reservas"] / 1000).round(2)
+            fig = px.line(t, x="data", y="reservas", labels={"data": "", "reservas": "US$ bilhões"})
+            c1.plotly_chart(_layout(fig, f"Reservas internacionais — conceito liquidez ({modo.lower()})", "US$ bilhões",
+                                    h=380), width="stretch")
+            v0, v1 = rec["reservas_liquidez"].iloc[0] / 1000, rec["reservas_liquidez"].iloc[-1] / 1000
+            c2.metric(f"Reservas em {rec['data'].iloc[-1]:%d/%m/%Y}", f"US$ {_br(v1, 1)} bi",
+                      f"{_br(v1 - v0, 1, True)} bi desde {rec['data'].iloc[0]:%d/%m/%Y}", delta_color="off")
+            c2.metric("Mín–máx no recorte", f"US$ {_br(rec['reservas_liquidez'].min() / 1000, 1)}–"
+                                           f"{_br(rec['reservas_liquidez'].max() / 1000, 1)} bi")
+            c2.dataframe(t[["periodo", "reservas"]].iloc[::-1], hide_index=True, height=200,
+                         column_config={"periodo": "Período",
+                                        "reservas": st.column_config.NumberColumn("US$ bi", format="%.1f")})
+            exportar[f"Reservas {modo}"] = t[["periodo", "data", "reservas"]].assign(data=lambda x: x["data"].dt.date)
+        st.caption("Fonte: Banco Central do Brasil (SGS 13982 — reservas internacionais, conceito liquidez, US$ milhões, "
+                   "diária). Conceito liquidez inclui as posições em linhas de recompra e empréstimos em moeda "
+                   "estrangeira. 'Fim' = último dado do período.")
+
+    # ---- balança comercial
+    st.subheader("Balança comercial — exportações e importações de bens")
+    if balanca.empty:
+        st.info("Balança comercial ainda não coletada (saidas/macro/balanca_mensal.csv). Rode o workflow macro.")
+        return
+    b0, b1 = _datas_mes("Balança comercial", balanca["mes"], ini_exib, "mac_bal_dt")
+    modo = st.radio("Periodicidade", FLUXO_MODOS, index=1, horizontal=True, key="mac_bal_modo")
+    cols = ["exportacoes", "importacoes", "saldo"]
+    t = fluxo(balanca, cols, modo, b0, b1)
+    t[cols] = (t[cols] / 1000).round(2)
+    c1, c2 = st.columns([3, 1])
+    if t.empty:
+        c1.info("Sem dados no recorte escolhido.")
+        return
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=t["periodo"], y=t["exportacoes"], name="Exportações", marker_color="#2E6FBA"))
+    fig.add_trace(go.Bar(x=t["periodo"], y=t["importacoes"], name="Importações", marker_color="#E59866"))
+    fig.add_trace(go.Scatter(x=t["periodo"], y=t["saldo"], name="Saldo", mode="lines+markers",
+                             line=dict(color="#2CA02C", width=2.5), marker=dict(size=5)))
+    fig.update_layout(barmode="group")
+    c1.plotly_chart(_layout(fig, f"Balança comercial de bens — {modo.lower()} (US$ bilhões)", "US$ bilhões",
+                            t["periodo"]), width="stretch")
+    u = t.iloc[-1]
+    c2.metric(f"Saldo — {u['periodo']}", f"US$ {_br(u['saldo'], 1, True)} bi",
+              f"exp. {_br(u['exportacoes'], 1)} · imp. {_br(u['importacoes'], 1)}", delta_color="off")
+    a12 = fluxo(balanca, cols, "Acumulado em 12 meses").set_index("periodo")
+    if len(a12) > 12:
+        ult = a12.iloc[-1]
+        ant = a12.iloc[-13]
+        c2.metric(f"12 meses até {a12.index[-1]} vs. 12 meses antes",
+                  f"exp. {_br((ult['exportacoes'] / ant['exportacoes'] - 1) * 100, 1, True)}%",
+                  f"imp. {_br((ult['importacoes'] / ant['importacoes'] - 1) * 100, 1, True)}%", delta_color="off")
+    c2.dataframe(t[["periodo"] + cols].iloc[::-1], hide_index=True, height=200, column_config={
+        "periodo": "Período", "exportacoes": st.column_config.NumberColumn("Exp.", format="%.1f"),
+        "importacoes": st.column_config.NumberColumn("Imp.", format="%.1f"),
+        "saldo": st.column_config.NumberColumn("Saldo", format="%.1f")})
+    exportar[f"Balança {modo[:12]}"] = t.assign(data=pd.to_datetime(t["data"]).dt.date)
+    st.caption("Fonte: Banco Central do Brasil, Balanço de Pagamentos (BPM6) — SGS 22708 (exportação de bens), 22709 "
+               "(importação de bens) e 22707 (saldo), US$ milhões. Critério do balanço de pagamentos (inclui ajustes "
+               "de cobertura e mercadorias sob merchanting), que difere da balança da Secex/MDIC. 12 meses e anual = "
+               "soma dos meses (cálculo próprio); anos incompletos no recorte aparecem como parciais.")
+
+
 # ----------------------------------------------------------------------------- tela
 def _grafico(df, y, titulo, tipo="barra", rot_y="%"):
     if tipo == "barra":
@@ -549,6 +888,12 @@ def render(pasta: Path, excel_bytes):
                    "'Média' = média simples dos pregões do período, só com os pregões dentro do recorte (períodos "
                    "de borda ficam parciais). Variação ponto a ponto entre a PTAX do último pregão até a data inicial "
                    "e até a data final.")
+
+    # ---- Contas públicas, despesas do governo central e setor externo
+    fiscal, rtn, reservas, balanca = carregar_externo(str(pasta), _versao(pasta))
+    render_fiscal(fiscal, ini_exib, exportar)
+    render_despesas(rtn, ipca, ini_exib, exportar)
+    render_externo(reservas, balanca, ini_exib, exportar)
 
     # ---- Focus
     render_focus(carregar_focus(str(pasta), _versao(pasta)), exportar)
