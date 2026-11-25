@@ -8,9 +8,12 @@ Fontes:
   PIB    — IBGE, SIDRA tabela 5932 (taxas de variação do índice de volume trimestral, PIB a preços de mercado)
            e tabela 1620 (índice de volume trimestral sem ajuste sazonal, média 1995 = 100: nível para o PIB nominal)
   Câmbio — Banco Central, SGS série 1 (PTAX venda, R$ por US$, diária)
+  Focus  — Banco Central, Sistema Expectativas de Mercado (API Olinda, ExpectativasMercadoAnuais, base de cálculo 0
+           = todos os respondentes): estatísticas das projeções anuais, reduzidas a um registro por semana
+           (último dia da semana encerrada na sexta, que é o dado do relatório Focus publicado na segunda seguinte)
 
 Saídas em saidas/macro/: ipca_mensal.csv, pib_trimestral.csv, pib_volume_trimestral.csv, cambio_diario.csv,
-metadados.json
+focus_anual.csv, metadados.json
 
 Regras de robustez:
   - a API do SGS recusa janelas acima de 10 anos: as consultas são fatiadas em janelas de até 3 anos;
@@ -25,12 +28,16 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from urllib.parse import quote
 
 ANOS = 11                                   # mesma janela da base de empresas (hoje: 2015 em diante)
 SAIDA = Path("saidas/macro")
 CAB = {"User-Agent": "Mozilla/5.0 (compatible; pricediscovery-bot)", "Accept": "application/json"}
 SGS = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod}/dados"
 SIDRA_PIB = "https://apisidra.ibge.gov.br/values/t/5932/n1/all/v/all/p/all/c11255/90707"
+FOCUS = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+FOCUS_INDICADORES = ["IPCA", "IGP-M", "IPCA Administrados", "PIB Total", "Câmbio", "Selic",
+                     "Resultado primário", "Dívida líquida do setor público"]
 SIDRA_VOL = "https://apisidra.ibge.gov.br/values/t/1620/n1/all/v/583/p/all/c11255/90707"
 
 
@@ -152,6 +159,69 @@ def coletar_cambio(ini: date, fim: date) -> pd.DataFrame:
     return df
 
 
+def _focus_pagina(indicador: str, ini: date, fim: date) -> list:
+    regs, pulo, passo = [], 0, 10000
+    filtro = (f"Indicador eq '{indicador}' and baseCalculo eq 0 and "
+              f"Data ge '{ini.isoformat()}' and Data le '{fim.isoformat()}'")
+    while True:
+        q = {"$format": "json", "$filter": filtro, "$orderby": "Data", "$top": str(passo), "$skip": str(pulo),
+             "$select": "Indicador,IndicadorDetalhe,Data,DataReferencia,Media,Mediana,"
+                        "DesvioPadrao,Minimo,Maximo,numeroRespondentes"}
+        # a API OData do BCB quer o "$" literal e espaços como %20: a URL é montada aqui, não pelo requests
+        dados = get_json(FOCUS + "?" + "&".join(f"{k}={quote(v, safe=chr(39) + ',')}" for k, v in q.items()))
+        lote = dados.get("value", []) if isinstance(dados, dict) else []
+        regs += lote
+        if len(lote) < passo:
+            return regs
+        pulo += passo
+
+
+def semanal_focus(df: pd.DataFrame) -> pd.DataFrame:
+    """Um registro por semana (semana encerrada na sexta): o último dia com dado, que é o do relatório Focus."""
+    sem = df["data"].dt.to_period("W-FRI")
+    ult = df.groupby(sem)["data"].transform("max")
+    return df[df["data"] == ult].sort_values(["data", "indicador", "ano_ref"]).reset_index(drop=True)
+
+
+def coletar_focus(ini: date, fim: date) -> pd.DataFrame:
+    """Expectativas anuais do Focus. Incremental: com arquivo anterior, relê só as últimas 3 semanas e junta."""
+    p = SAIDA / "focus_anual.csv"
+    ant = pd.read_csv(p, parse_dates=["data"]) if p.exists() else pd.DataFrame()
+    desde = (ant["data"].max().date() - timedelta(days=21)) if len(ant) else ini
+    regs, faltando = [], []
+    for ind in FOCUS_INDICADORES:
+        n0 = len(regs)
+        for a, b in janelas(desde, fim):
+            regs += _focus_pagina(ind, a, b)
+        if len(regs) == n0:
+            faltando.append(ind)
+    if faltando:
+        print(f"  Focus: sem dados para {faltando} (nome do indicador pode ter mudado na API)")
+    if not regs:
+        raise ValueError("Focus: a API não devolveu registros")
+    d = pd.DataFrame(regs)
+    det = d["IndicadorDetalhe"].fillna("").astype(str).str.strip() if "IndicadorDetalhe" in d else ""
+    novo = pd.DataFrame({
+        "data": pd.to_datetime(d["Data"]),
+        "indicador": d["Indicador"].where(det == "", d["Indicador"] + " — " + det),
+        "ano_ref": pd.to_numeric(d["DataReferencia"], errors="coerce"),
+        "mediana": pd.to_numeric(d["Mediana"], errors="coerce"),
+        "media": pd.to_numeric(d["Media"], errors="coerce"),
+        "desvio_padrao": pd.to_numeric(d["DesvioPadrao"], errors="coerce"),
+        "minimo": pd.to_numeric(d["Minimo"], errors="coerce"),
+        "maximo": pd.to_numeric(d["Maximo"], errors="coerce"),
+        "respondentes": pd.to_numeric(d["numeroRespondentes"], errors="coerce"),
+    }).dropna(subset=["ano_ref", "mediana"])
+    novo["ano_ref"] = novo["ano_ref"].astype(int)
+    if len(ant):
+        ant = ant[ant["data"] < pd.Timestamp(desde)]
+        novo = pd.concat([ant, novo], ignore_index=True)
+    novo = novo.drop_duplicates(["data", "indicador", "ano_ref"], keep="last")
+    out = semanal_focus(novo)
+    out["data"] = out["data"].dt.date
+    return out
+
+
 # ----------------------------------------------------------------------------- gravação
 def gravar(nome: str, df: pd.DataFrame, chave: str) -> str:
     """Grava se a série nova não encolher (>5% menor que a anterior indica resposta parcial da API)."""
@@ -173,6 +243,7 @@ def main() -> int:
         "pib_trimestral.csv": (lambda: coletar_pib(ini), "trimestre"),
         "pib_volume_trimestral.csv": (lambda: coletar_pib_volume(ini), "trimestre"),
         "cambio_diario.csv": (lambda: coletar_cambio(ini, hoje), "data"),
+        "focus_anual.csv": (lambda: coletar_focus(ini, hoje), "data"),
     }
     meta_p = SAIDA / "metadados.json"
     meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
