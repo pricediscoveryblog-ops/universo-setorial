@@ -330,7 +330,8 @@ def consolidado_focus(f: pd.DataFrame, base, comp, inds: list, anos: list) -> pd
                 "Indicador": ind, "Ano": int(ano), "Unidade": _unid(ind),
                 "Mediana base": b, "Mediana comparada": c,
                 "Variação": c - b,
-                "Variação %": (c / b - 1) * 100 if _unid(ind) == "R$/US$" and b else np.nan,
+                "Variação %": (f"{_br((c / b - 1) * 100, 1, True)}%" if _unid(ind) == "R$/US$" and b and pd.notna(c)
+                               else ""),
                 "Semana anterior": h1.iloc[-2] if len(h1) > 1 else np.nan,
                 "Comportamento semanal": sequencia(h1.tail(60)),
                 "Mín–máx (comparada)": (f"{_br(s['minimo'].get(comp, np.nan))} – {_br(s['maximo'].get(comp, np.nan))}"
@@ -349,7 +350,7 @@ def render_focus(f: pd.DataFrame, exportar: dict):
     ult = datas.max()
     inds_disp = sorted(f["indicador"].unique(), key=lambda x: ((PADRAO_FOCUS + [x]).index(x), x))
     c1, c2, c3, c4 = st.columns([1, 1, 2, 2])
-    d_b = c1.date_input("Relatório base", value=(ult - pd.Timedelta(weeks=4)).date(), min_value=datas.min().date(),
+    d_b = c1.date_input("Relatório base", value=datas.iloc[max(len(datas) - 5, 0)].date(), min_value=datas.min().date(),
                         max_value=ult.date(), format="DD/MM/YYYY", key="foc_base",
                         help="Usa o relatório mais recente até a data escolhida.")
     d_c = c2.date_input("Relatório comparado", value=ult.date(), min_value=datas.min().date(), max_value=ult.date(),
@@ -363,7 +364,7 @@ def render_focus(f: pd.DataFrame, exportar: dict):
     padrao_anos = [a for a in anos_disp if comp.year <= a <= comp.year + 1] or anos_disp[:2]
     anos = c4.multiselect("Anos de referência", anos_disp, default=padrao_anos, key="foc_anos")
     st.caption(f"Comparando o relatório de {base:%d/%m/%Y} com o de {comp:%d/%m/%Y} "
-               f"({(comp - base).days // 7} semanas). Datas = último dia da semana com dado (sexta), que é o "
+               f"({int(((datas > base) & (datas <= comp)).sum())} relatórios semanais depois da base). Datas = último dia da semana com dado (sexta), que é o "
                "que o relatório Focus publica na segunda-feira seguinte.")
     if not inds or not anos:
         st.info("Escolha ao menos um indicador e um ano de referência.")
@@ -378,7 +379,6 @@ def render_focus(f: pd.DataFrame, exportar: dict):
         "Mediana base": st.column_config.NumberColumn(f"Mediana {base:%d/%m/%y}", format="%.2f"),
         "Mediana comparada": st.column_config.NumberColumn(f"Mediana {comp:%d/%m/%y}", format="%.2f"),
         "Variação": st.column_config.NumberColumn("Variação (p.p. / R$)", format="%+.2f"),
-        "Variação %": st.column_config.NumberColumn(format="%+.1f%%"),
         "Semana anterior": st.column_config.NumberColumn(format="%.2f"),
         "Respondentes": st.column_config.NumberColumn(format="%d")})
     exportar["Focus consolidado"] = tab
