@@ -8,12 +8,20 @@ Fontes:
   PIB    — IBGE, SIDRA tabela 5932 (taxas de variação do índice de volume trimestral, PIB a preços de mercado)
            e tabela 1620 (índice de volume trimestral sem ajuste sazonal, média 1995 = 100: nível para o PIB nominal)
   Câmbio — Banco Central, SGS série 1 (PTAX venda, R$ por US$, diária)
+  Fiscal — Banco Central, Estatísticas Fiscais (SGS): NFSP sem desvalorização cambial (primário, juros e nominal) do
+           setor público consolidado e do governo central (Gov. Federal + BCB), em R$ milhões no mês e em % do PIB
+           acumulado em 12 meses; DLSP e DBGG em % do PIB. Convenção do BCB: NFSP positiva = déficit
+  Despesas — Tesouro Nacional, Resultado do Tesouro Nacional (RTN), Série Histórica Mensal, tabela 1.1 (governo
+           central, R$ milhões correntes; via CKAN do Tesouro Transparente)
+  Reservas — Banco Central, SGS série 13982 (reservas internacionais, conceito liquidez, US$ milhões, diária)
+  Balança  — Banco Central, Balanço de Pagamentos BPM6 (SGS 22708 exportação, 22709 importação, 22707 saldo de bens,
+           US$ milhões, mensal)
   Focus  — Banco Central, Sistema Expectativas de Mercado (API Olinda, ExpectativasMercadoAnuais, base de cálculo 0
            = todos os respondentes): estatísticas das projeções anuais, reduzidas a um registro por semana
            (último dia da semana encerrada na sexta, que é o dado do relatório Focus publicado na segunda seguinte)
 
 Saídas em saidas/macro/: ipca_mensal.csv, pib_trimestral.csv, pib_volume_trimestral.csv, cambio_diario.csv,
-focus_anual.csv, metadados.json
+focus_anual.csv, fiscal_mensal.csv, rtn_mensal.csv, reservas_diario.csv, balanca_mensal.csv, metadados.json
 
 Regras de robustez:
   - a API do SGS recusa janelas acima de 10 anos: as consultas são fatiadas em janelas de até 3 anos;
@@ -222,6 +230,123 @@ def coletar_focus(ini: date, fim: date) -> pd.DataFrame:
     return out
 
 
+# ----------------------------------------------------------------------------- contas públicas e setor externo
+# NFSP "sem desvalorização cambial" do BCB (Estatísticas Fiscais). Convenção do BCB: NFSP positiva = déficit.
+# Os códigos foram conferidos no portal de dados abertos do BCB (títulos das séries) em 25/11/2026.
+SGS_FISCAL = {
+    # setor público consolidado — fluxo mensal, R$ milhões
+    "spc_primario": 4649, "spc_juros": 4616, "spc_nominal": 4583,
+    # setor público consolidado — acumulado em 12 meses, % do PIB
+    "spc_primario_12m_pib": 5793, "spc_juros_12m_pib": 5760, "spc_nominal_12m_pib": 5727,
+    # governo central (Governo Federal + Banco Central) — fluxo mensal, R$ milhões
+    "gc_primario": 4639, "gc_juros": 4606, "gc_nominal": 4573,
+    # governo central — acumulado em 12 meses, % do PIB
+    "gc_primario_12m_pib": 5783, "gc_juros_12m_pib": 5750, "gc_nominal_12m_pib": 5717,
+    # dívida, % do PIB (saldo no fim do mês)
+    "dlsp_pib": 4513, "dbgg_pib": 13762,
+}
+SGS_BALANCA = {"exportacoes": 22708, "importacoes": 22709, "saldo": 22707}   # BPM6, US$ milhões, mensal
+SGS_RESERVAS = 13982                                                          # conceito liquidez, US$ milhões, diária
+
+# Resultado do Tesouro Nacional (STN), tabela 1.1 — governo central, R$ milhões correntes, mensal
+CKAN_RTN = "https://www.tesourotransparente.gov.br/ckan/api/3/action/package_show?id=resultado-do-tesouro-nacional"
+LINHAS_RTN = [  # (coluna, regex do rótulo na coluna "Discriminação", depois de normalizar espaços)
+    ("receita_total", r"^1\. RECEITA TOTAL"),
+    ("transferencias", r"^2\. TRANSF"),
+    ("receita_liquida", r"^3\. RECEITA L[IÍ]QUIDA"),
+    ("despesa_total", r"^4\. DESPESA TOTAL"),
+    ("beneficios_previdenciarios", r"^4\.1 Benef[ií]cios Previdenci"),
+    ("pessoal", r"^4\.2 Pessoal"),
+    ("outras_obrigatorias", r"^4\.3 Outras Despesas Obrigat"),
+    ("executivo_programacao", r"^4\.4 Despesas do Poder Executivo"),
+    ("obrigatorias_controle_fluxo", r"^4\.4\.1 Obrigat[oó]rias com Controle"),
+    ("discricionarias", r"^4\.4\.2 Despesas Discricion"),
+    ("primario_acima_linha", r"^5\. RESULTADO PRIM[AÁ]RIO"),
+]
+
+
+def sgs_mensal(series: dict, ini: date, fim: date) -> pd.DataFrame:
+    """Várias séries mensais do SGS numa tabela larga (coluna 'mes' = AAAA-MM)."""
+    out = None
+    for col, cod in series.items():
+        s = sgs(cod, ini, fim)
+        s = pd.DataFrame({"mes": s["data"].dt.to_period("M").astype(str), col: s["valor"]})
+        out = s if out is None else out.merge(s, on="mes", how="outer")
+    return out.sort_values("mes").reset_index(drop=True)
+
+
+def coletar_fiscal(ini: date, fim: date) -> pd.DataFrame:
+    df = sgs_mensal(SGS_FISCAL, ini, fim)
+    if df.empty or df["spc_primario_12m_pib"].dropna().empty:
+        raise ValueError("NFSP vazia")
+    if not df["spc_nominal_12m_pib"].dropna().between(-30, 40).all():
+        raise ValueError("NFSP em % do PIB fora da faixa plausível")
+    return df
+
+
+def coletar_balanca(ini: date, fim: date) -> pd.DataFrame:
+    df = sgs_mensal(SGS_BALANCA, ini, fim).dropna(subset=["exportacoes", "importacoes"])
+    if df.empty or not df["exportacoes"].between(1_000, 200_000).all():
+        raise ValueError("balança comercial vazia ou implausível")
+    return df
+
+
+def coletar_reservas(ini: date, fim: date) -> pd.DataFrame:
+    df = sgs(SGS_RESERVAS, ini, fim).rename(columns={"valor": "reservas_liquidez"})
+    if df.empty or not df["reservas_liquidez"].between(100_000, 1_500_000).all():
+        raise ValueError("reservas internacionais vazias ou fora da faixa plausível")
+    df["data"] = df["data"].dt.date
+    return df
+
+
+def _data_rtn(v):
+    """Cabeçalho do RTN: data do Excel (número serial) ou datetime, conforme a leitura."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return None
+    if isinstance(v, (int, float)) and 20000 < v < 80000:
+        return (pd.Timestamp("1899-12-30") + pd.Timedelta(days=int(v))).to_period("M")
+    try:
+        return pd.Timestamp(v).to_period("M")
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_rtn(arquivo) -> pd.DataFrame:
+    import re
+    bruto = pd.read_excel(arquivo, sheet_name="1.1", header=None)
+    rot = bruto.iloc[:, 0].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+    cab = rot[rot.str.startswith("Discrimina")].index
+    if not len(cab):
+        raise ValueError("RTN: cabeçalho 'Discriminação' não encontrado na tabela 1.1")
+    meses = [_data_rtn(v) for v in bruto.iloc[cab[0], 1:]]
+    out = pd.DataFrame({"mes": meses})
+    for col, rx in LINHAS_RTN:
+        i = rot[rot.str.contains(rx, regex=True, flags=re.I)].index
+        if not len(i):
+            raise ValueError(f"RTN: linha não encontrada ({col}); a STN pode ter mudado o rótulo")
+        out[col] = pd.to_numeric(bruto.iloc[i[0], 1:], errors="coerce").to_numpy()
+    out = out.dropna(subset=["mes", "despesa_total"])
+    out["mes"] = out["mes"].astype(str)
+    return out.drop_duplicates("mes", keep="last").sort_values("mes").reset_index(drop=True)
+
+
+def coletar_rtn(ini: date) -> pd.DataFrame:
+    import io
+    pac = get_json(CKAN_RTN)["result"]["resources"]
+    rec = next((r for r in pac if "rie Hist" in r.get("name", "") and "Mensal" in r.get("name", "")
+                and str(r.get("format", "")).upper() == "XLSX"), None)
+    if rec is None:
+        raise ValueError("RTN: recurso 'Série Histórica - Mensal' não encontrado no CKAN do Tesouro")
+    r = requests.get(rec["url"], headers={"User-Agent": CAB["User-Agent"]}, timeout=180)
+    r.raise_for_status()
+    df = parse_rtn(io.BytesIO(r.content))
+    df = df[df["mes"] >= f"{ini.year}-01"].reset_index(drop=True)
+    soma = df[["beneficios_previdenciarios", "pessoal", "outras_obrigatorias", "executivo_programacao"]].sum(axis=1)
+    if df.empty or ((soma - df["despesa_total"]).abs() > 0.01 * df["despesa_total"].abs() + 1).any():
+        raise ValueError("RTN: componentes não somam a despesa total (layout pode ter mudado)")
+    return df
+
+
 # ----------------------------------------------------------------------------- gravação
 def gravar(nome: str, df: pd.DataFrame, chave: str) -> str:
     """Grava se a série nova não encolher (>5% menor que a anterior indica resposta parcial da API)."""
@@ -234,6 +359,9 @@ def gravar(nome: str, df: pd.DataFrame, chave: str) -> str:
     return f"ok, {len(df)} linhas, último {chave} = {df[chave].iloc[-1]}"
 
 
+OPCIONAIS = {"fiscal_mensal.csv", "rtn_mensal.csv", "reservas_diario.csv", "balanca_mensal.csv"}  # falha não derruba o job
+
+
 def main() -> int:
     SAIDA.mkdir(parents=True, exist_ok=True)
     hoje = date.today()
@@ -244,6 +372,10 @@ def main() -> int:
         "pib_volume_trimestral.csv": (lambda: coletar_pib_volume(ini), "trimestre"),
         "cambio_diario.csv": (lambda: coletar_cambio(ini, hoje), "data"),
         "focus_anual.csv": (lambda: coletar_focus(ini, hoje), "data"),
+        "fiscal_mensal.csv": (lambda: coletar_fiscal(ini, hoje), "mes"),
+        "rtn_mensal.csv": (lambda: coletar_rtn(ini), "mes"),
+        "reservas_diario.csv": (lambda: coletar_reservas(ini, hoje), "data"),
+        "balanca_mensal.csv": (lambda: coletar_balanca(ini, hoje), "mes"),
     }
     meta_p = SAIDA / "metadados.json"
     meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
@@ -255,7 +387,7 @@ def main() -> int:
                 meta[nome] = {"atualizado_em": datetime.now().isoformat(timespec="seconds"), "status": msg}
         except Exception as e:                     # noqa: BLE001 — uma fonte fora do ar não derruba as outras
             msg = f"FALHOU: {e}"
-            if not (SAIDA / nome).exists():
+            if not (SAIDA / nome).exists() and nome not in OPCIONAIS:
                 falhas_sem_arquivo += 1
         print(f"{nome}: {msg}")
     meta["janela"] = {"inicio_coleta": ini.isoformat(), "inicio_exibicao": f"{ini.year + 1}-01-01", "anos": ANOS}
