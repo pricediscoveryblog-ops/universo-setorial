@@ -13,8 +13,10 @@ Dados de mercado complementares para o app (saidas/mercado/):
 
 3) indices.parquet — fechamento diário do Ibovespa (Yahoo Finance, ^BVSP) desde 2015, referência da régua das altas e
    baixas do app.
+4) carteira_ibov.parquet — carteira do dia do Ibovespa (B3, GetPortfolioDay: ticker, participação %, quantidade teórica,
+   setor B3), acumulada por data (uma foto por pregão coletado), base do mapa de composição do índice no app.
 
-Uso: python mercado.py [proventos|acionistas|indices|tudo]   (padrão: tudo)
+Uso: python mercado.py [proventos|acionistas|indices|carteira|tudo]   (padrão: tudo)
 """
 import sys
 import time
@@ -219,6 +221,71 @@ def indices() -> pd.DataFrame:
     return out
 
 
+B3_INDICES = "https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay"
+
+
+def baixar_carteira_b3(indice: str = "IBOV") -> pd.DataFrame:
+    """Carteira do dia de um índice da B3 (mesma consulta da página 'Composição da carteira' do site da B3).
+    segment=2 = visão por setor de atuação (cada ação vem com o setor da B3)."""
+    import base64
+    import json
+    import requests
+    payload = {"language": "pt-br", "pageNumber": 1, "pageSize": 200, "index": indice, "segment": "2"}
+    arg = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    d = None
+    for tentativa in range(4):
+        try:
+            r = requests.get(f"{B3_INDICES}/{arg}", timeout=60, headers=cs.B3_HEADERS)
+            r.raise_for_status()
+            d = r.json()
+            if isinstance(d, str):
+                d = json.loads(d)
+            break
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! B3 carteira {indice} falhou ({e}); nova tentativa")
+            time.sleep(3 * (tentativa + 1))
+    if not isinstance(d, dict) or not d.get("results"):
+        return pd.DataFrame()
+    cab = d.get("header") or {}
+    dt = pd.to_datetime(str(cab.get("date") or "").strip(), dayfirst=True, errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(date.today())
+    def num_b3(t):            # '2,915' (participação) e '4.394.835.131' (quantidade): ponto = milhar, vírgula = decimal
+        t = str(t or "").strip().replace(".", "").replace(",", ".")
+        try:
+            return float(t)
+        except ValueError:
+            return np.nan
+
+    linhas = []
+    for x in d["results"]:
+        linhas.append({"data": dt.normalize(), "indice": indice, "ticker": str(x.get("cod") or "").strip().upper(),
+                       "empresa_b3": str(x.get("asset") or "").strip(), "tipo": str(x.get("type") or "").strip(),
+                       "setor_b3": str(x.get("segment") or "").strip(), "peso": num_b3(x.get("part")) / 100,
+                       "qtd_teorica": num_b3(x.get("theoricalQty")), "peso_b3": str(x.get("part") or ""),
+                       "qtd_teorica_b3": str(x.get("theoricalQty") or "")})
+    c = pd.DataFrame(linhas)
+    c = c[c["ticker"] != ""]
+    # setor_b3 pode vir só na 1a ação de cada setor: completa para baixo (a lista vem agrupada por setor)
+    c["setor_b3"] = c["setor_b3"].replace("", np.nan).ffill().fillna("")
+    return c
+
+
+def carteira_ibov() -> pd.DataFrame:
+    """Acumula a carteira do dia do Ibovespa (uma foto por data de referência da B3)."""
+    arq = SAIDA / "carteira_ibov.parquet"
+    ant = pd.read_parquet(arq) if arq.exists() else pd.DataFrame()
+    novo = baixar_carteira_b3("IBOV")
+    if novo.empty:
+        print("  ! Ibovespa: B3 não devolveu a carteira do dia")
+        return ant
+    soma = novo["peso"].sum()
+    print(f"Carteira Ibovespa {novo['data'].iloc[0].date()}: {len(novo)} ações, soma das participações {soma:.2%}")
+    out = pd.concat([ant, novo], ignore_index=True) if len(ant) else novo
+    out["data"] = pd.to_datetime(out["data"])
+    return out.drop_duplicates(["data", "ticker"], keep="last").sort_values(["data", "peso"], ascending=[True, False])
+
+
 def main(qual: str = "tudo"):
     SAIDA.mkdir(parents=True, exist_ok=True)
     if qual in ("proventos", "tudo"):
@@ -237,6 +304,13 @@ def main(qual: str = "tudo"):
             indices().to_parquet(SAIDA / "indices.parquet", index=False)
         except Exception as e:  # noqa: BLE001 — índice de referência não pode derrubar o resto
             print(f"  ! Ibovespa: {type(e).__name__}: {str(e)[:120]}")
+    if qual in ("carteira", "tudo"):
+        try:
+            c = carteira_ibov()
+            if len(c):
+                c.to_parquet(SAIDA / "carteira_ibov.parquet", index=False)
+        except Exception as e:  # noqa: BLE001 — composição do índice não pode derrubar o resto
+            print(f"  ! Carteira Ibovespa: {type(e).__name__}: {str(e)[:120]}")
 
 
 if __name__ == "__main__":
