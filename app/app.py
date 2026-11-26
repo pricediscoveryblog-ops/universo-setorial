@@ -192,6 +192,10 @@ METRICAS = {
     "cresc_patrimonio_liquido": ("Crescimento do patrimônio líquido (a/a)", "pct", "Crescimento"),
     "cresc_capex_organico": ("Crescimento do capex orgânico (a/a)", "pct", "Crescimento"),
     "cresc_capex_total": ("Crescimento do capex total c/ aquisições (a/a)", "pct", "Crescimento"),
+    "cresc_caixa": ("Crescimento do caixa + aplicações CP (a/a)", "pct", "Crescimento"),
+    "cresc_divida_bruta_ex_arrend": ("Crescimento da dívida bruta ex-arrendamento (a/a)", "pct", "Crescimento"),
+    "cresc_div_liq_com_arrend": ("Crescimento da dívida líquida c/ arrendamento (a/a)", "pct", "Crescimento"),
+    "cresc_div_liq_sem_arrend": ("Crescimento da dívida líquida s/ arrendamento (a/a)", "pct", "Crescimento"),
     # graus de alavancagem (a partir das variações a/a): GAO = Δ% EBIT ÷ Δ% receita; GAF = Δ% lucro ÷ Δ% EBIT;
     # GAT = Δ% lucro ÷ Δ% receita (= GAO × GAF)
     "gao": ("Grau de alavancagem operacional (GAO)", "x", "Graus de alavancagem"),
@@ -607,7 +611,11 @@ def curva_juros(pj: pd.DataFrame, d, tipo_c: str, anos) -> np.ndarray:
 
 
 CRESC_BASE = ["receita", "lucro_bruto", "ebitda", "ebit", "lucro_liquido", "ativo_total", "patrimonio_liquido",
-              "capex_organico", "capex_total"]
+              "capex_organico", "capex_total", "caixa", "divida_bruta_ex_arrend", "div_liq_com_arrend",
+              "div_liq_sem_arrend"]
+# níveis que podem ser negativos (dívida líquida < 0 = caixa líquido): no agregado do setor entram todas as empresas
+# com os dois valores, com o sinal (Σ atual ÷ Σ anterior, só se Σ anterior > 0); na empresa, a/a segue vazio com base ≤ 0
+CRESC_COM_SINAL = {"div_liq_com_arrend", "div_liq_sem_arrend"}
 
 
 def calc_crescimento(b: pd.DataFrame) -> pd.DataFrame:
@@ -676,12 +684,19 @@ def calc_cresc_fin_per(f: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
-def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
+def indice_acumulado(niveis: pd.DataFrame, com_sinal: bool = False) -> pd.Series:
     """Índice base 100 encadeando a variação entre períodos consecutivos da soma dos níveis (só empresas com valor
-    positivo nos dois períodos de cada passo: amostra casada, sem viés de entrada/saída de empresas)."""
+    positivo nos dois períodos de cada passo: amostra casada, sem viés de entrada/saída de empresas).
+    com_sinal (dívida líquida): entram todas as empresas com valor nos dois períodos, positivo ou negativo; o passo só
+    vale com as duas somas > 0 (soma ≤ 0 = setor em caixa líquido, o índice fica vazio dali em diante)."""
     cols = list(niveis.columns)
     idx = [100.0]
     for a, b_ in zip(cols[:-1], cols[1:]):
+        if com_sinal:
+            ok = niveis[a].notna() & niveis[b_].notna()
+            sa, sb = niveis.loc[ok, a].sum(), niveis.loc[ok, b_].sum()
+            idx.append(idx[-1] * sb / sa if ok.any() and sa > 0 and sb > 0 else np.nan)
+            continue
         ok = (niveis[a] > 0) & (niveis[b_] > 0)
         idx.append(idx[-1] * (niveis.loc[ok, b_].sum() / niveis.loc[ok, a].sum()) if ok.any() else np.nan)
     return pd.Series(idx, index=cols)
@@ -711,9 +726,9 @@ _JS_AGG_LEGENDA = """
       var sa = 0, sb = 0, ok = false;
       linhas.forEach(function (v) {
         var a = v[j - 1], b = v[j];
-        if (a !== null && b !== null && a > 0 && b > 0) { sa += a; sb += b; ok = true; }
+        if (a !== null && b !== null && (D.sinal || (a > 0 && b > 0))) { sa += a; sb += b; ok = true; }
       });
-      y.push(ok && y[j - 1] !== null ? y[j - 1] * sb / sa : null);
+      y.push(ok && y[j - 1] !== null && sa > 0 && sb > 0 ? y[j - 1] * sb / sa : null);
     }
     Plotly.restyle(gd, {y: [y]}, [iAgg]);
   }
@@ -724,7 +739,7 @@ _JS_AGG_LEGENDA = """
 """
 
 
-def plotly_agregado_legenda(fig, niv_agg: pd.DataFrame, key: str):
+def plotly_agregado_legenda(fig, niv_agg: pd.DataFrame, key: str, com_sinal: bool = False):
     """Desenha o gráfico de crescimento acumulado num componente HTML que recalcula 'Agregado do filtro' ao clicar na
     legenda. niv_agg = níveis das empresas que entram no agregado (linhas = rótulo, colunas = períodos em ordem)."""
     import json
@@ -740,7 +755,7 @@ def plotly_agregado_legenda(fig, niv_agg: pd.DataFrame, key: str):
                       paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", autosize=True)
     niv_js = {str(r): [None if pd.isna(x) else float(x) for x in v]
               for r, v in zip(niv_agg.index, niv_agg.to_numpy(dtype=float))}
-    js = _JS_AGG_LEGENDA.replace("__DADOS__", json.dumps({"niv": niv_js, "n": niv_agg.shape[1]}))
+    js = _JS_AGG_LEGENDA.replace("__DADOS__", json.dumps({"niv": niv_js, "n": niv_agg.shape[1], "sinal": bool(com_sinal)}))
     html = fig.to_html(full_html=False, include_plotlyjs="cdn", post_script=js, default_width="100%",
                        config={"displaylogo": False, "responsive": True},
                        div_id=f"g_{abs(hash(key)) % 10**9}")
@@ -1689,6 +1704,10 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
         return (a_ / b_.where(b_.abs() >= 0.01)).astype(float)
     if m.startswith("cresc_") and m[6:] + "_ant" in d.columns:
         c = m[6:]
+        if c in CRESC_COM_SINAL:   # dívida líquida: todas as empresas com os dois valores, com o sinal
+            ok = d[d[c + "_ant"].notna() & d[c].notna()]
+            g = ok.groupby("_c")[[c, c + "_ant"]].sum()
+            return (g[c] / g[c + "_ant"].where(g[c + "_ant"] > 0) - 1).astype(float)
         ok = d[(d[c + "_ant"] > 0) & d[c].notna()]
         g = ok.groupby("_c")[[c, c + "_ant"]].sum()
         return (g[c] / g[c + "_ant"] - 1).astype(float)
@@ -1845,13 +1864,14 @@ with aba_setor:
                 elif ind.startswith("cresc_"):
                     # crescimento acumulado, base 100 no primeiro período: por setor (sem recorte) ou por empresa (com recorte)
                     col = ind[6:]
+                    sinal = col in CRESC_COM_SINAL
                     niv = d_set.pivot_table(index="rotulo", columns="_c", values=col, aggfunc="first").reindex(columns=periodos)
                     linhas_idx = {}
                     if por_setor:
                         mapa_setor = d_set.drop_duplicates("rotulo").set_index("rotulo")["setor"]
                         for st_nome, rots in mapa_setor.groupby(mapa_setor).groups.items():
                             if str(st_nome).strip():
-                                linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)])
+                                linhas_idx[st_nome] = indice_acumulado(niv.loc[niv.index.isin(rots)], sinal)
                     else:
                         vis_rot = tab.index if sel_emp else niv.index
                         for r in vis_rot:
@@ -1864,7 +1884,7 @@ with aba_setor:
                             if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
                                 idx[idx.index >= neg[0]] = np.nan
                             linhas_idx[r] = idx
-                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv)   # recalculado abaixo, sem as linhas retiradas
+                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv, sinal)   # recalculado abaixo, sem as linhas retiradas
                     nomes = list(linhas_idx)
                     if por_setor:
                         padrao_l = nomes
@@ -1885,7 +1905,7 @@ with aba_setor:
                         # o agregado (niv vem do universo do setor, antes do filtro de empresa).
                         retiradas = [r for r in padrao_l if r != AGG_FILTRO and r not in sel_l]
                         niv_agg = niv.drop(index=retiradas, errors="ignore")
-                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv_agg)
+                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv_agg, sinal)
                     fig = go.Figure()
                     for nome in sel_l:
                         y = linhas_idx[nome]
@@ -1906,13 +1926,16 @@ with aba_setor:
                     if por_setor or AGG_FILTRO not in sel_l:
                         st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
                     else:
-                        plotly_agregado_legenda(fig, niv_agg, key=f"set_fig_{ind}_{tipo}")
+                        plotly_agregado_legenda(fig, niv_agg, key=f"set_fig_{ind}_{tipo}", com_sinal=sinal)
                     st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
                                 "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
                                 "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
                                 "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas do filtro em amostra "
                                 "casada; empresa retirada em 'Linhas no gráfico' ou ocultada na legenda sai do agregado.")
-                               + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
+                               + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior."
+                               + (" Dívida líquida: no agregado entram também as empresas em caixa líquido (valor negativo, "
+                                  "com o sinal); o agregado fica vazio quando a soma do recorte é ≤ 0. A linha de uma "
+                                  "empresa só existe a partir de um período com dívida líquida positiva." if sinal else ""))
                 elif ind in ("gao", "gaf", "gat") and por_setor:
                     # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
                     linhas_g = {}
