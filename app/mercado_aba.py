@@ -686,3 +686,165 @@ def secao_modelo(raiz: str, nome: str):
     st.caption("Texto de curadoria do Price Discovery, redigido a partir das fontes: " +
                ("; ".join(f"[{f.get('nome', f.get('url'))}]({f.get('url')})" if isinstance(f, dict) else str(f)
                           for f in fontes) or "—") + (f". Revisado em {c['revisado_em']}." if c.get("revisado_em") else "."))
+
+
+# ================================================================== composição dos índices (Ibovespa, S&P 500, Nasdaq)
+B3_INDICES = "https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay"
+
+
+def _carteira_b3_ao_vivo(indice: str = "IBOV") -> pd.DataFrame:
+    """Plano B, se o arquivo do coletor (mercado.py) ainda não existir: carteira do dia direto da B3."""
+    import base64
+    import json
+    import requests
+    payload = {"language": "pt-br", "pageNumber": 1, "pageSize": 200, "index": indice, "segment": "2"}
+    arg = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+    r = requests.get(f"{B3_INDICES}/{arg}", timeout=30,
+                     headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36", "Accept": "application/json"})
+    r.raise_for_status()
+    d = r.json()
+    d = json.loads(d) if isinstance(d, str) else d
+
+    def num(t):
+        t = str(t or "").strip().replace(".", "").replace(",", ".")
+        try:
+            return float(t)
+        except ValueError:
+            return np.nan
+    dt = pd.to_datetime(str((d.get("header") or {}).get("date") or ""), dayfirst=True, errors="coerce")
+    c = pd.DataFrame([{"data": dt if pd.notna(dt) else pd.Timestamp.today().normalize(), "indice": indice,
+                       "ticker": str(x.get("cod") or "").strip().upper(), "empresa_b3": str(x.get("asset") or ""),
+                       "tipo": str(x.get("type") or ""), "setor_b3": str(x.get("segment") or "").strip(),
+                       "peso": num(x.get("part")) / 100, "qtd_teorica": num(x.get("theoricalQty"))}
+                      for x in d.get("results") or []])
+    if len(c):
+        c["setor_b3"] = c["setor_b3"].replace("", np.nan).ffill().fillna("")
+    return c
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def carteira_ibov(versao: tuple = ()) -> pd.DataFrame:
+    """Fotos diárias da carteira do Ibovespa (coletor mercado.py); sem o arquivo, a carteira de hoje direto da B3."""
+    a = MERC / "carteira_ibov.parquet"
+    c = pd.read_parquet(a) if a.exists() else pd.DataFrame()
+    if c.empty:
+        try:
+            c = _carteira_b3_ao_vivo("IBOV")
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+    c["data"] = pd.to_datetime(c["data"])
+    return c
+
+
+@st.cache_data(max_entries=2, show_spinner=False)
+def raiz_para_cnpj(versao: tuple = ()) -> dict:
+    """Raiz do ticker (4 letras) -> CNPJ, pelo arquivo de valor de mercado mais recente."""
+    arqs = sorted(MERC.glob("vm_ev_*.parquet"))
+    if not arqs:
+        return {}
+    m = pd.read_parquet(arqs[-1], columns=["cnpj", "raiz"]).drop_duplicates("raiz", keep="last")
+    return dict(zip(m["raiz"].astype(str), m["cnpj"].astype(str).str.zfill(14)))
+
+
+def secao_composicao(comp: pd.DataFrame, nome_indice: str, rotulo_periodo: str, ret_indice: float | None,
+                     chave: str, nota_pesos: str, max_padrao: int = 150):
+    """Mapa de calor da composição de um índice. comp: tk, empresa, setor, peso (participação no fim do período, em
+    fração) e variacao (variação no período; NaN = sem dado). Área = participação; cor = variação; setores coloridos
+    pela variação ponderada pela participação no INÍCIO do período (peso ÷ (1 + variação), renormalizado), que é a
+    ponderação que reproduz o retorno do índice com quantidades constantes."""
+    c = comp.dropna(subset=["peso"]).copy()
+    c = c[c["peso"] > 0]
+    if c.empty:
+        st.info(f"Composição do {nome_indice} indisponível.")
+        return
+    c["peso"] = c["peso"] / c["peso"].sum()
+    for col_, vazio in (("setor", "Sem setor"), ("empresa", ""), ("tk", "?")):
+        c[col_] = c[col_].astype("object").where(c[col_].notna(), vazio).astype(str).replace({"": vazio, "nan": vazio})
+    com = c["variacao"].notna()
+    cobertura = float(c.loc[com, "peso"].sum())
+    c["peso_ini"] = np.where(com, c["peso"] / (1 + c["variacao"]), np.nan)
+    c["peso_ini"] = c["peso_ini"] / np.nansum(c["peso_ini"]) if com.any() else np.nan
+    c["contrib"] = c["peso_ini"] * c["variacao"]
+    implicito = float(np.nansum(c["contrib"])) if com.any() else np.nan
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Ações na carteira" if nome_indice == "Ibovespa" else "Empresas no índice", f"{len(c)}")
+    if ret_indice is not None and np.isfinite(ret_indice):
+        k2.metric(f"{nome_indice} no período (fechamento oficial)", f"{ret_indice:+.2%}")
+    k3.metric("Retorno implícito pela carteira (cálculo próprio)", f"{implicito:+.2%}" if np.isfinite(implicito) else "n/d",
+              help="Σ (participação no início do período × variação de cada ação). A diferença para o fechamento do "
+                   "índice vem de mudanças de carteira no período, dividendos de ações de mesma empresa com classes "
+                   "diferentes, ações sem dado e, nos EUA, da aproximação dos pesos pelo valor de mercado total.")
+
+    n_max = len(c)
+    if len(c) > 60:
+        n_max = st.slider("Ações no mapa (as de maior participação)", 30, len(c), min(max_padrao, len(c)), 10,
+                          key=f"{chave}_n")
+    m = c.nlargest(n_max, "peso")
+    ids, par, lab, val, cor, hov, pes, ctb = [], [], [], [], [], [], [], []
+    for s_, g in m.groupby("setor"):
+        gi = g[g["variacao"].notna()]
+        ids.append(f"S|{s_}"); par.append(""); lab.append(s_); val.append(g["peso"].sum())
+        cor.append(float(gi["contrib"].sum() / gi["peso_ini"].sum()) if len(gi) else 0.0)
+        hov.append(f"{len(g)} ações"); pes.append(g["peso"].sum()); ctb.append(gi["contrib"].sum())
+        for r in g.itertuples():
+            ids.append(f"T|{r.tk}"); par.append(f"S|{s_}"); lab.append(r.tk); val.append(r.peso)
+            cor.append(r.variacao if pd.notna(r.variacao) else 0.0)
+            hov.append(r.empresa + ("" if pd.notna(r.variacao) else " (sem variação no período)"))
+            pes.append(r.peso); ctb.append(r.contrib if pd.notna(r.contrib) else np.nan)
+    lim = float(np.nanquantile(np.abs(m["variacao"]), 0.9)) if m["variacao"].notna().any() else 0.01
+    lim = lim or 0.01
+    marcas = {nome_indice: ret_indice} if ret_indice is not None and np.isfinite(ret_indice) else {}
+    lim = max(lim, *(abs(x) * 1.15 for x in marcas.values())) if marcas else lim
+    ctb_txt = np.array([f"{x * 100:+.2f} p.p." if pd.notna(x) else "n/d" for x in ctb], dtype=object)
+    fig = go.Figure(go.Treemap(
+        ids=ids, parents=par, labels=lab, values=val, branchvalues="total",
+        customdata=np.column_stack([np.array(cor, dtype=float), hov, np.array(pes, dtype=float), ctb_txt]),
+        texttemplate="<b>%{label}</b><br>%{customdata[2]:.2%}<br>%{customdata[0]:+.2%}",
+        hovertemplate="<b>%{label}</b><br>%{customdata[1]}<br>Participação: %{customdata[2]:.2%}<br>"
+                      "Variação: %{customdata[0]:+.2%}<br>Contribuição: %{customdata[3]}<extra></extra>",
+        marker=dict(colors=cor, colorscale=ESCALA, cmid=0, cmin=-lim, cmax=lim, showscale=False),
+        tiling=dict(pad=1), pathbar=dict(visible=True)))
+    fig.update_layout(height=640, margin=dict(t=30, b=10, l=10, r=10),
+                      title=f"Composição do {nome_indice} — {rotulo_periodo} — área: participação no índice")
+    st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
+    regua(lim, marcas, chave=f"{chave}_regua")
+    st.caption(nota_pesos + f" Cor = variação no período (mesma régua de cores do mapa acima); setores coloridos pela "
+               "variação ponderada pela participação no início do período. Cada bloco mostra participação e variação. "
+               f"Ações com variação no período: {cobertura:.1%} do índice"
+               + (f"; o mapa mostra as {n_max} maiores ({m['peso'].sum():.1%} do índice)" if n_max < len(c) else "")
+               + ". Clique num setor para ampliar. Contribuição e retorno implícito: cálculo próprio.")
+
+    st.markdown("**Peso e contribuição por setor**")
+    ps = c.groupby("setor").agg(peso=("peso", "sum"), contrib=("contrib", "sum"), n=("tk", "size")).sort_values("peso")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(y=ps.index, x=ps["peso"], orientation="h", name="Participação no índice",
+                          marker_color="#64748b", text=[f"{x:.1%}" for x in ps["peso"]], textposition="outside"))
+    fig2.add_trace(go.Bar(y=ps.index, x=ps["contrib"], orientation="h", name="Contribuição para o retorno",
+                          marker_color=["#15803d" if x >= 0 else "#b91c1c" for x in ps["contrib"].fillna(0)],
+                          text=[f"{x * 100:+.2f} p.p." for x in ps["contrib"].fillna(0)], textposition="outside",
+                          xaxis="x2"))
+    fig2.update_layout(height=max(360, 30 * len(ps)), barmode="overlay", showlegend=True,
+                       legend=dict(orientation="h", y=-0.12), margin=dict(t=40, b=20, l=10, r=40),
+                       xaxis=dict(tickformat=".0%", title="Participação", domain=[0, 0.48]),
+                       xaxis2=dict(tickformat="+.1%", title="Contribuição", domain=[0.52, 1], anchor="y"))
+    st.plotly_chart(fig2, width="stretch", key=f"{chave}_set")
+
+    t1, t2 = st.columns(2)
+    cfg = {"tk": "Ticker", "empresa": "Empresa", "setor": "Setor",
+           "peso": st.column_config.NumberColumn("Participação", format="percent"),
+           "variacao": st.column_config.NumberColumn("Variação", format="percent"),
+           "contrib_pp": st.column_config.NumberColumn("Contribuição (p.p.)", format="%+.2f")}
+    tab = c.assign(contrib_pp=c["contrib"] * 100)[["tk", "empresa", "setor", "peso", "variacao", "contrib_pp"]]
+    t1.markdown("**Maiores contribuições positivas**")
+    t1.dataframe(tab.nlargest(10, "contrib_pp"), hide_index=True, width="stretch", column_config=cfg)
+    t2.markdown("**Maiores contribuições negativas**")
+    t2.dataframe(tab.nsmallest(10, "contrib_pp"), hide_index=True, width="stretch", column_config=cfg)
+    with st.expander(f"Carteira completa do {nome_indice} ({len(tab)})"):
+        st.dataframe(tab.sort_values("peso", ascending=False), hide_index=True, width="stretch", column_config=cfg,
+                     height=min(700, 38 + 35 * len(tab)))
+    st.download_button(f"⬇️ Composição do {nome_indice} (CSV)",
+                       tab.sort_values("peso", ascending=False).to_csv(index=False, sep=";", decimal=",")
+                       .encode("utf-8-sig"), file_name=f"composicao_{_n(nome_indice).lower().replace(' ', '_')}.csv",
+                       mime="text/csv", key=f"{chave}_csv")

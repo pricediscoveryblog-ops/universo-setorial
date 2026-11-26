@@ -444,3 +444,34 @@ controladores; dividend yield = dividendos pagos em 12 meses ÷ valor de mercado
 - Preços do Yahoo Finance (fonte não oficial; pode mudar ou limitar o acesso).
 - Universo só com empresas listadas hoje: medianas históricas têm viés de sobrevivência.
 """)
+
+
+# ------------------------------------------------------------------ composição dos índices
+SP500_CSV = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+
+
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def constituintes_sp500() -> pd.DataFrame:
+    """Lista de empresas do S&P 500 (repositório público datasets/s-and-p-500-companies, extraído da Wikipedia):
+    ticker, empresa, setor GICS, CIK. Uma linha por classe de ação (GOOGL/GOOG, FOX/FOXA...)."""
+    try:
+        r = requests.get(SP500_CSV, timeout=60)
+        r.raise_for_status()
+        s = pd.read_csv(io.StringIO(r.text), dtype={"CIK": str})
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["ticker", "empresa", "setor_gics", "cnpj"])
+    s = s.rename(columns={"Symbol": "ticker", "Security": "empresa", "GICS Sector": "setor_gics"})
+    s["cnpj"] = pd.to_numeric(s["CIK"], errors="coerce").map(lambda x: _cnpj(x) if pd.notna(x) else None)
+    return s[["ticker", "empresa", "setor_gics", "cnpj"]]
+
+
+@st.cache_data(ttl=6 * 3600, max_entries=1, show_spinner=False)
+def cadastro(versao_: str = "") -> pd.DataFrame:
+    """Cadastro do coletor-eua (cnpj, ticker principal, empresa, bolsa, setor)."""
+    try:
+        c = pd.read_parquet(io.BytesIO(_baixar("cadastro_eua.parquet")),
+                            columns=["cik", "empresa", "ticker", "bolsa", "setor", "entity_type"])
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=["cnpj", "empresa", "ticker", "bolsa", "setor", "entity_type"])
+    c["cnpj"] = c["cik"].map(_cnpj)
+    return c.drop(columns=["cik"]).drop_duplicates("cnpj")

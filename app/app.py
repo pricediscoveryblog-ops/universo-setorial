@@ -2637,6 +2637,7 @@ if True:
             ant = ant[(alvo - ant["data"]).dt.days <= tol][["cnpj", "data", "valor_mercado"]].rename(
                 columns={"data": "data_ini", "valor_mercado": "vm_ini"})
             v = fim.merge(ant, on="cnpj").assign(variacao=lambda x: x["vm_fim"] / x["vm_ini"] - 1)
+            v_todas = v[["cnpj", "variacao", "vm_fim"]].copy()   # sem filtros: base da composição dos índices
             info = base.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor", "subsetor", "segmento"]]
             if not fin.empty:
                 f_i = fin.assign(cnpj=fin["cnpj"].astype(str).str.zfill(14)).drop_duplicates("cnpj")
@@ -2735,6 +2736,83 @@ if True:
             st.download_button("⬇️ Todas as empresas (CSV)",
                                exp_v.assign(data_ini=exp_v["data_ini"].dt.date).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                                file_name=f"variacoes_{jan.lower()}.csv", mime="text/csv", key="var_csv")
+
+            # ---- composição do índice de referência (ignora os filtros de setor e valor mínimo acima)
+            st.divider()
+            per_txt = f"{jan.lower()}: {pd.Timestamp(alvo).strftime('%d/%m/%Y')} a {pd.Timestamp(d_fim).strftime('%d/%m/%Y')}"
+            info_u = info.drop_duplicates("cnpj")[["cnpj", "rotulo", "setor"]]
+            if not EUA:
+                st.subheader("Composição do Ibovespa")
+                cart = _mm.carteira_ibov(_mm._versao("carteira_ibov.parquet"))
+                if cart.empty:
+                    st.info("Carteira do Ibovespa ainda não disponível: aparece depois da próxima execução do coletor "
+                            "de mercado (mercado.py, fonte B3).")
+                else:
+                    datas_c = sorted(pd.Timestamp(d) for d in cart["data"].unique())
+                    ate = [d for d in datas_c if d <= d_fim]
+                    dc = ate[-1] if ate else datas_c[0]
+                    cc = cart[cart["data"] == dc].copy()
+                    cc["cnpj"] = cc["ticker"].str[:4].map(_mm.raiz_para_cnpj(_mm._versao("vm_ev_*.parquet")))
+                    cc = cc.merge(v_todas[["cnpj", "variacao"]], on="cnpj", how="left") \
+                           .merge(info_u, on="cnpj", how="left")
+                    cls = st.radio("Classificação setorial", ["Price Discovery (app)", "B3"], horizontal=True,
+                                   key="var_ibov_cls")
+                    setor_b3 = cc["setor_b3"] if "setor_b3" in cc.columns else pd.Series("", index=cc.index)
+                    setor_b3 = setor_b3.replace("", np.nan)
+                    cc["setor"] = setor_b3.fillna(cc["setor"]) if cls == "B3" else cc["setor"].fillna(setor_b3)
+                    cc["empresa"] = cc["rotulo"].str.split(" — ").str[-1].fillna(cc.get("empresa_b3"))
+                    cc["tk"] = cc["ticker"]
+                    r_ib = ret_ind.get("Ibovespa", (None, None, None))[0]
+                    _mm.secao_composicao(
+                        cc[["tk", "empresa", "setor", "peso", "variacao"]], "Ibovespa", per_txt, r_ib, "var_ibov",
+                        f"Carteira do dia da B3 de {dc.strftime('%d/%m/%Y')}"
+                        + (" (a coleta das carteiras começou depois da data final escolhida: é a mais antiga "
+                           "disponível)" if not ate else "")
+                        + "; área = participação da ação no índice informada pela B3. A variação de cada ação é a do "
+                          "valor de mercado da empresa no período (a mesma do mapa acima): classes diferentes da mesma "
+                          "empresa (ex.: PETR3 e PETR4) aparecem com a mesma variação.")
+            else:
+                st.subheader("Composição do índice")
+                idx = st.radio("Índice", ["S&P 500", "Nasdaq Composite"], horizontal=True, key="var_idx_eua")
+                cad = eua.cadastro(eua.versao())
+                if idx == "S&P 500":
+                    sp = eua.constituintes_sp500()
+                    if sp.empty:
+                        cc = pd.DataFrame()
+                    else:
+                        sp = sp.dropna(subset=["cnpj"])
+                        tks = sp.groupby("cnpj")["ticker"].agg("/".join)
+                        cc = sp.drop_duplicates("cnpj").assign(tk=lambda x: x["cnpj"].map(tks))
+                        cls = st.radio("Classificação setorial", ["GICS (S&P)", "Price Discovery (app)"],
+                                       horizontal=True, key="var_sp_cls")
+                        cc = cc.merge(cad[["cnpj", "setor"]], on="cnpj", how="left")
+                        cc["setor"] = cc["setor_gics"] if cls.startswith("GICS") else \
+                            cc["setor"].replace("", np.nan).fillna(cc["setor_gics"])
+                    fonte = ("Lista de empresas do S&P 500: repositório público datasets/s-and-p-500-companies "
+                             "(GitHub, a partir da Wikipedia)")
+                else:
+                    cc = cad[(cad["bolsa"] == "Nasdaq") & (cad["entity_type"] == "operating")].copy()
+                    cc["tk"] = cc["ticker"]
+                    fonte = ("Universo: empresas operacionais listadas na Nasdaq do cadastro SEC do coletor-eua "
+                             "(aproximação do Nasdaq Composite, que também inclui ADRs, REITs e outras ações "
+                             "ordinárias fora desse cadastro)")
+                if cc.empty:
+                    st.info(f"Composição do {idx} indisponível agora (fonte não respondeu).")
+                else:
+                    cc = cc.merge(v_todas, on="cnpj", how="left")
+                    sem_vm = cc[cc["vm_fim"].isna()]
+                    cc["peso"] = cc["vm_fim"]
+                    r_us = ret_ind.get(idx, (None, None, None))[0]
+                    nota = (fonte + ". Área = participação aproximada pelo valor de mercado total da empresa no pregão "
+                            "final (cálculo próprio): o índice oficial pondera pelo valor de mercado em free float, "
+                            "então os pesos aqui são aproximados.")
+                    if len(sem_vm):
+                        nota += (f" {len(sem_vm)} empresa(s) sem valor de mercado na base ficam fora"
+                                 + (": " + ", ".join(sem_vm["tk"].astype(str).head(15)) if idx == "S&P 500" else "")
+                                 + ".")
+                    _mm.secao_composicao(cc[["tk", "empresa", "setor", "peso", "variacao"]], idx, per_txt, r_us,
+                                         "var_idx_" + ("sp" if idx == "S&P 500" else "nq"), nota,
+                                         max_padrao=200 if idx == "S&P 500" else 250)
 
 
 # -------- Calendário de resultados (entregas de ITR/DFP à CVM)
