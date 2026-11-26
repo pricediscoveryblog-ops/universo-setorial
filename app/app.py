@@ -687,6 +687,67 @@ def indice_acumulado(niveis: pd.DataFrame) -> pd.Series:
     return pd.Series(idx, index=cols)
 
 
+AGG_FILTRO = "Agregado do filtro"
+
+# Recalcula no navegador a linha "Agregado do filtro" quando uma empresa é ocultada/reexibida pela legenda (o clique na
+# legenda do Plotly não volta ao Python). Mesma regra de indice_acumulado: amostra casada, só valores > 0 nos dois
+# períodos de cada passo; período sem par válido deixa o índice vazio dali em diante.
+_JS_AGG_LEGENDA = """
+(function () {
+  var gd = document.getElementById('{plot_id}');
+  var D = __DADOS__;
+  function recalc() {
+    var vis = {}, iAgg = -1;
+    gd.data.forEach(function (t, i) {
+      if (t.meta === '__agg__') { iAgg = i; return; }
+      if (typeof t.meta === 'string' && t.meta.indexOf('emp:') === 0) {
+        vis[t.meta.slice(4)] = !(t.visible === 'legendonly' || t.visible === false);
+      }
+    });
+    if (iAgg < 0) return;
+    var linhas = Object.keys(D.niv).filter(function (r) { return vis[r] !== false; }).map(function (r) { return D.niv[r]; });
+    var y = [100];
+    for (var j = 1; j < D.n; j++) {
+      var sa = 0, sb = 0, ok = false;
+      linhas.forEach(function (v) {
+        var a = v[j - 1], b = v[j];
+        if (a !== null && b !== null && a > 0 && b > 0) { sa += a; sb += b; ok = true; }
+      });
+      y.push(ok && y[j - 1] !== null ? y[j - 1] * sb / sa : null);
+    }
+    Plotly.restyle(gd, {y: [y]}, [iAgg]);
+  }
+  gd.on('plotly_restyle', function (ev) {
+    if (ev && ev[0] && Object.prototype.hasOwnProperty.call(ev[0], 'visible')) recalc();
+  });
+})();
+"""
+
+
+def plotly_agregado_legenda(fig, niv_agg: pd.DataFrame, key: str):
+    """Desenha o gráfico de crescimento acumulado num componente HTML que recalcula 'Agregado do filtro' ao clicar na
+    legenda. niv_agg = níveis das empresas que entram no agregado (linhas = rótulo, colunas = períodos em ordem)."""
+    import json
+    import streamlit.components.v1 as components
+
+    st._pd_ajustar_fig(fig)
+    escuro = False
+    try:
+        escuro = st.context.theme.type == "dark"
+    except Exception:
+        pass
+    fig.update_layout(template="plotly_dark" if escuro else "plotly_white",
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", autosize=True)
+    niv_js = {str(r): [None if pd.isna(x) else float(x) for x in v]
+              for r, v in zip(niv_agg.index, niv_agg.to_numpy(dtype=float))}
+    js = _JS_AGG_LEGENDA.replace("__DADOS__", json.dumps({"niv": niv_js, "n": niv_agg.shape[1]}))
+    html = fig.to_html(full_html=False, include_plotlyjs="cdn", post_script=js, default_width="100%",
+                       config={"displaylogo": False, "responsive": True},
+                       div_id=f"g_{abs(hash(key)) % 10**9}")
+    alt = int(fig.layout.height or 480)
+    components.html("<style>html,body{margin:0;padding:0;background:transparent;}</style>" + html, height=alt + 10)
+
+
 @st.cache_data(max_entries=1, show_spinner=False)
 def carregar_dividas(versao: tuple = ()) -> pd.DataFrame:
     arq = DADOS.parent / "dividas" / "debentures.csv.gz"
@@ -1803,24 +1864,36 @@ with aba_setor:
                             if len(neg):           # base negativa no meio da série: o índice deixa de ter leitura
                                 idx[idx.index >= neg[0]] = np.nan
                             linhas_idx[r] = idx
-                        linhas_idx["Agregado do filtro"] = indice_acumulado(niv)
+                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv)   # recalculado abaixo, sem as linhas retiradas
                     nomes = list(linhas_idx)
                     if por_setor:
                         padrao_l = nomes
                     else:
                         ult_p = ult[0] if ult else periodos[-1]
                         tam = niv[ult_p].sort_values(ascending=False) if ult_p in niv.columns else pd.Series(dtype=float)
-                        padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + ["Agregado do filtro"]
+                        padrao_l = [r for r in tam.index[:12] if r in linhas_idx] + [AGG_FILTRO]
                     chave_l = f"cres_linhas_{ind}_{tipo}_" + str(abs(hash((tuple(sel_setor), tuple(sel_sub), tuple(sel_seg),
                                                                           tuple(sel_emp)))))
                     sel_l = st.multiselect("Linhas no gráfico", nomes, default=padrao_l, key=chave_l,
-                                           help="Também dá para ocultar uma linha clicando no nome dela na legenda.")
+                                           help="Também dá para ocultar uma linha clicando no nome dela na legenda."
+                                                + ("" if por_setor else " Empresa retirada aqui ou na legenda sai "
+                                                   "também do 'Agregado do filtro'."))
+                    niv_agg = niv
+                    if not por_setor:
+                        # empresa que estava entre as linhas padrão e foi retirada sai do agregado; as demais empresas
+                        # do filtro (inclusive as que não viram linha) continuam nele. O filtro 'Empresas' não altera
+                        # o agregado (niv vem do universo do setor, antes do filtro de empresa).
+                        retiradas = [r for r in padrao_l if r != AGG_FILTRO and r not in sel_l]
+                        niv_agg = niv.drop(index=retiradas, errors="ignore")
+                        linhas_idx[AGG_FILTRO] = indice_acumulado(niv_agg)
                     fig = go.Figure()
                     for nome in sel_l:
                         y = linhas_idx[nome]
                         fig.add_trace(go.Scatter(x=list(y.index), y=y.values, mode="lines+markers",
                                                  name=nome.split(" — ")[0] if " — " in nome else nome,
-                                                 line=dict(width=4, dash="dash") if nome == "Agregado do filtro" else None))
+                                                 meta="__agg__" if nome == AGG_FILTRO else (None if por_setor
+                                                                                             else "emp:" + str(nome)),
+                                                 line=dict(width=4, dash="dash") if nome == AGG_FILTRO else None))
                     if not EUA:      # macro Brasil no mesmo recorte, base 100 no primeiro período
                         macro_aba = macro_mod()
                         macro_aba.comparar_base100(fig, d_set.groupby("_c")["dt_fim"].max().reindex(periodos),
@@ -1830,11 +1903,15 @@ with aba_setor:
                     fig.add_hline(y=100, line_dash="dot", line_color="gray")
                     fig.update_layout(height=480, legend_title_text="", yaxis_title="Base 100 = primeiro período",
                                       title=f"{ROT[col] if col in ROT else col}: crescimento acumulado (base 100)")
-                    st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    if por_setor or AGG_FILTRO not in sel_l:
+                        st.plotly_chart(fig, width="stretch", key=f"set_fig_{ind}")
+                    else:
+                        plotly_agregado_legenda(fig, niv_agg, key=f"set_fig_{ind}_{tipo}")
                     st.caption(("Uma linha por setor: soma das empresas do setor, encadeando a variação entre períodos "
                                 "consecutivos só com empresas presentes nos dois períodos (amostra casada)." if por_setor else
                                 "Uma linha por empresa: valor ÷ valor do primeiro período × 100; a linha é interrompida se o "
-                                "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas em amostra casada.")
+                                "valor fica zero ou negativo. 'Agregado do filtro' encadeia a soma das empresas do filtro em amostra "
+                                "casada; empresa retirada em 'Linhas no gráfico' ou ocultada na legenda sai do agregado.")
                                + " A tabela acima mostra o crescimento de cada período contra o mesmo período do ano anterior.")
                 elif ind in ("gao", "gaf", "gat") and por_setor:
                     # sem recorte: uma linha por setor, com o grau calculado sobre os agregados do setor
