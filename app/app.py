@@ -309,7 +309,13 @@ st.sidebar.link_button("Ir para o app dos EUA 🇺🇸" if not EUA else "Ir para
 MOEDA = "US$" if EUA else "R$"
 UN = f"{MOEDA} mm"
 if EUA:
+    import importlib
     import eua
+    # o Streamlit Cloud mantém módulos importados entre deploys: recarrega eua.py quando o arquivo muda
+    _mt_eua = os.path.getmtime(eua.__file__)
+    if getattr(eua, "_mtime_carregado", None) != _mt_eua:
+        eua = importlib.reload(eua)
+        eua._mtime_carregado = _mt_eua
     eua.ajustar_metricas(METRICAS, AGREG)
     ROT = {k: v[0] for k, v in METRICAS.items()}
 
