@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       qual:
-        description: "proventos, acionistas ou tudo"
+        description: "proventos, acionistas, indices, carteira ou tudo"
         required: true
         default: "tudo"
         type: choice
-        options: [tudo, proventos, acionistas]
+        options: [tudo, proventos, acionistas, indices, carteira]
   schedule:
     # dias úteis, 20h de Brasília (23:00 UTC): proventos da B3 e Formulário de Referência (CVM),
     # antes do coletor setorial (23h), que atualiza preços, valor de mercado e EV
