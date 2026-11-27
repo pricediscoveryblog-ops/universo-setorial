@@ -1057,6 +1057,18 @@ else:
         st.error(f"Base não encontrada em {DADOS}. Rode o workflow no modo universo.")
         st.stop()
 
+# Base em cache de uma versão anterior do código: o Streamlit Cloud aplica um commit novo sem reiniciar o processo e o
+# cache de carregar()/carregar_eua() só olha os arquivos de dados, não o código das derivadas. Métrica nova ausente ->
+# limpa o cache e recarrega uma vez; se ainda faltar, a coluna entra vazia (a aba não cai com KeyError).
+_faltam_base = [c for c in CRESC_BASE if c in base.columns and "cresc_" + c not in base.columns]
+if _faltam_base and not st.session_state.get("_base_recarregada"):
+    st.session_state["_base_recarregada"] = True
+    carregar.clear()
+    carregar_eua.clear()
+    st.rerun()
+for _k in [k for k in METRICAS if k not in base.columns]:
+    base[_k] = np.nan
+
 # ------------------------------------------------------------------ navegação: clique numa empresa -> aba Empresa
 _dest = st.session_state.pop("_ir_empresa", None)
 if _dest:
