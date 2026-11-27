@@ -351,6 +351,18 @@ def eua_macro_mod():
     return eua_macro_aba
 
 
+def universo_tickers() -> dict:
+    """{rótulo 'TICKER — Empresa': ticker} de todas as empresas da base (não financeiras e, no Brasil, bancos e
+    seguradoras): opções da cesta de comparação no gráfico de cotação da aba Empresa."""
+    partes = [x[["rotulo", "ticker"]] for x in (globals().get("base"), globals().get("fin"))
+              if isinstance(x, pd.DataFrame) and {"rotulo", "ticker"} <= set(x.columns)]
+    if not partes:
+        return {}
+    u = pd.concat(partes).dropna().astype(str)
+    u = u[u["ticker"].str.strip() != ""].drop_duplicates("rotulo")
+    return dict(zip(u["rotulo"], u["ticker"].str.strip()))
+
+
 def mercado_mod():
     """Módulo das seções de cotação, mapa de calor, estrutura societária e modelo de negócio (mesma razão de macro_mod)."""
     import importlib
@@ -1481,7 +1493,7 @@ def extras_financeira(emp_f: str, d: pd.DataFrame, seg_f: str):
     _cn = str(d["cnpj"].iloc[0]).zfill(14)
     _tk = str(d["ticker"].iloc[0] or "")
     st.divider()
-    _mm.secao_cotacao(_tk[:4], _cn, emp_f, moeda=MOEDA, chave="cot_f")
+    _mm.secao_cotacao(_tk[:4], _cn, emp_f, moeda=MOEDA, chave="cot_f", universo=universo_tickers())
     st.divider()
     _mm.secao_estrutura(_cn, emp_f.split(" — ")[-1] if " — " in emp_f else emp_f, chave="soc_f")
     st.divider()
@@ -2306,9 +2318,11 @@ with aba_emp:
         if EUA:
             _vme = mult[(mult["cnpj"] == _cn_e) & (mult["tipo"] == "trimestral")][
                 ["data", "valor_mercado", "ev_com_arrend", "ev_sem_arrend"]] if not mult.empty else pd.DataFrame()
-            _mm.secao_cotacao("", _cn_e, emp, eua=True, ticker_eua=_tk_e, vm_ev_eua=_vme, moeda=MOEDA, chave="cot_e")
+            _mm.secao_cotacao("", _cn_e, emp, eua=True, ticker_eua=_tk_e, vm_ev_eua=_vme, moeda=MOEDA, chave="cot_e",
+                              universo=universo_tickers(), cesta_padrao=cesta)
         else:
-            _mm.secao_cotacao(_tk_e[:4], _cn_e, emp, moeda=MOEDA, chave="cot_e")
+            _mm.secao_cotacao(_tk_e[:4], _cn_e, emp, moeda=MOEDA, chave="cot_e",
+                              universo=universo_tickers(), cesta_padrao=cesta)
 
         if not EUA:          # debêntures (SND/ANBIMA) e aluguel de ações (B3): só Brasil
             # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço

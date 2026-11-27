@@ -122,7 +122,53 @@ def ibovespa(versao: tuple = ()) -> pd.DataFrame:
         except Exception:  # noqa: BLE001
             return pd.DataFrame(columns=["data", "indice", "fech"])
     i["data"] = pd.to_datetime(i["data"])
+    i = i[i["indice"] == "Ibovespa"]      # o arquivo também traz SMLL, CDI e IMA-B (comparação no gráfico de cotação)
     return i[["data", "indice", "fech"]]
+
+
+# ================================================================== séries de referência (comparação de desempenho)
+@st.cache_data(ttl=6 * 3600, show_spinner="Carregando índices de referência…")
+def referencias_br(versao: tuple = ()) -> pd.DataFrame:
+    """Ibovespa, SMLL, CDI e IMA-B do arquivo do coletor (mercado.py). O que faltar no arquivo vem direto da fonte
+    (plano B até a próxima execução do coletor; IMA-B depois de mai/2023 pela variação do ETF IMAB11)."""
+    import referencias as ref
+    a = MERC / "indices.parquet"
+    i = pd.read_parquet(a) if a.exists() else pd.DataFrame(columns=ref.COLS)
+    if "fonte" not in i:
+        i["fonte"] = np.where(i["ticker"] == "^BVSP", "Yahoo Finance (^BVSP)", "")
+    i["data"] = pd.to_datetime(i["data"])
+    plano_b = {"^BVSP": lambda: ref._df(ref.yahoo("^BVSP"), "^BVSP", "Ibovespa", "Yahoo Finance (^BVSP)"),
+               "SMLL": lambda: ref.smll(range(2015, pd.Timestamp.today().year + 1)),
+               "CDI": ref.cdi, "IMA-B": ref.ima_b_rapido}
+    partes = [i]
+    for nome, tk in ref.BR.items():
+        if (i["ticker"] == tk).any():
+            continue
+        try:
+            partes.append(plano_b[tk]())
+        except Exception:  # noqa: BLE001 — sem a série, ela só não aparece na lista
+            pass
+    out = pd.concat([x for x in partes if len(x)], ignore_index=True)
+    inv = {v: k for k, v in ref.BR.items()}
+    out["indice"] = out["ticker"].map(inv).fillna(out["indice"])
+    out["data"] = pd.to_datetime(out["data"])
+    return out.dropna(subset=["fech"]).sort_values(["indice", "data"])
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner="Baixando índices de referência do Yahoo Finance…")
+def referencias_eua() -> pd.DataFrame:
+    import referencias as ref
+    partes = []
+    for nome in ref.EUA:
+        try:
+            partes.append(ref.eua(nome))
+        except Exception:  # noqa: BLE001
+            pass
+    if not partes:
+        return pd.DataFrame(columns=ref.COLS)
+    out = pd.concat(partes, ignore_index=True)
+    out["data"] = pd.to_datetime(out["data"])
+    return out
 
 
 def retorno_indices(ind: pd.DataFrame, d_ini, d_fim, tol_ini: int = 3) -> dict:
@@ -272,6 +318,14 @@ def eventos_br(prov: pd.DataFrame, precos_tk: pd.DataFrame) -> pd.DataFrame:
     return e[["data_ex", "data_com", "tipo", "evento", "valor", "fator", "obs"]].sort_values("data_ex")
 
 
+def deflacionar(s: pd.Series, indice: pd.Series) -> pd.Series:
+    """Série × índice de preços do último mês disponível ÷ índice do mês de cada data (moeda de hoje)."""
+    if not len(indice) or s.empty:
+        return s
+    idx = indice.reindex(s.index.to_period("M")).ffill().bfill().to_numpy()
+    return s * indice.iloc[-1] / idx
+
+
 def ajustar(precos_tk: pd.DataFrame, eventos: pd.DataFrame, por_proventos: bool, por_eventos: bool,
             real: bool, indice: pd.Series) -> tuple[pd.Series, list[str]]:
     """Série de fechamento ajustada (cálculo próprio).
@@ -303,16 +357,165 @@ def ajustar(precos_tk: pd.DataFrame, eventos: pd.DataFrame, por_proventos: bool,
                     notas.append(f"provento de {pd.Timestamp(dex).date()} ignorado (maior que o preço: confira a fonte)")
     aj = s * fator
     if real and len(indice):
-        meses = aj.index.to_period("M")
-        idx = indice.reindex(meses).ffill().bfill().to_numpy()
-        aj = aj * indice.iloc[-1] / idx
+        aj = deflacionar(aj, indice)
         notas.append(f"valores em moeda de {indice.index[-1].strftime('%m/%Y')} (último índice de preços disponível)")
     return aj, notas
 
 
+# ================================================================== comparação de desempenho (base 100)
+def _serie_papel(ticker: str, eua: bool, a_prov: bool, a_ev: bool, real: bool) -> tuple[str, pd.Series]:
+    """(papel usado, série ajustada) de um membro da cesta, com os mesmos ajustes do papel principal. No Brasil,
+    usa o próprio ticker se houver cotação; senão, o papel mais líquido da empresa (mesma raiz)."""
+    if eua:
+        p, ev = precos_eua(ticker)
+        if p.empty:
+            return ticker, pd.Series(dtype=float)
+        tk = ticker
+    else:
+        p = precos_br(str(ticker)[:4], _versao("precos_*.parquet"))
+        if p.empty:
+            return ticker, pd.Series(dtype=float)
+        if ticker in set(p["ticker"]):
+            tk = ticker
+        else:
+            liq = p[p["data"] >= p["data"].max() - pd.Timedelta(days=120)].groupby("ticker")["volume"].sum()
+            tk = liq.idxmax() if len(liq) else p["ticker"].iloc[0]
+    ptk = p[p["ticker"] == tk].sort_values("data")
+    ev_tk = ev if eua else eventos_br(proventos_br(_versao("proventos.parquet")), ptk)
+    s, _ = ajustar(ptk, ev_tk, a_prov, a_ev, real, indice_precos(eua))
+    return tk, s
+
+
+def _base100(x: pd.Series, d0, d1, folga_dias: int = 7) -> pd.Series | None:
+    """Série com base 100 no último valor até d0 (no máximo folga_dias antes). None se a série começa depois."""
+    x = x.dropna()
+    x = x[~x.index.duplicated(keep="last")].sort_index()
+    x = x[x.index <= d1]
+    antes = x[x.index <= d0]
+    if antes.empty or (d0 - antes.index[-1]).days > folga_dias or antes.iloc[-1] <= 0:
+        return None
+    y = x[x.index > d0] / antes.iloc[-1] * 100
+    return pd.concat([pd.Series([100.0], index=[d0]), y])
+
+
+def _estatisticas(y: pd.Series) -> dict:
+    """Retorno no período, ao ano, volatilidade anualizada (retornos diários) e maior queda do topo ao fundo."""
+    y = y.dropna()
+    if len(y) < 2:
+        return {}
+    r = y.iloc[-1] / y.iloc[0] - 1
+    anos = (y.index[-1] - y.index[0]).days / 365.25
+    rd = np.log(y).diff().dropna()
+    return {"Retorno no período": r,
+            "Retorno ao ano": (1 + r) ** (1 / anos) - 1 if anos >= 1 and r > -1 else np.nan,
+            "Volatilidade (a.a.)": rd.std() * np.sqrt(252) if len(rd) > 20 else np.nan,
+            "Maior queda (topo ao fundo)": (y / y.cummax() - 1).min()}
+
+
+def _grafico_comparacao(serie: pd.Series, tk: str, sel_ref: list, sel_cesta: list, opc_cesta: dict, eua: bool,
+                        a_prov: bool, a_ev: bool, real: bool, chave: str, desc: str):
+    """Desenha o gráfico base 100 (papel × índices × cesta) e a tabela de estatísticas. Devolve None (já desenhou)."""
+    import referencias as ref
+    if len(serie) < 2:
+        st.info("Poucas cotações no período para comparar.")
+        return None
+    d0, d1 = serie.index[0], serie.index[-1]
+    ind_precos = indice_precos(eua)
+    linhas, estilos, avisos, fontes = {}, {}, [], []
+    linhas[tk] = _base100(serie, d0, d1)
+    estilos[tk] = dict(width=2.6, color="#2563eb")
+
+    # índices de referência
+    if sel_ref:
+        R = referencias_eua() if eua else referencias_br(_versao("indices.parquet"))
+        paleta = ["#6b7280", "#d97706", "#16a34a", "#9333ea", "#0891b2", "#be123c"]
+        for i, nome in enumerate(sel_ref):
+            g = R[R["indice"] == nome]
+            if g.empty:
+                avisos.append(f"{nome}: série indisponível agora")
+                continue
+            x = pd.Series(g["fech"].to_numpy(float), index=pd.to_datetime(g["data"]))
+            if real:
+                x = deflacionar(x.sort_index(), ind_precos)
+            y = _base100(x, d0, d1)
+            if y is None:
+                avisos.append(f"{nome}: sem dado no início do período ({d0.strftime('%d/%m/%Y')})")
+                continue
+            linhas[nome] = y
+            estilos[nome] = dict(width=1.6, dash="dash", color=paleta[i % len(paleta)])
+            fonte = str(g["fonte"].dropna().iloc[-1]) if g["fonte"].notna().any() else ""
+            fontes.append(f"{nome} — {fonte or 'fonte'}: {ref.NOTAS.get(nome, '')}")
+
+    # cesta de empresas: igual peso no início, sem rebalancear
+    membros = {}
+    if sel_cesta:
+        with st.spinner("Montando a cesta…"):
+            for rot in sel_cesta:
+                try:
+                    tk_m, x = _serie_papel(opc_cesta[rot], eua, a_prov, a_ev, real)
+                except Exception as e:  # noqa: BLE001
+                    avisos.append(f"{rot}: erro ao ler cotações ({type(e).__name__})")
+                    continue
+                y = _base100(x, d0, d1) if len(x) else None
+                if y is None:
+                    avisos.append(f"{tk_m}: fora da cesta (sem cotação no início do período)")
+                    continue
+                membros[tk_m] = y
+        if membros:
+            datas = serie.index
+            m = pd.concat({k: v.reindex(v.index.union(datas)).ffill().reindex(datas) for k, v in membros.items()},
+                          axis=1)
+            nome_c = f"Cesta ({len(membros)})"
+            linhas[nome_c] = m.mean(axis=1)
+            estilos[nome_c] = dict(width=2.4, color="#dc2626")
+    ver_ind = bool(membros) and st.checkbox("Mostrar cada empresa da cesta", value=False, key=f"{chave}_cesta_ind")
+
+    fig = go.Figure()
+    if ver_ind:
+        for k, y in membros.items():
+            fig.add_trace(go.Scatter(x=y.index, y=y.values, mode="lines", name=k, opacity=0.55,
+                                     line=dict(width=1, dash="dot"), legendgroup="membros",
+                                     hovertemplate="%{x|%d/%m/%Y}: %{y:.1f}<extra>" + k + "</extra>"))
+    for k, y in linhas.items():
+        fig.add_trace(go.Scatter(x=y.index, y=y.values, mode="lines", name=k, line=estilos[k],
+                                 hovertemplate="%{x|%d/%m/%Y}: %{y:.1f}<extra>" + k + "</extra>"))
+    fig.add_hline(y=100, line=dict(width=0.8, color="#9ca3af"))
+    fig.update_layout(height=440, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.15),
+                      hovermode="x unified",
+                      title=f"Desempenho base 100 em {d0.strftime('%d/%m/%Y')}" + (" — valores reais" if real else ""),
+                      yaxis_title=f"Base 100 = {d0.strftime('%d/%m/%Y')}")
+    st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
+
+    # estatísticas no período (cálculo próprio)
+    est = pd.DataFrame({k: _estatisticas(y) for k, y in linhas.items()}).T
+    if ver_ind:
+        est = pd.concat([est, pd.DataFrame({k: _estatisticas(y) for k, y in membros.items()}).T])
+    if len(est) and tk in est.index:
+        est["Diferença de retorno do papel (p.p.)"] = (est.loc[tk, "Retorno no período"] - est["Retorno no período"]) * 100
+        est.loc[tk, "Diferença de retorno do papel (p.p.)"] = np.nan
+        st.dataframe(est, width="stretch", column_config={
+            c: st.column_config.NumberColumn(c, format="percent") for c in
+            ("Retorno no período", "Retorno ao ano", "Volatilidade (a.a.)", "Maior queda (topo ao fundo)")} | {
+            "Diferença de retorno do papel (p.p.)": st.column_config.NumberColumn(format="%+.1f")})
+    ret_total = [n for n in sel_ref if "retorno total" in ref.NOTAS.get(n, "") or n in ("Ibovespa", "SMLL (Small Cap)")]
+    st.caption(
+        f"Base 100 no primeiro pregão do período ({d0.strftime('%d/%m/%Y')}); papel e cesta {desc}. "
+        + ("Cesta: igual peso na data-base, sem rebalancear (média das séries base 100). " if membros else "")
+        + ("⚠️ Para comparar com índice de retorno total (" + ", ".join(ret_total) + "), ligue 'Ajustar por "
+           "proventos': sem isso o papel fica sem os dividendos e o índice com eles. " if ret_total and not a_prov else "")
+        + ("Todas as séries corrigidas pelo mesmo índice de preços. " if real else "")
+        + ("Fontes: " + "; ".join(fontes) + ". " if fontes else "")
+        + "Base 100, estatísticas e cesta: cálculo próprio."
+        + (" Fora do gráfico: " + "; ".join(avisos) + "." if avisos else ""))
+    return None
+
+
 # ================================================================== tela: cotação, valor de mercado e EV
 def secao_cotacao(raiz: str, cnpj: str, nome: str, eua: bool = False, ticker_eua: str | None = None,
-                  vm_ev_eua: pd.DataFrame | None = None, moeda: str = "R$", chave: str = "cot"):
+                  vm_ev_eua: pd.DataFrame | None = None, moeda: str = "R$", chave: str = "cot",
+                  universo: dict | None = None, cesta_padrao: list | None = None):
+    """universo: {rótulo 'TICKER — Empresa': ticker} das empresas que podem entrar na cesta de comparação;
+    cesta_padrao: rótulos já escolhidos como cesta na aba (pré-selecionados)."""
     st.subheader("Cotação, valor de mercado e EV")
     if eua:
         if not ticker_eua:
@@ -354,26 +557,46 @@ def secao_cotacao(raiz: str, cnpj: str, nome: str, eua: bool = False, ticker_eua
     anos = {"1 ano": 1, "3 anos": 3, "5 anos": 5}.get(ini)
     if anos:
         serie = serie[serie.index >= serie.index.max() - pd.DateOffset(years=anos)]
-    fig = go.Figure(go.Scatter(x=serie.index, y=serie.values, mode="lines", name=tk, line=dict(width=1.6)))
-    if len(ev_tk):
-        e_vis = ev_tk[(ev_tk["data_ex"] >= serie.index.min())]
-        for tipo, simb, cor, rot in (("dinheiro", "triangle-down", "#16a34a", "Provento (data ex)"),
-                                     ("acoes", "diamond", "#d97706", "Evento em ações (data ex)")):
-            e_ = e_vis[e_vis["tipo"] == tipo]
-            if len(e_):
-                y_ = serie.reindex(e_["data_ex"]).to_numpy()
-                txt = [f"{r.evento}: " + (f"{moeda} {r.valor:,.4f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                                         if tipo == "dinheiro" else f"fator {r.fator:g} ação(ões) por ação")
-                       for r in e_.itertuples()]
-                fig.add_trace(go.Scatter(x=e_["data_ex"], y=y_, mode="markers", name=rot, text=txt,
-                                         hovertemplate="%{x|%d/%m/%Y}<br>%{text}<extra></extra>",
-                                         marker=dict(symbol=simb, size=8, color=cor)))
     desc = (("ajustado por proventos" if a_prov else "") + (" e " if a_prov and a_ev else "") +
             ("ajustado por eventos" if a_ev else "")) or "sem ajuste (preço negociado na data)"
-    fig.update_layout(height=420, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.15),
-                      title=f"{tk}: fechamento {desc}" + (" — valores reais" if real else ""),
-                      yaxis_title=moeda + (" de hoje" if real else ""))
-    st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
+    # ---- comparação de desempenho: índices de referência e cesta de empresas (base 100)
+    import referencias as ref
+    nomes_ref = list(ref.EUA if eua else ref.BR)
+    proprio = (lambda t: t == ticker_eua) if eua else (lambda t: str(t)[:4] == raiz)
+    opc_cesta = {r: t for r, t in (universo or {}).items() if t and not proprio(t)}
+    k1, k2 = st.columns([1, 1.6])
+    sel_ref = k1.multiselect(
+        "Comparar com índices", nomes_ref, key=f"{chave}_refs",
+        help="; ".join(f"{n}: {ref.NOTAS.get(n, '')}" for n in nomes_ref) + ". Com algo selecionado, o gráfico passa "
+             "para base 100 no primeiro pregão do período.")
+    sel_cesta = k2.multiselect(
+        "Comparar com cesta de empresas", sorted(opc_cesta),
+        default=[r for r in (cesta_padrao or []) if r in opc_cesta], key=f"{chave}_cesta_cmp",
+        help="Carteira de igual peso montada no primeiro pregão do período e mantida sem rebalancear (média das "
+             "séries base 100). Cada papel segue os mesmos ajustes escolhidos acima; no Brasil, o papel mais líquido "
+             "de cada empresa.")
+    if sel_ref or sel_cesta:
+        fig = _grafico_comparacao(serie, tk, sel_ref, sel_cesta, opc_cesta, eua, a_prov, a_ev, real, chave, desc)
+    else:
+        fig = go.Figure(go.Scatter(x=serie.index, y=serie.values, mode="lines", name=tk, line=dict(width=1.6)))
+        if len(ev_tk):
+            e_vis = ev_tk[(ev_tk["data_ex"] >= serie.index.min())]
+            for tipo, simb, cor, rot in (("dinheiro", "triangle-down", "#16a34a", "Provento (data ex)"),
+                                         ("acoes", "diamond", "#d97706", "Evento em ações (data ex)")):
+                e_ = e_vis[e_vis["tipo"] == tipo]
+                if len(e_):
+                    y_ = serie.reindex(e_["data_ex"]).to_numpy()
+                    txt = [f"{r.evento}: " + (f"{moeda} {r.valor:,.4f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                                             if tipo == "dinheiro" else f"fator {r.fator:g} ação(ões) por ação")
+                           for r in e_.itertuples()]
+                    fig.add_trace(go.Scatter(x=e_["data_ex"], y=y_, mode="markers", name=rot, text=txt,
+                                             hovertemplate="%{x|%d/%m/%Y}<br>%{text}<extra></extra>",
+                                             marker=dict(symbol=simb, size=8, color=cor)))
+        fig.update_layout(height=420, margin=dict(t=40, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.15),
+                          title=f"{tk}: fechamento {desc}" + (" — valores reais" if real else ""),
+                          yaxis_title=moeda + (" de hoje" if real else ""))
+    if fig is not None:
+        st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
     if len(serie) > 1:
         r_tot = serie.iloc[-1] / serie.iloc[0] - 1
         anos_ = (serie.index[-1] - serie.index[0]).days / 365.25
