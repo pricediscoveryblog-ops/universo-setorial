@@ -376,6 +376,10 @@ def preparar(df: pd.DataFrame) -> pd.DataFrame:
 RX_DA = re.compile(r"deprec|amortiz|exaust")
 RX_DA_EXC = re.compile(r"emprest|(?<!nao )(?<!nao-)financ|debent|custo.{0,10}transac|agio|desagio|juro|capta")
 # Perda (reversão) por redução ao valor recuperável de ativos não financeiros (impairment, CPC 01)
+# Goodwill (ágio por expectativa de rentabilidade futura) dentro do intangível. "\bagio\b" não pega "deságio";
+# fica fora o ágio ligado a concessão (ICPC 09: é direito de exploração, intangível amortizável, não goodwill)
+RX_GOODWILL = re.compile(r"goodwill|\bagio\b|rentabilidade futura")
+RX_GOODWILL_EXC = re.compile(r"concess|outorga|direito de explora")
 RX_IMPAIR = re.compile(r"impairment|valor recuperavel|recuperabilidade")
 RX_IMPAIR_EXC = re.compile(r"receber|clientes|credito|estoque|tributo|imposto|produtos? agricol|biologic|"
                            r"(?<!nao )(?<!nao-)financeir|atualizacao monetaria|indenizac")
@@ -561,6 +565,13 @@ def calcular(sub: pd.DataFrame, aud: list, ctx: dict) -> dict:
     nc = sub[(sub["DEMO"] == "BPP") & sub["CD_CONTA"].str.startswith("2.03.") & sub["DESC"].str.contains("nao controlador")]
     m["nao_controladores"] = topo(nc)["VL"].sum() if len(nc) else 0.0
     m["pl_controladores"] = m["patrimonio_liquido"] - m["nao_controladores"]
+    # Goodwill no intangível (BPA 1.02.04.*): conta fixa 1.02.04.02 "Goodwill" do plano da CVM ou subconta com
+    # ágio/goodwill no nome (só a mais alta da hierarquia). Ágio de coligadas dentro de Investimentos (1.02.02) fica
+    # fora. Sem linha identificada = 0: o goodwill pode estar dentro de "Intangíveis" sem abertura no formulário.
+    intg = sub[(sub["DEMO"] == "BPA") & sub["CD_CONTA"].str.match(r"^1\.02\.04\.")]
+    gw = topo(intg[intg["DESC"].str.contains(RX_GOODWILL) & ~intg["DESC"].str.contains(RX_GOODWILL_EXC)])
+    registrar(gw, "goodwill")
+    m["goodwill"] = gw["VL"].sum() if len(gw) else 0.0
     m["emprestimos_financiamentos"] = np.nansum([conta(sub, "BPP", "2.01.04"),
                                                  conta(sub, "BPP", "2.02.01")])
 
@@ -1234,6 +1245,7 @@ METRICAS = [  # (chave, rótulo, formato)
     ("ativo_contrato_no_fco", "Info: ativo de contrato no FCO (R$ mm)", "num"),
     ("fcl_pos_arrend", "FCL pós-arrendamento (R$ mm)", "num"),
     ("caixa", "Caixa + aplicações CP (R$ mm)", "num"),
+    ("goodwill", "Goodwill/ágio no intangível (R$ mm)", "num"),
     ("divida_bruta_ex_arrend", "Dívida bruta ex-arrendamento (R$ mm)", "num"),
     ("passivo_arrendamento", "Passivo de arrendamento (R$ mm)", "num"),
     ("div_liq_com_arrend", "Dívida líquida c/ arrendamento (R$ mm)", "num"),

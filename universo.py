@@ -57,7 +57,7 @@ SEG_CONSTRUCAO = {"exploracao de rodovias", "agua e saneamento", "servicos de ap
 ESTOQUES = ["ativo_total", "ativo_circulante", "caixa", "passivo_circulante", "passivo_nao_circulante",
             "patrimonio_liquido", "emprestimos_financiamentos", "passivo_arrendamento",
             "divida_bruta_ex_arrend", "pl_controladores", "nao_controladores", "clientes", "estoques",
-            "fornecedores", "ativo_concessao_saldo", "bonificacao_saldo"]
+            "fornecedores", "ativo_concessao_saldo", "bonificacao_saldo", "goodwill"]
 # fluxos que não deveriam ser negativos num trimestre (sinal de quebra na diferença)
 CHECAR_NEG = ["receita", "da", "capex_organico", "pagamento_arrendamento", "ir_csll_pagos", "juros_pagos",
               "principal_pago", "servico_divida_pago", "servico_div_arrend_misto"]
