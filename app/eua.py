@@ -39,6 +39,7 @@ ROTULOS_EUA = {
     "pagamento_arrendamento": "Pagamentos de arrendamento financeiro",
     "fcl_pos_arrend": "FCL pós-arrendamento financeiro",
     "dividendos_pagos": "Dividendos pagos",
+    "payout_ll": "Payout (dividendos pagos ÷ lucro líquido)",
     "ir_csll_pagos": "Imposto de renda pago",
     "div_liq_ebitda_ifrs16": "DL c/ arrend. / EBITDA equiv. IFRS 16",
     "div_liq_ebitda_pre_ifrs16": "DL s/ arrend. / EBITDA após arrend. financeiros",
