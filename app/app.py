@@ -1012,6 +1012,285 @@ def carregar_vm_diario(versao: tuple = ()) -> pd.DataFrame:
     return v
 
 
+# ------------------------------------------------------------------ valor de mercado, EV e sobreposições (aba Empresa)
+# Séries de mercado diárias (Brasil): valor de mercado e EV do coletor (vm_ev_<ano>.parquet) e múltiplos recalculados
+# a cada pregão com o denominador do último ITR/DFP já DIVULGADO (ponto no tempo; fluxos em 12 meses/LTM, balanço do
+# documento). Fundamentos (LTM e balanço) ficam em degrau entre um trimestre e o seguinte.
+MULT_DIARIOS = {  # chave: (rótulo, formato, numerador, denominador no múltiplo trimestral)
+    "valor_mercado": ("Valor de mercado", "mm", None, None),
+    "ev_com_arrend": ("EV c/ arrendamento", "mm", None, None),
+    "ev_sem_arrend": ("EV s/ arrendamento", "mm", None, None),
+    "p_l": ("P/L", "x", "valor_mercado", "lucro_controladores_12m"),
+    "p_vpa": ("P/VPA", "x", "valor_mercado", "pl_controladores"),
+    "ev_ebitda_ifrs16": ("EV/EBITDA IFRS 16", "x", "ev_com_arrend", "ebitda_12m"),
+    "ev_ebitda_pre_ifrs16": ("EV/EBITDA pré-IFRS 16", "x", "ev_sem_arrend", "ebitda_pre_ifrs16_12m"),
+    "ev_receita_com_arrend": ("EV/Receita (EV c/ arrend.)", "x", "ev_com_arrend", "receita_12m"),
+    "ev_receita_sem_arrend": ("EV/Receita (EV s/ arrend.)", "x", "ev_sem_arrend", "receita_12m"),
+    "dividend_yield": ("Dividend yield", "pct", "dividendos_12m", "valor_mercado"),
+}
+
+
+@st.cache_data(max_entries=1, show_spinner=False)
+def datas_divulgacao(versao: tuple = ()) -> pd.DataFrame:
+    """Primeira entrega de cada ITR/DFP (cnpj, dt_refer -> dt_receb), Dados Abertos + consulta ENET da CVM."""
+    partes = [pd.read_csv(DADOS / n, dtype={"cnpj": str}, usecols=["cnpj", "dt_refer", "dt_receb"])
+              for n in ("entregas.csv.gz", "entregas_rad.csv.gz") if (DADOS / n).exists()]
+    if not partes:
+        return pd.DataFrame(columns=["cnpj", "dt_refer", "dt_receb"])
+    e = pd.concat(partes, ignore_index=True)
+    e["cnpj"] = e["cnpj"].astype(str).str.zfill(14)
+    for c in ("dt_refer", "dt_receb"):
+        e[c] = pd.to_datetime(e[c], errors="coerce", format="ISO8601").dt.normalize()
+    return e.dropna().sort_values("dt_receb").drop_duplicates(["cnpj", "dt_refer"])
+
+
+def serie_mercado_diaria(cnpj: str) -> tuple[pd.DataFrame, str]:
+    """DataFrame indexado pela data com valor de mercado, EVs e múltiplos. Brasil: diário (múltiplos ponto no tempo);
+    EUA: pontos de fim de trimestre e último pregão (a base americana não tem série diária de ações)."""
+    cnpj = str(cnpj).zfill(14)
+    hm = mult[(mult["cnpj"] == cnpj) & (mult["tipo"] == "trimestral")].sort_values("data") if not mult.empty \
+        else pd.DataFrame()
+    if EUA:
+        if hm.empty:
+            return pd.DataFrame(), ""
+        return hm.drop_duplicates("data", keep="last").set_index("data")[list(MULT_DIARIOS)], "trimestral"
+    v = mercado_mod().vm_ev_br(cnpj, mercado_mod()._versao("vm_ev_*.parquet"))
+    if v is None or v.empty:
+        return pd.DataFrame(), ""
+    v = v.drop_duplicates("data", keep="last").set_index("data")[["valor_mercado", "ev_com_arrend", "ev_sem_arrend"]]
+    v = v.astype(float)
+    dens = ["lucro_controladores_12m", "pl_controladores", "ebitda_12m", "ebitda_pre_ifrs16_12m", "receita_12m",
+            "dividendos_12m"]
+    if len(hm) and "dt_fim_base" in hm:
+        # um conjunto de denominadores por documento (dt_fim_base), vigente a partir da data de divulgação
+        dfb = pd.to_datetime(hm["dt_fim_base"], errors="coerce")
+        if dfb.isna().any() and "periodo_base" in hm:       # bases antigas sem a data: busca pelo período
+            bb = base[base["cnpj"].astype(str).str.zfill(14) == cnpj]
+            per_dt = dict(zip(bb["periodo"].astype(str), pd.to_datetime(bb["dt_fim"], errors="coerce")))
+            dfb = dfb.fillna(hm["periodo_base"].astype(str).map(per_dt))
+        docs = hm.assign(dt_fim_base=dfb).dropna(subset=["dt_fim_base"])
+        docs = docs.drop_duplicates("dt_fim_base", keep="last")[["dt_fim_base"] + dens]
+        ent = datas_divulgacao(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
+        ent = ent[ent["cnpj"] == cnpj].set_index("dt_refer")["dt_receb"]
+        docs["vigencia"] = [ent.get(d, d + pd.Timedelta(days=90)) for d in docs["dt_fim_base"]]
+        # mesma regra do coletor: em cada data vale o documento de maior dt_fim entre os já divulgados
+        docs = docs.sort_values(["vigencia", "dt_fim_base"])
+        docs = docs[docs["dt_fim_base"] >= docs["dt_fim_base"].cummax()].drop_duplicates("vigencia", keep="last")
+        den = docs.set_index("vigencia")[dens]
+        den = den.reindex(den.index.union(v.index)).sort_index().ffill().reindex(v.index)
+        pos = lambda s: s.where(s > 0)
+        v["p_l"] = v["valor_mercado"] / pos(den["lucro_controladores_12m"])
+        v["p_vpa"] = v["valor_mercado"] / pos(den["pl_controladores"])
+        v["ev_ebitda_ifrs16"] = v["ev_com_arrend"] / pos(den["ebitda_12m"])
+        v["ev_ebitda_pre_ifrs16"] = v["ev_sem_arrend"] / pos(den["ebitda_pre_ifrs16_12m"])
+        v["ev_receita_com_arrend"] = v["ev_com_arrend"] / pos(den["receita_12m"])
+        v["ev_receita_sem_arrend"] = v["ev_sem_arrend"] / pos(den["receita_12m"])
+        v["dividend_yield"] = den["dividendos_12m"] / pos(v["valor_mercado"])
+    for k in MULT_DIARIOS:
+        if k not in v:
+            v[k] = np.nan
+    return v, "diário"
+
+
+def serie_fundamento(rotulo: str, chave: str, posicao: str) -> pd.Series:
+    """Fundamento da empresa em degrau: LTM (fluxos em 12 meses + balanço do trimestre); sem LTM, anual.
+    posicao: 'fim' = no fim do trimestre; 'divulgacao' = a partir da entrega do documento à CVM."""
+    d = base[(base["rotulo"] == rotulo) & (base["tipo"] == "ltm")]
+    if d.empty or d[chave].notna().sum() == 0:
+        d = base[(base["rotulo"] == rotulo) & (base["tipo"] == "anual")]
+    d = d.dropna(subset=[chave]).sort_values("dt_fim")
+    if d.empty:
+        return pd.Series(dtype=float)
+    x = pd.to_datetime(d["dt_fim"])
+    if posicao == "divulgacao":
+        if EUA:
+            x = x + pd.Timedelta(days=45)
+        else:
+            ent = datas_divulgacao(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
+            ent = ent[ent["cnpj"] == str(d["cnpj"].iloc[0]).zfill(14)].set_index("dt_refer")["dt_receb"]
+            x = pd.Series([ent.get(t, t + pd.Timedelta(days=90)) for t in x], index=d.index)
+    s = pd.Series(pd.to_numeric(d[chave], errors="coerce").to_numpy(float), index=pd.DatetimeIndex(x))
+    return s[~s.index.duplicated(keep="last")].sort_index()
+
+
+def secao_vm_ev_sobrepostos(emp: str, cnpj: str, cesta_padrao: list | None = None):
+    """Valor de mercado e EV diários com sobreposição de múltiplos, fundamentos, outras empresas e índices."""
+    _mm = mercado_mod()
+    st.subheader("Valor de mercado, EV e gráficos sobrepostos")
+    s0, freq = serie_mercado_diaria(cnpj)
+    if s0.empty:
+        st.info("Sem série de valor de mercado para esta empresa (sem cotação ou sem composição do capital).")
+        return
+    rotulos = sorted(r for r in base["rotulo"].unique() if r != emp)
+    import referencias as ref
+    nomes_ref = list(ref.EUA if EUA else ref.BR)
+    c1, c2 = st.columns([1.6, 1])
+    outras = c1.multiselect("Outras empresas (mesmas séries de mercado e fundamentos)", rotulos,
+                            default=[r for r in (cesta_padrao or []) if r in rotulos and r != emp][:4],
+                            key="vmo_emp")
+    sel_ind = c2.multiselect("Índices (só na escala base zero)", nomes_ref, key="vmo_ind")
+    m1, m2 = st.columns([1.2, 1.4])
+    sel_m = m1.multiselect("Séries de mercado" + (" (diárias)" if freq == "diário" else " (fim de trimestre)"),
+                           list(MULT_DIARIOS), default=["valor_mercado", "ev_com_arrend"],
+                           format_func=lambda k: MULT_DIARIOS[k][0], key="vmo_merc")
+    cand_f = [k for k in METRICAS if METRICAS[k][2] not in ("Mercado", "Crescimento", "Graus de alavancagem")
+              and k in base.columns]
+    sel_f = m2.multiselect("Fundamentos (LTM e balanço, em degrau entre trimestres)", cand_f,
+                           format_func=lambda k: ROT[k], key="vmo_fund")
+    p1, p2, p3, p4 = st.columns([1.5, 1.6, 1.3, 1.1])
+    escala = p1.radio("Escala", ["Valores (dois eixos)", "Base zero (variação % desde o início)"], key="vmo_esc")
+    janela = p2.radio("Período", ["1 ano", "3 anos", "5 anos", "Tudo", "Personalizado"], index=3, horizontal=True,
+                      key="vmo_jan")
+    posicao = p3.radio("Fundamentos a partir de", ["Fim do trimestre", "Divulgação"], key="vmo_pos",
+                       help="Fim do trimestre: o degrau começa na data de referência do ITR/DFP. Divulgação: começa na "
+                            "entrega à CVM (ponto no tempo, mesma regra dos múltiplos" + (
+                                "; EUA: estimada em 45 dias após o fim do período)" if EUA else ")"))
+    real = p4.toggle("Valores reais", value=False, key="vmo_real",
+                     help=("CPI-U" if EUA else "IPCA") + " até o último mês divulgado; não altera múltiplos.")
+    d_min, d_max = s0.index.min(), s0.index.max()
+    anos = {"1 ano": 1, "3 anos": 3, "5 anos": 5}.get(janela)
+    if janela == "Personalizado":
+        dr = st.date_input("De / até", value=(max(d_min, d_max - pd.DateOffset(years=3)).date(), d_max.date()),
+                           min_value=d_min.date(), max_value=d_max.date(), format="DD/MM/YYYY", key="vmo_datas")
+        if not isinstance(dr, (list, tuple)) or len(dr) < 2:
+            st.info("Escolha a data inicial e a final.")
+            return
+        d0, d1 = pd.Timestamp(dr[0]), pd.Timestamp(dr[1])
+    else:
+        d0, d1 = (max(d_min, d_max - pd.DateOffset(years=anos)) if anos else d_min), d_max
+    base_zero = escala.startswith("Base zero")
+    idx_p = _mm.indice_precos(EUA) if real else pd.Series(dtype=float)
+    defl = (lambda s: _mm.deflacionar(s, idx_p)) if real and len(idx_p) else (lambda s: s)
+
+    # ---- monta as linhas: (nome, série, formato, degrau?)
+    linhas, avisos = [], []
+    empresas = [(emp, cnpj, s0)] + [(o, str(base.loc[base["rotulo"] == o, "cnpj"].iloc[0]).zfill(14), None)
+                                    for o in outras]
+    pos_ = "divulgacao" if posicao == "Divulgação" else "fim"
+    for i_e, (rot, cn, s_) in enumerate(empresas):
+        tk = rot.split(" — ")[0]
+        if s_ is None and sel_m:
+            s_, _ = serie_mercado_diaria(cn)
+        for k in sel_m:
+            if s_ is None or s_.empty or k not in s_ or s_[k].notna().sum() == 0:
+                avisos.append(f"{tk}: sem {MULT_DIARIOS[k][0]}")
+                continue
+            y = s_[k].dropna()
+            linhas.append((f"{tk} · {MULT_DIARIOS[k][0]}", defl(y) if MULT_DIARIOS[k][1] == "mm" else y,
+                           MULT_DIARIOS[k][1], False, i_e))
+        for k in sel_f:
+            y = serie_fundamento(rot, k, pos_)
+            if y.empty:
+                avisos.append(f"{tk}: sem {ROT[k]}")
+                continue
+            linhas.append((f"{tk} · {ROT[k]}",
+                           defl(y) if METRICAS[k][1] == "mm" else y, METRICAS[k][1], True, i_e))
+    if base_zero and sel_ind:
+        R = _mm.referencias_eua() if EUA else _mm.referencias_br(_mm._versao("indices.parquet"))
+        for nome in sel_ind:
+            g = R[R["indice"] == nome]
+            if g.empty:
+                avisos.append(f"{nome}: série indisponível agora")
+                continue
+            y = pd.Series(g["fech"].to_numpy(float), index=pd.to_datetime(g["data"])).sort_index()
+            linhas.append((nome, defl(y), "idx", False, None))
+    elif sel_ind:
+        avisos.append("índices aparecem só na escala base zero")
+    if not linhas:
+        st.info("Escolha ao menos uma série.")
+        return
+
+    # ---- recorte do período; degraus começam no valor vigente em d0 e se estendem até d1
+    def recorta(y: pd.Series, degrau: bool) -> pd.Series:
+        y = y[~y.index.duplicated(keep="last")].sort_index()
+        antes = y[y.index <= d0]
+        dentro = y[(y.index > d0) & (y.index <= d1)]
+        if degrau:
+            ini = pd.Series([antes.iloc[-1]], index=[d0]) if len(antes) else pd.Series(dtype=float)
+            out = pd.concat([ini, dentro])
+            return pd.concat([out, pd.Series([out.iloc[-1]], index=[d1])]) if len(out) and out.index[-1] < d1 else out
+        if len(antes) and (d0 - antes.index[-1]).days <= 7:
+            return pd.concat([pd.Series([antes.iloc[-1]], index=[d0]), dentro])
+        return dentro
+
+    escala_mm = 1e6 if EUA and s0["valor_mercado"].abs().max() >= 999_995 else 1e3
+    un_mm = f"{MOEDA} {'tri' if escala_mm == 1e6 else 'bi'}" + (" de hoje" if real else "")
+    paleta = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2", "#be123c", "#4b5563", "#65a30d",
+              "#c026d3", "#0d9488", "#ea580c"]
+    tracos = ["solid", "dash", "dot", "dashdot", "longdash"]
+    fig, fora = go.Figure(), []
+    tem_dir = False
+    for i_l, (nome, y, f, degrau, i_e) in enumerate(linhas):
+        y = recorta(y.dropna(), degrau)
+        if y.empty:
+            fora.append(f"{nome} (sem dado no período)")
+            continue
+        estilo = dict(color=paleta[i_l % len(paleta)], width=2 if f != "idx" else 1.6,
+                      dash="dash" if f == "idx" else (tracos[i_e % len(tracos)] if i_e else "solid"),
+                      shape="hv" if degrau else "linear")
+        modo = "lines" if (freq == "diário" or degrau or f == "idx") else "lines+markers"
+        if base_zero:
+            y0 = y.iloc[0]
+            if pd.isna(y0) or y0 <= 0:
+                fora.append(f"{nome} (valor inicial zero ou negativo)")
+                continue
+            fig.add_trace(go.Scatter(x=y.index, y=(y / y0 - 1) * 100, mode=modo, name=nome, line=estilo,
+                                     hovertemplate="%{y:+.1f}%<extra>" + nome + "</extra>"))
+        else:
+            if f in ("mm",):
+                yy, eixo, ht = y / escala_mm, "y", "%{y:,.2f} " + un_mm
+            elif f == "pct":
+                yy, eixo, ht = y * 100, "y2", "%{y:.1f}%"
+            elif f == "d":
+                yy, eixo, ht = y, "y2", "%{y:.0f} dias"
+            else:
+                yy, eixo, ht = y, "y2", "%{y:.2f}x"
+            tem_dir |= eixo == "y2"
+            fig.add_trace(go.Scatter(x=yy.index, y=yy.values, mode=modo, name=nome, line=estilo, yaxis=eixo,
+                                     hovertemplate=ht + "<extra>" + nome + "</extra>"))
+    if base_zero:
+        fig.add_hline(y=0, line=dict(width=0.8, color="#9ca3af"))
+        fig.update_layout(yaxis=dict(title=f"Variação desde {d0.strftime('%d/%m/%Y')} (%)", ticksuffix="%"))
+    else:
+        fig.update_layout(yaxis=dict(title=un_mm))
+        if tem_dir:
+            fig.update_layout(yaxis2=dict(title="Múltiplos (x), % e dias", overlaying="y", side="right", showgrid=False))
+    fig.update_layout(height=500, hovermode="x unified", margin=dict(t=40, b=20, l=10, r=10),
+                      legend=dict(orientation="h", y=-0.15),
+                      title=f"{d0.strftime('%d/%m/%Y')} a {d1.strftime('%d/%m/%Y')}" + (" — valores reais" if real else ""))
+    st.plotly_chart(fig, width="stretch", key="vmo_fig")
+
+    # ---- tabela-resumo do período (início, fim, variação, mínimo e máximo)
+    res = []
+    for nome, y, f, degrau, _ in linhas:
+        y = recorta(y.dropna(), degrau)
+        if y.empty:
+            continue
+        fat = 1 / escala_mm if f == "mm" else 100 if f == "pct" else 1
+        res.append({"Série": nome, "Início": y.iloc[0] * fat, "Fim": y.iloc[-1] * fat,
+                    "Variação": (y.iloc[-1] / y.iloc[0] - 1) if y.iloc[0] > 0 else np.nan,
+                    "Mínimo": y.min() * fat, "Máximo": y.max() * fat,
+                    "Unidade": un_mm if f == "mm" else "%" if f == "pct" else "dias" if f == "d" else
+                    "pontos" if f == "idx" else "x"})
+    if res:
+        with st.expander("Resumo do período"):
+            st.dataframe(pd.DataFrame(res), hide_index=True, width="stretch", column_config={
+                **{c: st.column_config.NumberColumn(c, format="%,.2f") for c in ("Início", "Fim", "Mínimo", "Máximo")},
+                "Variação": st.column_config.NumberColumn("Variação", format="percent")})
+    st.caption(
+        ("Valor de mercado diário = Σ classes (ações vigentes em cada data × fechamento). EV = valor de mercado + "
+         "dívida líquida + não controladores do último ITR/DFP já divulgado em cada data. Múltiplos diários: numerador "
+         "do pregão ÷ denominador do último documento divulgado até a data (lucro, EBITDA, receita e dividendos em 12 "
+         "meses/LTM; PL do balanço), com a data de entrega à CVM (sem ela, fim do período + 90 dias); denominador ≤ 0 "
+         "fica vazio. " if freq == "diário" else
+         "EUA: valor de mercado, EV e múltiplos nos fins de trimestre e no último pregão (a base não tem série diária "
+         "de ações). ")
+        + "Fundamentos em degrau: LTM (fluxos 12 meses e balanço do trimestre; sem LTM, anual), constantes até o "
+        "documento seguinte. Base zero = variação % sobre o primeiro valor do período (série com início ≤ 0 fica de "
+        f"fora). Em valores, {un_mm} à esquerda; múltiplos, % e dias à direita. Cálculo próprio."
+        + (" Fora do gráfico: " + "; ".join(fora + avisos) + "." if fora or avisos else ""))
+
+
 def fmt_tabela(df: pd.DataFrame, cols: list[str]) -> dict:
     cfg = {}
     for c in cols:
@@ -2319,10 +2598,12 @@ with aba_emp:
             _vme = mult[(mult["cnpj"] == _cn_e) & (mult["tipo"] == "trimestral")][
                 ["data", "valor_mercado", "ev_com_arrend", "ev_sem_arrend"]] if not mult.empty else pd.DataFrame()
             _mm.secao_cotacao("", _cn_e, emp, eua=True, ticker_eua=_tk_e, vm_ev_eua=_vme, moeda=MOEDA, chave="cot_e",
-                              universo=universo_tickers(), cesta_padrao=cesta)
+                              universo=universo_tickers(), cesta_padrao=cesta, vm_ev=False)
         else:
             _mm.secao_cotacao(_tk_e[:4], _cn_e, emp, moeda=MOEDA, chave="cot_e",
-                              universo=universo_tickers(), cesta_padrao=cesta)
+                              universo=universo_tickers(), cesta_padrao=cesta, vm_ev=False)
+        # ---- valor de mercado e EV (diários) com sobreposição de múltiplos, fundamentos, outras empresas e índices
+        secao_vm_ev_sobrepostos(emp, _cn_e, cesta)
 
         if not EUA:          # debêntures (SND/ANBIMA) e aluguel de ações (B3): só Brasil
             # ---- dívida em debêntures (mercado de capitais) vs. dívida do balanço
@@ -2531,76 +2812,6 @@ with aba_emp:
                            f"{alug['data'].min().date()}. Taxas ao ano (a B3 informa em fração; 0,04 = 4% a.a.), média ponderada pela quantidade contratada no "
                            "dia (eletrônico e balcão). Saldo alugado ÷ ações em circulação da última composição do capital. "
                            "Comparáveis: o papel com maior saldo alugado de cada empresa do grupo escolhido.")
-
-        # ---- gráficos sobrepostos: valor de mercado (padrão) + outras linhas para comparar comportamento
-        st.subheader("Gráficos sobrepostos")
-        ex_ = eixo_x(tipo)
-        cand = [k for k in METRICAS if k in d_emp.columns and d_emp[k].notna().any()]
-        o1, o2 = st.columns([3, 2])
-        padrao_ov = [k for k in ("valor_mercado",) if k in cand] or [k for k in ("receita", "lucro_liquido") if k in cand]
-        sel_ov = o1.multiselect("Linhas da empresa", cand, default=padrao_ov,
-                                format_func=lambda k: ROT[k], key="ov_ind")
-        outras = o1.multiselect("Valor de mercado de outras empresas (opcional)",
-                                sorted(r for r in base["rotulo"].unique() if r != emp), key="ov_emp")
-        escala = o2.radio("Escala", ["Base 100 (primeiro ponto do período)", "Valores (dois eixos)"], key="ov_esc")
-        series_ov = [(ROT[k], d_emp[ex_], d_emp[k], METRICAS[k][1], k, linha_e["cnpj"]) for k in sel_ov]
-        for o in outras:
-            dd = base[(base["rotulo"] == o) & (base["tipo"] == tipo) & base[ex_].isin(d_emp[ex_])].sort_values(ex_)
-            series_ov.append((f"Valor de mercado {o.split(' — ')[0]}", dd[ex_], dd["valor_mercado"], "mm",
-                              "valor_mercado", dd["cnpj"].iloc[0] if len(dd) else None))
-        if not series_ov:
-            st.info("Escolha ao menos uma linha.")
-        else:
-            fig = go.Figure()
-            ignoradas = []
-            DE_MERCADO = {"valor_mercado", "ev_com_arrend", "ev_sem_arrend", "p_vpa", "p_l", "ev_ebitda_ifrs16",
-                          "ev_ebitda_pre_ifrs16", "dividend_yield", "ev_receita_com_arrend", "ev_receita_sem_arrend"}
-            for i_s, (nome, x, y, f, chave, cn_s) in enumerate(series_ov):
-                cor = PALETA_OV[i_s % len(PALETA_OV)]
-                y = pd.to_numeric(y, errors="coerce").reset_index(drop=True)
-                x = pd.Series(list(x))
-                # valor na cotação do dia (último pregão), para indicadores que dependem de preço
-                ponto = None
-                if chave in DE_MERCADO and not mult.empty and cn_s is not None:
-                    hm = mult[(mult["cnpj"] == str(cn_s).zfill(14)) & (mult["tipo"] == "trimestral")].sort_values("data")
-                    if len(hm) and pd.notna(hm[chave].iloc[-1]):
-                        dh = pd.Timestamp(hm["data"].iloc[-1])
-                        xh = dh.year + (dh.dayofyear - 1) / 366 if tipo == "anual" else dh
-                        ponto = (xh, float(hm[chave].iloc[-1]), dh)
-                if escala.startswith("Base 100"):
-                    validos = y[y.notna()]
-                    if validos.empty or validos.iloc[0] <= 0:
-                        ignoradas.append(nome)
-                        continue
-                    fig.add_trace(go.Scatter(x=x, y=y / validos.iloc[0] * 100, mode="lines+markers", name=nome,
-                                             line=dict(color=cor), marker=dict(color=cor)))
-                    if ponto:
-                        fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] / validos.iloc[0] * 100], mode="markers",
-                                                 marker=alvo(cor),
-                                                 name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
-                else:
-                    eixo = "y" if f == "mm" else "y2"
-                    fig.add_trace(go.Scatter(x=x, y=y * (100 if f == "pct" else 1), mode="lines+markers",
-                                             name=nome + (" (%)" if f == "pct" else " (x)" if f == "x" else f" ({UN})"),
-                                             yaxis=eixo, line=dict(color=cor), marker=dict(color=cor)))
-                    if ponto:
-                        fig.add_trace(go.Scatter(x=[ponto[0]], y=[ponto[1] * (100 if f == "pct" else 1)], mode="markers",
-                                                 marker=alvo(cor), yaxis=eixo,
-                                                 name=f"{nome}: cotação de {ponto[2].strftime('%d/%m/%Y')}"))
-            if escala.startswith("Base 100"):
-                fig.update_layout(yaxis_title="Base 100 = primeiro ponto")
-                fig.add_hline(y=100, line_dash="dot", line_color="gray")
-            else:
-                fig.update_layout(yaxis=dict(title=UN),
-                                  yaxis2=dict(title="Múltiplos (x) e % ", overlaying="y", side="right", showgrid=False))
-            fig.update_layout(height=480, legend=dict(orientation="h", y=-0.2), margin=dict(t=30, b=20, l=10, r=10))
-            st.plotly_chart(fig, width="stretch")
-            if ignoradas:
-                st.caption("Fora da base 100 (primeiro valor zero ou negativo): " + ", ".join(ignoradas) +
-                           ". Use a escala de valores para vê-las.")
-            st.caption("Base 100 mostra o comportamento relativo de cada linha desde o início do período escolhido "
-                       f"na barra lateral. Em valores, {UN} ficam no eixo da esquerda; múltiplos e % no da direita. "
-                       "◎ = indicador de mercado calculado com o preço do último pregão, na cor da curva correspondente.")
 
         # ---- estrutura societária e modelo de negócio (fim da visão da empresa)
         st.divider()
