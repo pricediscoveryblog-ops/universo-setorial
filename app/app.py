@@ -167,6 +167,10 @@ METRICAS = {
     "margem_ebitda_pre_ifrs16": ("Margem EBITDA pré-IFRS 16", "pct", "Margens e retorno"),
     "margem_liquida": ("Margem líquida", "pct", "Margens e retorno"),
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
+    # payout = dividendos + JCP pagos (DFC) ÷ lucro líquido dos controladores; crescimento estrutural (sustentável)
+    # g = ROE × (1 − payout): quanto o PL cresce só com o lucro retido. Vazios no trimestral e com lucro ≤ 0
+    "payout_ll": ("Payout (dividendos + JCP pagos ÷ lucro líquido)", "pct", "Margens e retorno"),
+    "g_estrutural": ("Crescimento estrutural (ROE × (1 − payout))", "pct", "Margens e retorno"),
     "roic_caixa": ("ROIC caixa (NOPAT + D&A − capex org. − arrend. ÷ CI)", "pct", "Margens e retorno"),
     "roic_trad": ("ROIC tradicional (NOPAT ÷ CI c/ arrendamento)", "pct", "Margens e retorno"),
     "roic_caixa_ex_goodwill": ("ROIC caixa ex-goodwill (numerador do ROIC caixa ÷ CI − goodwill)", "pct",
@@ -244,12 +248,14 @@ AGREG = {"margem_bruta": ("lucro_bruto", "receita"), "margem_ebitda": ("ebitda",
          "p_vpa": ("valor_mercado", "m_pl_controladores"), "p_l": ("valor_mercado", "m_lucro_12m"),
          "ev_ebitda_ifrs16": ("ev_com_arrend", "m_ebitda_12m"), "ev_ebitda_pre_ifrs16": ("ev_sem_arrend", "m_ebitda_pre_12m"),
          "ev_receita_com_arrend": ("ev_com_arrend", "m_receita_12m"), "ev_receita_sem_arrend": ("ev_sem_arrend", "m_receita_12m"),
-         "dividend_yield": ("m_dividendos_12m", "valor_mercado")}
+         "dividend_yield": ("m_dividendos_12m", "valor_mercado"),
+         # payout do setor = Σ dividendos + JCP pagos ÷ Σ lucro dos controladores (só empresas com lucro > 0)
+         "payout_ll": ("dividendos_pagos", "lucro_base_payout")}
 # bases dos índices de cobertura (não aparecem como métrica; usadas no agregado do setor)
 AUX_COB = ["desp_fin_liquida", "ebitda_menos_ir", "caixa_servico_divida", "caixa_servico_pos_capex", "ebitda_ir_capex",
-           "servico_divida_c_arrend", "caixa_servico_ajustado"]
+           "servico_divida_c_arrend", "caixa_servico_ajustado", "lucro_base_payout"]
 AGREG_DEN_POS = {"cob_ebit_res_fin", "cob_juros_caixa", "dscr_ebitda", "dscr_pos_capex", "dscr_capex_arrend_den",
-                 "dscr_ebitda_arrend_den", "dscr_ebitda_ajustado", "div_liq_ebitda_ajustado"}
+                 "dscr_ebitda_arrend_den", "dscr_ebitda_ajustado", "div_liq_ebitda_ajustado", "payout_ll"}
 PADRAO = ["receita", "ebitda", "margem_ebitda", "lucro_liquido", "div_liq_ebitda_ifrs16", "capex_organico"]
 TIPOS = {"Anual": "anual", "LTM (últimos 12 meses)": "ltm", "Trimestral": "trimestral"}
 
@@ -460,6 +466,28 @@ def enriquecer(base: pd.DataFrame) -> pd.DataFrame:
     # conversão do EBITDA em caixa: FCO comparável (sem juros e dividendos) ÷ EBITDA IFRS 16. Sob IFRS 16 o
     # arrendamento pago sai do FCO, então FCO e EBITDA IFRS 16 estão no mesmo critério. Vazio com EBITDA ≤ 0.
     base["conversao_fco_ebitda"] = base["fco"] / base["ebitda"].where(base["ebitda"] > 0)
+    return calc_payout(base)
+
+
+def calc_payout(base: pd.DataFrame) -> pd.DataFrame:
+    """Payout e crescimento estrutural. Qualquer coluna ausente ou erro -> métricas vazias (o app não cai).
+    Payout = dividendos + JCP pagos no período (DFC, regime de caixa, só acionistas da controladora) ÷ lucro líquido
+    dos controladores (sem a linha, lucro líquido total). Vazio com lucro ≤ 0 e no trimestral (dividendo pago num
+    trimestre raramente corresponde ao lucro do mesmo trimestre). Sem corte em 100%: payout acima de 100% gera
+    crescimento estrutural negativo (a empresa distribui mais do que lucra e consome PL).
+    Crescimento estrutural (sustentável) = ROE (LL ÷ PL final) × (1 − payout)."""
+    try:
+        def num(c):
+            return pd.to_numeric(base[c], errors="coerce") if c in base.columns else pd.Series(np.nan, index=base.index)
+        ll = num("lucro_controladores").fillna(num("lucro_liquido"))
+        fluxo_ok = base["tipo"].astype(str) != "trimestral"
+        ll_ok = ll.where((ll > 0) & fluxo_ok & num("dividendos_pagos").notna())
+        base["lucro_base_payout"] = ll_ok
+        base["payout_ll"] = num("dividendos_pagos") / ll_ok
+        base["g_estrutural"] = (num("roe_pl_final") * (1 - base["payout_ll"])).where(fluxo_ok)
+    except Exception:
+        for c in ("lucro_base_payout", "payout_ll", "g_estrutural"):
+            base[c] = np.nan
     return base
 
 
@@ -2013,6 +2041,12 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
     d = df.assign(_c=col_periodo(df))
     if METRICAS[m][1] == "mm":
         return d.groupby("_c")[m].sum(min_count=1)
+    if m == "g_estrutural":
+        # setor = ROE agregado × (1 − payout agregado), ambos sobre as mesmas empresas (as que têm o indicador)
+        ok = df[df["g_estrutural"].notna()]
+        if ok.empty:
+            return pd.Series(dtype=float)
+        return (agregado_setor(ok, "roe_pl_final") * (1 - agregado_setor(ok, "payout_ll"))).astype(float)
     if m in ("gao", "gaf", "gat"):
         num, den = {"gao": ("cresc_ebit", "cresc_receita"), "gaf": ("cresc_lucro_liquido", "cresc_ebit"),
                     "gat": ("cresc_lucro_liquido", "cresc_receita")}[m]
@@ -2029,7 +2063,7 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
         return (g[c] / g[c + "_ant"] - 1).astype(float)
     if m in AGREG:
         if tipo == "trimestral" and m in ("roe_pl_final", "div_liq_ebitda_ifrs16", "div_liq_ebitda_pre_ifrs16",
-                                           "div_liq_ebitda_ajustado"):
+                                           "div_liq_ebitda_ajustado", "payout_ll"):
             return pd.Series(dtype=float)
         n, dn = AGREG[m]
         ok = d.dropna(subset=[n, dn])
@@ -3756,6 +3790,12 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   Dívida e arrendamento na mesma linha da DFC: só os índices com arrendamento no denominador são calculados; os
   índices com arrendamento no numerador ficam vazios. IR pago aceita linhas "pagos e retidos".
 - DuPont: ROE (lucro líquido ÷ PL) = margem líquida × giro × alavancagem.
+- Payout = dividendos + JCP pagos no período (DFC, regime de caixa, só acionistas da controladora) ÷ lucro líquido
+  dos controladores do mesmo período (sem a linha, lucro líquido total). Vazio com lucro ≤ 0 e no trimestral. Por
+  ser caixa, o dividendo pago num exercício costuma referir-se ao lucro do anterior; sem corte em 100%.
+  Crescimento estrutural (sustentável) = ROE (LL ÷ PL final) × (1 − payout): crescimento do PL só com lucro retido,
+  sem aumento de capital. Payout > 100% => crescimento estrutural negativo. Setor = ROE agregado × (1 − payout
+  agregado), com payout agregado = Σ dividendos ÷ Σ lucro das empresas com lucro > 0.
 - Graus de alavancagem também na visão do setor (por empresa e, sem recorte, por setor sobre os agregados).
 - Crescimento contra o mesmo período do ano anterior (anual ou LTM). GAO = Δ% EBIT ÷ Δ% receita;
   GAF = Δ% lucro líquido ÷ Δ% EBIT; GAT = GAO × GAF. Vazios quando o denominador varia menos de 1%.
