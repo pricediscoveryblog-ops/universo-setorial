@@ -158,6 +158,22 @@ def ima_b_anbima(ini, fim=None, paralelo: int = 6) -> pd.Series:
     return pd.Series(vals, index=dias, dtype=float).dropna()
 
 
+def serie_confiavel(s: pd.Series, max_parada_du: int = 15, max_salto: float = 0.08) -> bool:
+    """Rejeita séries com cotação parada por muitos dias úteis seguidos ou saltos diários grandes (sinal de dado
+    ruim, como já visto no IMAB11 do Yahoo). Para um índice de renda fixa, ambos são impossíveis."""
+    s = s.dropna().sort_index()
+    if len(s) < 5:
+        return False
+    du = pd.bdate_range(s.index.min(), s.index.max())
+    if len(du) > 1.5 * len(s):                        # faltam dias demais
+        return False
+    r = s.pct_change().dropna()
+    if (r.abs() > max_salto).any():
+        return False
+    parado = (r == 0).astype(int)
+    return int(parado.groupby((parado == 0).cumsum()).sum().max() or 0) <= max_parada_du
+
+
 def _emendar(base: pd.Series, ext: pd.Series) -> pd.Series:
     """Continua 'base' com as variações de 'ext' depois da última data de 'base' (escala pela data comum mais
     recente; sem data comum, junta os níveis como estão)."""
@@ -182,9 +198,12 @@ def ima_b(ant: pd.Series | None = None) -> pd.DataFrame:
         s = _emendar(base, novo)
     else:
         etf = yahoo("IMAB11.SA", base.index.max() - pd.Timedelta(days=30))
-        s = _emendar(base, etf)
-        if len(etf):
+        if len(etf) and serie_confiavel(etf):
+            s = _emendar(base, etf)
             fonte += "; trecho final pela variação do ETF IMAB11 (ANBIMA indisponível)"
+        else:
+            s = base
+            fonte += "; sem atualização recente (ANBIMA e IMAB11 indisponíveis)"
     return _df(s, "IMA-B", "IMA-B", fonte)
 
 
@@ -194,8 +213,11 @@ def ima_b_rapido() -> pd.DataFrame:
     if base.empty:
         return pd.DataFrame(columns=COLS)
     etf = yahoo("IMAB11.SA", base.index.max() - pd.Timedelta(days=30))
-    return _df(_emendar(base, etf), "IMA-B", "IMA-B",
-               "ANBIMA via BCB/SGS 12466 até mai/2023; depois, variação do ETF IMAB11 (aproximação)")
+    if len(etf) and serie_confiavel(etf):
+        return _df(_emendar(base, etf), "IMA-B", "IMA-B",
+                   "ANBIMA via BCB/SGS 12466 até mai/2023; depois, variação do ETF IMAB11 (aproximação)")
+    return _df(base, "IMA-B", "IMA-B", "ANBIMA via BCB/SGS 12466, só até mai/2023 (série completa: próxima "
+                                       "execução do coletor mercado.py)")
 
 
 def eua(nome: str) -> pd.DataFrame:
