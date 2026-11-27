@@ -11,8 +11,9 @@ Dados de mercado complementares para o app (saidas/mercado/):
    recente de cada companhia, com a cadeia de controle (ID do acionista e do acionista relacionado) e quantidades
    ON/PN; distribuicao_capital.parquet — ações em circulação (free float) informadas no FRE.
 
-3) indices.parquet — fechamento diário do Ibovespa (Yahoo Finance, ^BVSP) desde 2015, referência da régua das altas e
-   baixas do app.
+3) indices.parquet — séries diárias de referência desde 2015 (data, ticker, indice, fech, fonte): Ibovespa (Yahoo
+   Finance, ^BVSP; régua das altas e baixas do app), SMLL (B3), CDI acumulado (BCB/SGS 12) e IMA-B (ANBIMA, via SGS 12466
+   até mai/2023 e site da ANBIMA depois), usadas na comparação de desempenho do gráfico de cotação (app/referencias.py).
 4) carteira_ibov.parquet — carteira do dia do Ibovespa (B3, GetPortfolioDay: ticker, participação %, quantidade teórica,
    setor B3), acumulada por data (uma foto por pregão coletado), base do mapa de composição do índice no app.
 
@@ -28,6 +29,9 @@ import numpy as np
 import pandas as pd
 
 import coletor_setorial as cs
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "app"))
+import referencias as ref  # noqa: E402  (módulo sem Streamlit, compartilhado com o app)
 
 SAIDA = Path("saidas/mercado")
 FRE = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/fre_cia_aberta_{ano}.zip"
@@ -202,23 +206,56 @@ def acionistas() -> tuple[pd.DataFrame, pd.DataFrame]:
     return out[0], out[1]
 
 
-def indices() -> pd.DataFrame:
+def _ibovespa(ant: pd.DataFrame) -> pd.DataFrame:
     """Ibovespa diário (Yahoo Finance). Acumula: baixa tudo desde 2015 na primeira vez, depois só o último mês."""
-    import yfinance as yf
-    arq = SAIDA / "indices.parquet"
-    ant = pd.read_parquet(arq) if arq.exists() else pd.DataFrame(columns=["data", "ticker", "indice", "fech"])
+    ant = ant[ant["ticker"] == "^BVSP"]
     ini = "2015-01-01" if ant.empty else (pd.Timestamp.today() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-    h = yf.Ticker("^BVSP").history(start=ini, auto_adjust=False)
-    if h is None or h.empty:
+    s = ref.yahoo("^BVSP", ini)
+    if s.empty:
         print("  ! Ibovespa: Yahoo não devolveu dados")
         return ant
-    novo = pd.DataFrame({"data": pd.to_datetime(h.index).tz_localize(None).normalize(), "ticker": "^BVSP",
-                         "indice": "Ibovespa", "fech": h["Close"].to_numpy(float)})
-    out = pd.concat([ant, novo], ignore_index=True) if len(ant) else novo
+    return pd.concat([ant, ref._df(s, "^BVSP", "Ibovespa", "Yahoo Finance (^BVSP)")], ignore_index=True)
+
+
+def _smll(ant: pd.DataFrame) -> pd.DataFrame:
+    """SMLL (B3): todos os anos desde 2015 na primeira vez; depois, o ano corrente (e o anterior em janeiro)."""
+    ant = ant[ant["ticker"] == "SMLL"]
+    hoje = date.today()
+    anos = range(2015, hoje.year + 1) if ant.empty else sorted({hoje.year, (hoje - pd.Timedelta(days=31)).year})
+    return pd.concat([ant, ref.smll(anos)], ignore_index=True)
+
+
+def _ima_b(ant: pd.DataFrame) -> pd.DataFrame:
+    a = ant[ant["ticker"] == "IMA-B"].sort_values("data")
+    s = pd.Series(a["fech"].to_numpy(float), index=pd.to_datetime(a["data"])) if len(a) else None
+    return ref.ima_b(s)
+
+
+def indices() -> pd.DataFrame:
+    """Séries de referência (Ibovespa, SMLL, CDI, IMA-B). Cada uma é independente: falha numa mantém a versão
+    anterior dela no arquivo e não derruba as outras."""
+    arq = SAIDA / "indices.parquet"
+    ant = pd.read_parquet(arq) if arq.exists() else pd.DataFrame(columns=ref.COLS)
+    if "fonte" not in ant:
+        ant["fonte"] = np.where(ant["ticker"] == "^BVSP", "Yahoo Finance (^BVSP)", "")
+    ant["data"] = pd.to_datetime(ant["data"])
+    partes = []
+    for nome, tk, f in (("Ibovespa", "^BVSP", _ibovespa), ("SMLL", "SMLL", _smll),
+                        ("CDI", "CDI", lambda a: ref.cdi()), ("IMA-B", "IMA-B", _ima_b)):
+        try:
+            t0 = time.time()
+            x = f(ant)
+            if x is None or x.empty:
+                raise ValueError("série vazia")
+            partes.append(x)
+            print(f"  {nome}: {len(x)} pontos até {pd.to_datetime(x['data']).max().date()} ({time.time() - t0:.0f}s)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! {nome}: {type(e).__name__}: {str(e)[:150]} — mantida a versão anterior")
+            partes.append(ant[ant["ticker"] == tk])
+    out = pd.concat([p for p in partes if len(p)], ignore_index=True)
     out["data"] = pd.to_datetime(out["data"])
     out = out.drop_duplicates(["ticker", "data"], keep="last").sort_values(["ticker", "data"])
-    print(f"Ibovespa: {len(out)} fechamentos, último {out['data'].max().date()}")
-    return out
+    return out[ref.COLS]
 
 
 B3_INDICES = "https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay"
@@ -303,7 +340,7 @@ def main(qual: str = "tudo"):
         try:
             indices().to_parquet(SAIDA / "indices.parquet", index=False)
         except Exception as e:  # noqa: BLE001 — índice de referência não pode derrubar o resto
-            print(f"  ! Ibovespa: {type(e).__name__}: {str(e)[:120]}")
+            print(f"  ! Índices: {type(e).__name__}: {str(e)[:120]}")
     if qual in ("carteira", "tudo"):
         try:
             c = carteira_ibov()
