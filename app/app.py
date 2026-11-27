@@ -307,7 +307,8 @@ st.set_page_config(page_title="Price Discovery Scanning " + ("USA" if globals().
 
 # ------------------------------------------------------------------ mercado: Brasil / EUA
 # No modo EUA o app carrega a base americana (coletor-eua, dados da SEC; módulo app/eua.py) no lugar da brasileira
-# e roda as MESMAS abas. Abas e seções que dependem de dados só brasileiros (altas e baixas, calendário da CVM,
+# e roda as MESMAS abas. Abas e seções que dependem de dados só brasileiros (altas e baixas, calendário da CVM — nos EUA
+# substituído pelo calendário Nasdaq + SEC, módulo app/eua_calendario_aba.py —,
 # bancos e seguradoras, debêntures, aluguel de ações) ficam ocultas. Juros e Macro têm versão própria dos EUA
 # (Treasuries, CPI, PIB e dólar via FRED; módulo app/eua_macro_aba.py).
 # Dois apps (nov/2026): Price Discovery Scanning BR (entrada app/app.py) e Price Discovery Scanning USA (entrada
@@ -355,6 +356,17 @@ def eua_macro_mod():
         eua_macro_aba = importlib.reload(eua_macro_aba)
         eua_macro_aba._mtime_carregado = mt
     return eua_macro_aba
+
+
+def eua_calendario_mod():
+    """Módulo da aba Calendário de resultados do modo EUA (mesma razão de macro_mod)."""
+    import importlib
+    import eua_calendario_aba
+    mt = os.path.getmtime(eua_calendario_aba.__file__)
+    if getattr(eua_calendario_aba, "_mtime_carregado", None) != mt:
+        eua_calendario_aba = importlib.reload(eua_calendario_aba)
+        eua_calendario_aba._mtime_carregado = mt
+    return eua_calendario_aba
 
 
 def universo_tickers() -> dict:
@@ -2007,13 +2019,14 @@ def secao_crescimento_dupont(rotulo: str, cmp, nome_cmp: str):
 
 # ------------------------------------------------------------------ abas
 if EUA:
-    _abas_eua = ["Altas e baixas", "Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Juros (Treasuries)",
+    _abas_eua = ["Altas e baixas", "Visão do setor", "Empresa", "Ranking", "Filtro por indicador",
+                 "Calendário de resultados", "Juros (Treasuries)",
                  "Macro EUA (inflação, PIB, dólar)", "Dados e download", "Cobertura", "Metodologia"]
     if st.session_state.get("aba_principal") not in (None, *_abas_eua):
         st.session_state["aba_principal"] = "Altas e baixas"
-    aba_var, aba_setor, aba_emp, aba_rank, aba_scr, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
+    aba_var, aba_setor, aba_emp, aba_rank, aba_scr, aba_cal, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         _abas_eua, key="aba_principal", on_change="rerun")
-    aba_cal = aba_fin = None          # sem dados nos EUA (blocos abaixo ficam desligados)
+    aba_fin = None          # sem dados nos EUA (bloco de bancos e seguradoras fica desligado)
 else:
     aba_var, aba_setor, aba_emp, aba_rank, aba_scr, aba_cal, aba_fin, aba_jur, aba_mac, aba_dados, aba_cob, aba_met = st.tabs(
         ["Altas e baixas", "Visão do setor", "Empresa", "Ranking", "Filtro por indicador", "Calendário de resultados",
@@ -3226,7 +3239,13 @@ def carregar_entregas(versao: tuple = ()) -> pd.DataFrame:
     return e.drop_duplicates(["cnpj", "documento", "dt_refer"])     # primeira entrega de cada documento
 
 
-if not EUA:          # sem dados equivalentes nos EUA
+if EUA:              # calendário da Nasdaq + entregas de 10-Q/10-K à SEC (módulo app/eua_calendario_aba.py)
+    with aba_cal:
+        try:
+            eua_calendario_mod().render(base, mult, tabela_clicavel)
+        except Exception as e:  # noqa: BLE001  (a aba não derruba o app)
+            st.error(f"Não foi possível montar o calendário: {e}")
+else:
     with aba_cal:
         ent = carregar_entregas(versao_arquivos(DADOS / "entregas.csv.gz", DADOS / "entregas_rad.csv.gz"))
         if ent.empty:
