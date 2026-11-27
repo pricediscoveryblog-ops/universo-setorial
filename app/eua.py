@@ -48,6 +48,8 @@ ROTULOS_EUA = {
     "dividend_yield": "Dividend yield (dividendos pagos 12m)",
     "roic_caixa": "ROIC caixa (NOPAT + D&A − capex org. − arrend. financ. ÷ CI)",
     "roic_trad": "ROIC tradicional (NOPAT aj. ÷ CI c/ arrendamentos)",
+    "roic_caixa_ex_goodwill": "ROIC caixa ex-goodwill (numerador do ROIC caixa ÷ CI − goodwill)",
+    "goodwill": "Goodwill (ASC 350)",
 }
 # métricas que só existem na base americana (entram na lista do app no modo EUA)
 EXTRAS_EUA = {
@@ -157,7 +159,7 @@ COLUNAS = [
     "div_liq_ebitda_pre_ifrs16"]
 # ROIC: calculado no coletor (coletor_eua.derivar) e só lido aqui, se o parquet já tiver as colunas (calcular no app
 # estourou a memória do Streamlit gratuito)
-COLUNAS_ROIC = ["roic_caixa", "roic_trad"]
+COLUNAS_ROIC = ["roic_caixa", "roic_trad", "roic_caixa_ex_goodwill", "goodwill"]  # opcionais: lidas se existirem
 
 
 def compactar(df: pd.DataFrame) -> pd.DataFrame:
@@ -421,7 +423,9 @@ descontado no EBIT:
   NOPAT ajustado soma ao EBIT os juros implícitos do arrendamento operacional (passivo operacional × custo da dívida da
   empresa, juros pagos ÷ dívida bruta, entre 3% e 12%; sem dado, 6%; nunca acima do custo de arrendamento operacional
   divulgado), para o EBIT ficar no critério do IFRS 16 e comparável ao ROIC tradicional brasileiro.
-- Sem ajuste de goodwill (igual à base brasileira).
+- ROIC caixa ex-goodwill = numerador do ROIC caixa ÷ (capital do ROIC caixa − goodwill do balanço, tag Goodwill;
+  sem a tag = 0). Intangíveis identificados na aquisição continuam no capital. ROIC caixa e tradicional seguem sem
+  ajuste de goodwill (igual à base brasileira).
 
 **Dívida e caixa.** Dívida bruta = LongTermDebt (inclui a parcela corrente) + empréstimos de curto prazo +
 commercial paper (com alternativas por empresa). Caixa = caixa e equivalentes + aplicações de curto prazo.

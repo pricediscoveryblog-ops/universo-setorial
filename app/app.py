@@ -156,6 +156,7 @@ METRICAS = {
     "caixa": ("Caixa + aplicações CP", "mm", "Balanço e dívida"),
     "divida_bruta_ex_arrend": ("Dívida bruta ex-arrendamento", "mm", "Balanço e dívida"),
     "passivo_arrendamento": ("Passivo de arrendamento", "mm", "Balanço e dívida"),
+    "goodwill": ("Goodwill (ágio por rentabilidade futura) no intangível", "mm", "Balanço e dívida"),
     "div_liq_com_arrend": ("Dívida líquida c/ arrendamento", "mm", "Balanço e dívida"),
     "div_liq_sem_arrend": ("Dívida líquida s/ arrendamento", "mm", "Balanço e dívida"),
     "patrimonio_liquido": ("Patrimônio líquido", "mm", "Balanço e dívida"),
@@ -168,6 +169,8 @@ METRICAS = {
     "roe_pl_final": ("ROE (LL / PL final)", "pct", "Margens e retorno"),
     "roic_caixa": ("ROIC caixa (NOPAT + D&A − capex org. − arrend. ÷ CI)", "pct", "Margens e retorno"),
     "roic_trad": ("ROIC tradicional (NOPAT ÷ CI c/ arrendamento)", "pct", "Margens e retorno"),
+    "roic_caixa_ex_goodwill": ("ROIC caixa ex-goodwill (numerador do ROIC caixa ÷ CI − goodwill)", "pct",
+                               "Margens e retorno"),
     "capex_org_receita": ("Capex orgânico / receita", "pct", "Margens e retorno"),
     "conversao_fco_ebitda": ("Conversão de caixa (FCO comparável ÷ EBITDA IFRS 16)", "pct", "Margens e retorno"),
     "capex_org_da": ("Capex orgânico / D&A", "x", "Alavancagem e múltiplos"),
@@ -377,12 +380,14 @@ def carregar(versao: tuple = ()):
 
 
 # ROIC (variante Price Discovery, nov/2026). Esta função é a da base brasileira (IFRS 16); a americana usa
-# eua.calc_roic (US GAAP / ASC 842: arrend. operacional no opex, alíquota de 25%). Sem ajuste de goodwill.
+# eua.calc_roic (US GAAP / ASC 842: arrend. operacional no opex, alíquota de 25%). Ajuste de goodwill só no ROIC caixa ex-goodwill.
 #   NOPAT = EBIT × (1 − 34%) se EBIT > 0 (sem crédito fiscal sobre prejuízo)
 #   ROIC caixa = (NOPAT + D&A − capex orgânico − pagamento de arrendamento) ÷ (DL s/ arrend. + PL)
 #     sem pagamento identificado na DFC e com passivo de arrendamento: pagamento sai do numerador e
 #     2,5 × passivo de arrendamento entra no capital (roic_arrend_capitalizado = True)
 #   ROIC tradicional = NOPAT ÷ (DL s/ arrend. + passivo de arrendamento + PL)
+#   ROIC caixa ex-goodwill = numerador do ROIC caixa ÷ (CI do ROIC caixa − goodwill do intangível)
+#     goodwill = conta 1.02.04.02 ou subconta do intangível com ágio/goodwill no nome (coletor); sem linha = 0
 #   Capital no fim do período; vazio no trimestral (fluxo de 1 trimestre) e com capital ≤ 0.
 ALIQ_IR_BR = 0.34
 MULT_ARREND_FALLBACK = 2.5
@@ -408,6 +413,14 @@ def calc_roic(base: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         for c in ("roic_caixa", "roic_trad", "roic_arrend_capitalizado"):
             base[c] = np.nan
+        return base
+    # ex-goodwill à parte: base gerada antes do coletor capturar o goodwill fica só sem esta métrica
+    try:
+        gw = pd.to_numeric(base["goodwill"], errors="coerce").fillna(0)
+        ci_ex_gw = ci_caixa - gw
+        base["roic_caixa_ex_goodwill"] = (num_caixa / ci_ex_gw.where(ci_ex_gw > 0)).where(fluxo_ok)
+    except Exception:
+        base["roic_caixa_ex_goodwill"] = np.nan
     return base
 
 
@@ -3450,6 +3463,14 @@ shoppings, imóveis, holdings e demais empresas do setor "Financeiro" da B3 est�
   financeiros, inclusive ágio; fora recebíveis, estoques, tributos e ativos biológicos). Quando a DFC junta D&A e
   impairment numa linha, o impairment está dentro da D&A (com nota). Não inclui outros ajustes que as empresas divulgam.
 - EBITDA pré-IFRS 16 = EBITDA − pagamentos de arrendamento (principal + juros) da DFC; antes de 2019 = EBITDA.
+- ROIC (variante Price Discovery; capital no fim do período; só anual e LTM; vazio com capital ≤ 0). NOPAT = EBIT ×
+  (1 − 34%) se EBIT > 0. ROIC caixa = (NOPAT + D&A − capex orgânico − pagamento de arrendamento) ÷ (DL s/ arrend. +
+  PL); sem pagamento de arrendamento na DFC e com passivo, 2,5 × passivo entra no capital. ROIC tradicional = NOPAT ÷
+  (DL s/ arrend. + passivo de arrendamento + PL). ROIC caixa ex-goodwill = numerador do ROIC caixa ÷ (capital do ROIC
+  caixa − goodwill): goodwill = conta 1.02.04.02 "Goodwill" ou subconta do intangível com "ágio"/"goodwill"/
+  "rentabilidade futura" no nome (fora deságio e ágio de direito de concessão, que é intangível pelo ICPC 09). Sem
+  linha identificada vale 0 — empresa que deixa o goodwill dentro de "Intangíveis" sem abertura fica com o ex-goodwill
+  igual ao ROIC caixa. Mais-valia de ativos e ágio de coligadas (em Investimentos) continuam no capital.
 - Concessões do modelo do intangível (segmentos B3: exploração de rodovias, água e saneamento, serviços de apoio e
   armazenagem, transporte ferroviário e hidroviário; energia elétrica fica de fora por ter ativo financeiro/de
   contrato): a receita de construção da infraestrutura (ICPC 01) sai da receita líquida e o custo de construção sai
