@@ -222,8 +222,10 @@ def render(base: pd.DataFrame, mult: pd.DataFrame, tabela_clicavel) -> None:
             sup = pas["surpresa_pct"]
             m1, m2, m3 = st.columns(3)
             m1.metric("Divulgaram no período", f"{n}")
-            m2.metric("Acima do consenso", f"{(sup > 0).sum()}", f"{(sup > 0).mean():.0%}" if n else None,
-                      delta_color="off")
+            n_c = int(sup.notna().sum())
+            m2.metric("Acima do consenso", f"{int((sup > 0).sum())} de {n_c}",
+                      f"{(sup > 0).sum() / n_c:.0%}" if n_c else None, delta_color="off",
+                      help="Só empresas com consenso de EPS na Nasdaq (as demais não têm surpresa calculada).")
             m3.metric("Surpresa mediana", f"{sup.median():+.1f}%" if sup.notna().any() else "—")
             pas = pas.sort_values(["data", "valor_mercado_usd"], ascending=[False, False])
             tab = pas.assign(data=lambda x: x["data"].dt.date,
