@@ -513,8 +513,9 @@ def _grafico_comparacao(serie: pd.Series, tk: str, sel_ref: list, sel_cesta: lis
 # ================================================================== tela: cotação, valor de mercado e EV
 def secao_cotacao(raiz: str, cnpj: str, nome: str, eua: bool = False, ticker_eua: str | None = None,
                   vm_ev_eua: pd.DataFrame | None = None, moeda: str = "R$", chave: str = "cot",
-                  universo: dict | None = None, cesta_padrao: list | None = None):
-    """universo: {rótulo 'TICKER — Empresa': ticker} das empresas que podem entrar na cesta de comparação;
+                  universo: dict | None = None, cesta_padrao: list | None = None, vm_ev: bool = True):
+    """vm_ev=False: não desenha o gráfico simples de valor de mercado e EV (a aba Empresa usa o gráfico com
+    sobreposições do app). universo: {rótulo 'TICKER — Empresa': ticker} das empresas que podem entrar na cesta de comparação;
     cesta_padrao: rótulos já escolhidos como cesta na aba (pré-selecionados)."""
     st.subheader("Cotação, valor de mercado e EV")
     if eua:
@@ -627,6 +628,8 @@ def secao_cotacao(raiz: str, cnpj: str, nome: str, eua: bool = False, ticker_eua
                     st.plotly_chart(fig2, width="stretch", key=f"{chave}_prov_ano")
 
     # ---- valor de mercado e EV diários
+    if not vm_ev:
+        return
     v = vm_ev_eua if eua else vm_ev_br(cnpj, _versao("vm_ev_*.parquet"))
     if v is None or v.empty:
         return
