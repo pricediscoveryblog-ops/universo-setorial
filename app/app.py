@@ -1392,7 +1392,8 @@ else:
 # Base em cache de uma versão anterior do código: o Streamlit Cloud aplica um commit novo sem reiniciar o processo e o
 # cache de carregar()/carregar_eua() só olha os arquivos de dados, não o código das derivadas. Métrica nova ausente ->
 # limpa o cache e recarrega uma vez; se ainda faltar, a coluna entra vazia (a aba não cai com KeyError).
-_faltam_base = [c for c in CRESC_BASE if c in base.columns and "cresc_" + c not in base.columns]
+_faltam_base = [c for c in CRESC_BASE if c in base.columns and "cresc_" + c not in base.columns] + \
+               [c for c in ("payout_ll", "lucro_base_payout", "g_estrutural") if c not in base.columns]
 if _faltam_base and not st.session_state.get("_base_recarregada"):
     st.session_state["_base_recarregada"] = True
     carregar.clear()
@@ -2066,6 +2067,8 @@ def agregado_setor(df: pd.DataFrame, m: str) -> pd.Series:
                                            "div_liq_ebitda_ajustado", "payout_ll"):
             return pd.Series(dtype=float)
         n, dn = AGREG[m]
+        if n not in d.columns or dn not in d.columns:     # base em cache sem a coluna auxiliar: sem agregado
+            return pd.Series(dtype=float)
         ok = d.dropna(subset=[n, dn])
         if m in AGREG_DEN_POS:
             ok = ok[ok[dn] > 0]
